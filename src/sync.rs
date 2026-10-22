@@ -175,7 +175,12 @@ async fn folders(app: &App, acc: &Account, s: &mut Imap) -> Result<Vec<Folder>> 
 
 /// Brings one folder in line with the provider; returns how many new messages.
 async fn sync_folder(app: &App, acc: &Account, s: &mut Imap, f: &Folder) -> Result<usize> {
-    let mb = s.select(&f.remote).await?;
+    let mb = match s.select(&f.remote).await {
+        Ok(mb) => mb,
+        // Deleted since it was listed: the next round forgets it.
+        Err(async_imap::error::Error::No(_)) => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
     let validity = mb.uid_validity.unwrap_or(0);
     let (known, mut last) = app.mail.remote_state(f.mailbox);
     if known.is_some_and(|v| v != validity) {

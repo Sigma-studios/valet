@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS ops (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, op TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS tokens (account TEXT PRIMARY KEY, refresh TEXT NOT NULL, access TEXT, expires INTEGER);
 CREATE TABLE IF NOT EXISTS status (account TEXT PRIMARY KEY, ok INTEGER NOT NULL, message TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS doomed (mailbox INTEGER NOT NULL, blob TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS invites (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, uid TEXT NOT NULL, method TEXT NOT NULL, sequence INTEGER NOT NULL,
@@ -296,6 +297,32 @@ impl MailStore {
         Ok(())
     }
 
+    /// After a rename at the provider: the folder and its subfolders take
+    /// their new remote and local names, keeping their messages.
+    pub fn rename_mailboxes(&self, account: &str, old_remote: &str, new_remote: &str, delim: &str, old_name: &str, new_name: &str) -> Result<()> {
+        {
+            let c = self.db();
+            let tx = c.unchecked_transaction()?;
+            let rows: Vec<(i64, String, String)> = {
+                let mut st = tx.prepare("SELECT id, remote, name FROM mailboxes WHERE account = ?1")?;
+                st.query_map([account], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.filter_map(Result::ok).collect()
+            };
+            let child_remote = format!("{old_remote}{delim}");
+            let child_name = format!("{old_name}/");
+            for (id, remote, name) in rows {
+                if remote != old_remote && !remote.starts_with(&child_remote) {
+                    continue;
+                }
+                let remote = format!("{new_remote}{}", &remote[old_remote.len()..]);
+                let name = if name == old_name || name.starts_with(&child_name) { format!("{new_name}{}", &name[old_name.len()..]) } else { name };
+                tx.execute("UPDATE mailboxes SET remote = ?2, name = ?3 WHERE id = ?1", params![id, remote, name])?;
+            }
+            tx.commit()?;
+        }
+        self.notify();
+        Ok(())
+    }
+
     /// (remote UIDVALIDITY, highest remote UID fetched).
     pub fn remote_state(&self, mailbox: i64) -> (Option<u32>, u32) {
         let c = self.db();
@@ -388,6 +415,14 @@ impl MailStore {
                 return Ok((id, false));
             }
             let blob = Self::put_blob(&c, raw)?;
+            let doomed = c.execute("DELETE FROM doomed WHERE rowid = (SELECT rowid FROM doomed WHERE mailbox = ?1 AND blob = ?2 LIMIT 1)", params![mailbox, blob])?;
+            if doomed > 0 {
+                drop(c);
+                if let Some((account, remote)) = self.remote_of(mailbox) {
+                    self.enqueue(&account, &Op::Expunge { remote, uid: remote_uid })?;
+                }
+                return Ok((0, false));
+            }
             let placeholder: Option<i64> = c
                 .query_row(
                     "SELECT id FROM messages WHERE mailbox = ?1 AND remote_uid IS NULL AND link IS NULL
@@ -530,8 +565,22 @@ impl MailStore {
         for &id in ids {
             let Some(m) = self.message(id) else { continue };
             let src = self.source(m);
-            if let (Some(uid), Some((account, remote))) = (src.remote_uid, self.remote_of(src.mailbox)) {
-                self.enqueue(&account, &Op::Expunge { remote, uid })?;
+            match (src.remote_uid, self.remote_of(src.mailbox)) {
+                (Some(uid), Some((account, remote))) => self.enqueue(&account, &Op::Expunge { remote, uid })?,
+                // Not at the provider yet: it won't be (a draft saved again before it got there).
+                // Not at the provider yet: it won't be, if the append is still
+                // waiting; if it is on its way, it goes as soon as it comes back.
+                (None, Some((account, _))) => {
+                    let c = self.db();
+                    let cancelled = c.execute(
+                        "DELETE FROM ops WHERE account = ?1 AND instr(op, '\"op\":\"append\"') > 0 AND instr(op, ?2) > 0",
+                        params![account, src.blob],
+                    )?;
+                    if cancelled == 0 {
+                        c.execute("INSERT INTO doomed (mailbox, blob) VALUES (?1, ?2)", params![src.mailbox, src.blob])?;
+                    }
+                }
+                _ => {}
             }
             let c = self.db();
             c.execute("DELETE FROM messages WHERE id = ?1 OR link = ?1 OR id = ?2", params![src.id, id])?;
@@ -582,6 +631,12 @@ impl MailStore {
 
     /// APPEND: returns the new UID.
     pub fn append(&self, target: i64, raw: &[u8], flags: &[String], date: i64) -> Result<u32> {
+        let id = self.append_row(target, raw, flags, date)?;
+        Ok(self.message(id).map(|m| m.uid).unwrap_or(0))
+    }
+
+    /// Like [`append`](Self::append), returning the new row's id.
+    pub fn append_row(&self, target: i64, raw: &[u8], flags: &[String], date: i64) -> Result<i64> {
         let (account, remote) = self.remote_of(target).context("can't append to INBOX: pick an account's folder")?;
         let id = {
             let c = self.db();
@@ -593,7 +648,7 @@ impl MailStore {
             id
         };
         self.notify();
-        Ok(self.message(id).map(|m| m.uid).unwrap_or(0))
+        Ok(id)
     }
 
     // Ops

@@ -1,6 +1,7 @@
 mod accounts;
 mod alarms;
 mod dav;
+mod folders;
 mod ical;
 mod imapd;
 mod import;
