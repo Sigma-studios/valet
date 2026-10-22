@@ -71,7 +71,8 @@ const CSS: &str = r#"
 body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
 header { border-bottom:1px solid var(--line); background:var(--card); }
 nav { max-width:960px; margin:0 auto; padding:10px 16px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
-nav a { color:var(--fg); text-decoration:none; } nav a.on { color:var(--accent); font-weight:600; }
+a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
+nav a { color:var(--fg); } nav a.on { color:var(--accent); font-weight:600; }
 nav .brand { font-weight:700; margin-right:8px; } nav form { margin-left:auto; }
 main { max-width:960px; margin:0 auto; padding:16px; }
 h1 { font-size:22px; margin:8px 0 16px; } h2 { font-size:17px; margin:24px 0 8px; }
