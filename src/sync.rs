@@ -76,6 +76,7 @@ fn flag_list(flags: &[String]) -> String {
 
 async fn session(app: &App, acc: &Account) -> Result<()> {
     let mut s = accounts::imap(acc, &app.mail).await?;
+    tracing::info!(account = %acc.id, "logged in");
     let caps = s.capabilities().await?;
     let has_move = caps.has_str("MOVE");
     let has_uidplus = caps.has_str("UIDPLUS");
@@ -85,7 +86,12 @@ async fn session(app: &App, acc: &Account) -> Result<()> {
         replay(app, acc, &mut s, has_move, has_uidplus).await?;
         let folders = folders(app, acc, &mut s).await?;
         let mut fetched = 0;
-        for f in &folders {
+        let first = app.mail.status(&acc.id).is_none_or(|(ok, _, _)| !ok);
+        for (i, f) in folders.iter().enumerate() {
+            if first {
+                let name = mutf7::decode(&f.remote);
+                app.mail.set_status(&acc.id, true, &format!("connected, fetching mail: folder {} of {} ({name}), {fetched} messages so far", i + 1, folders.len()));
+            }
             fetched += sync_folder(app, acc, &mut s, f).await?;
         }
         app.mail.set_status(&acc.id, true, &format!("{} folders in sync{}", folders.len(), if fetched > 0 { format!(", {fetched} new") } else { String::new() }));
