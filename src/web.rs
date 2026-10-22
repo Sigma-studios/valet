@@ -775,6 +775,11 @@ async fn connect_page(State(app): St, headers: HeaderMap) -> Response {
 
 // Mail
 
+/// A Microsoft account whose login ends on an address to paste back here.
+fn pastes(a: &crate::accounts::Account) -> bool {
+    a.oauth.as_ref().is_some_and(|o| o.redirect_uri.is_some())
+}
+
 fn when_unix(t: i64) -> String {
     crate::util::imap_datetime(t).trim_end_matches(" +0000").to_string() + " UTC"
 }
@@ -808,20 +813,24 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
                 @if let Some(e) = op_error { p.small.err { "Last refused change: " (e) } }
                 div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center" {
                     @if a.oauth.is_some() {
-                        form method="post" action={"/mail/oauth/" (a.id) "/start"} {
+                        form method="post" action={"/mail/oauth/" (a.id) "/start"} target=[pastes(a).then_some("_blank")] {
                             button type="submit" { @if app.mail.token(&a.id).is_some() { "Log in to Microsoft again" } @else { "Log in to Microsoft" } }
                         }
                     }
                     a href={"/mail/accounts/" (a.id)} { "Edit" }
                 }
-            }
-        }
-        @if accounts.iter().any(|a| a.oauth.as_ref().is_some_and(|o| o.redirect_uri.is_some())) {
-            form.card method="post" action="/mail/oauth/paste" {
-                p.small { "After logging in, the browser lands on a page that fails to load (like " code { "https://localhost/?code=…" } "): paste its address here." }
-                div.row style="display:flex; gap:8px" {
-                    input name="url" required placeholder="https://localhost/?code=…" style="flex:1";
-                    button type="submit" { "Finish" }
+                @if pastes(a) {
+                    form method="post" action="/mail/oauth/paste" style="margin-top:12px" {
+                        ol.small style="margin:0 0 8px; padding-left:20px" {
+                            li { "Log in to Microsoft (it opens in a new tab)." }
+                            li { "You end on a page that doesn't load, at " code { "https://localhost/?code=…" } ": that's expected. Copy its whole address from the address bar." }
+                            li { "Paste it here within a few minutes, and press Finish." }
+                        }
+                        div style="display:flex; gap:8px" {
+                            input name="url" required placeholder="https://localhost/?code=…" style="flex:1";
+                            button type="submit" { "Finish" }
+                        }
+                    }
                 }
             }
         }
