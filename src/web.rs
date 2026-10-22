@@ -34,6 +34,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/import", get(import_page).post(import_upload))
         .route("/connect", get(connect_page))
         .route("/mail", get(mail_page))
+        .route("/mail/status", get(mail_status))
         .route("/mail/accounts/new", get(new_account_page).post(create_account))
         .route("/mail/accounts/{id}", get(edit_account_page).post(update_account))
         .route("/mail/accounts/{id}/delete", post(delete_account))
@@ -85,6 +86,12 @@ button { cursor:pointer; background:var(--accent); color:#fff; border:none; } bu
 form.row { display:flex; gap:8px; flex-wrap:wrap; align-items:end; } label { display:flex; flex-direction:column; gap:2px; font-size:13px; color:var(--muted); }
 code { background:var(--line); padding:1px 5px; border-radius:4px; word-break:break-all; }
 .scroll { overflow-x:auto; }
+.menu { position:relative; } .menu summary { list-style:none; cursor:pointer; padding:0 10px; border:1px solid var(--line); border-radius:6px; font-size:18px; line-height:28px; user-select:none; }
+.menu summary::-webkit-details-marker { display:none; }
+.menu > div { position:absolute; right:0; top:calc(100% + 4px); z-index:10; min-width:220px; display:flex; flex-direction:column; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:4px; box-shadow:0 6px 20px rgb(0 0 0 / .18); }
+.menu > div a, .menu > div button { display:block; width:100%; text-align:left; padding:7px 10px; border:none; border-radius:6px; background:none; color:var(--fg); }
+.menu > div a:hover, .menu > div button:hover { background:var(--line); text-decoration:none; }
+.menu > div button.danger { color:var(--bad); }
 "#;
 
 fn page(title: &str, on: &str, body: Markup) -> Response {
@@ -118,6 +125,8 @@ fn page(title: &str, on: &str, body: Markup) -> Response {
 struct Msg {
     ok: Option<String>,
     err: Option<String>,
+    /// Mail page: the account whose Microsoft login to show again.
+    relogin: Option<String>,
 }
 
 fn flash(m: &Msg) -> Markup {
@@ -580,7 +589,7 @@ async fn events_page(State(app): St, headers: HeaderMap, Query(q): Query<EventsQ
     let cal_name = |id: &str| calendars.iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_default();
     page("Events", "/events", html! {
         h1 { "Events" }
-        (flash(&Msg { ok: q.ok.clone(), err: q.err.clone() }))
+        (flash(&Msg { ok: q.ok.clone(), err: q.err.clone(), ..Default::default() }))
         form.row method="get" action="/events" {
             label { "Search titles" input name="q" value=(q.q); }
             label style="flex-direction:row; align-items:center; gap:6px" { input type="checkbox" name="all" value="1" checked[all]; "Past events too" }
@@ -775,6 +784,38 @@ async fn connect_page(State(app): St, headers: HeaderMap) -> Response {
 
 // Mail
 
+/// An account's sync status and counts, in an element the Mail page refreshes.
+fn account_status(app: &App, a: &crate::accounts::Account, boxes: &[crate::mailstore::Mailbox]) -> Markup {
+    html! { div id={"status-" (a.id)} { (account_status_inner(app, a, boxes)) } }
+}
+
+fn account_status_inner(app: &App, a: &crate::accounts::Account, boxes: &[crate::mailstore::Mailbox]) -> Markup {
+    let (ops, op_error) = app.mail.pending_ops(&a.id);
+    let folders: Vec<_> = boxes.iter().filter(|b| b.account.as_deref() == Some(a.id.as_str())).collect();
+    let count: u32 = folders.iter().map(|b| app.mail.count(b.id).0).sum();
+    html! {
+        @match app.mail.status(&a.id) {
+            Some((true, msg, at)) => p.ok { "● " (msg) span.muted.small { " · " (when_unix(at)) } },
+            Some((false, msg, at)) => p.err { "● " (msg) span.muted.small { " · " (when_unix(at)) } },
+            None => p.muted { "Connecting…" },
+        }
+        p.small.muted { (folders.len()) " folders, " (count) " messages kept here"
+            @if ops > 0 { " · " (ops) " changes waiting to reach the provider" } }
+        @if let Some(e) = op_error { p.small.err { "Last refused change: " (e) } }
+    }
+}
+
+/// Every account's status, for the Mail page to refresh itself.
+async fn mail_status(State(app): St, headers: HeaderMap) -> Response {
+    if !authed(&app, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let boxes = app.mail.mailboxes();
+    let all: serde_json::Map<String, serde_json::Value> =
+        app.accounts().iter().map(|a| (a.id.clone(), account_status_inner(&app, a, &boxes).into_string().into())).collect();
+    axum::Json(all).into_response()
+}
+
 /// A Microsoft account whose login ends on an address to paste back here.
 fn pastes(a: &crate::accounts::Account) -> bool {
     a.oauth.as_ref().is_some_and(|o| o.redirect_uri.is_some())
@@ -790,6 +831,10 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
     let invites = app.mail.invites();
     let calendars: Vec<Calendar> = app.store.calendars().into_iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
     let accounts = app.accounts();
+    // The Microsoft login shows until the account is connected, or when asked for again.
+    let login_shown = |a: &crate::accounts::Account| {
+        a.oauth.is_some() && (app.mail.token(&a.id).is_none() || m.relogin.as_deref() == Some(a.id.as_str()))
+    };
     page("Mail", "/mail", html! {
         h1 { "Mail accounts" }
         (flash(&m))
@@ -797,38 +842,39 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
             p.muted { "No account yet: add your mailboxes below. valet logs in to each, keeps a copy, and serves them all to your mail apps as one account." }
         }
         @for a in &accounts {
-            @let status = app.mail.status(&a.id);
-            @let (ops, op_error) = app.mail.pending_ops(&a.id);
-            @let folders: Vec<_> = boxes.iter().filter(|b| b.account.as_deref() == Some(a.id.as_str())).collect();
-            @let count: u32 = folders.iter().map(|b| app.mail.count(b.id).0).sum();
             div.card {
-                h2 style="margin-top:0" { (a.name) " " span.muted.small { (a.address) } }
-                @match &status {
-                    Some((true, msg, at)) => p.ok { "● " (msg) span.muted.small { " · " (when_unix(*at)) } },
-                    Some((false, msg, at)) => p.err { "● " (msg) span.muted.small { " · " (when_unix(*at)) } },
-                    None => p.muted { "Not connected yet." },
-                }
-                p.small.muted { (folders.len()) " folders, " (count) " messages kept here"
-                    @if ops > 0 { " · " (ops) " changes waiting to reach the provider" } }
-                @if let Some(e) = op_error { p.small.err { "Last refused change: " (e) } }
-                div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center" {
-                    @if a.oauth.is_some() {
-                        form method="post" action={"/mail/oauth/" (a.id) "/start"} target=[pastes(a).then_some("_blank")] {
-                            button type="submit" { @if app.mail.token(&a.id).is_some() { "Log in to Microsoft again" } @else { "Log in to Microsoft" } }
+                div style="display:flex; justify-content:space-between; align-items:start; gap:8px" {
+                    h2 style="margin-top:0" { (a.name) " " span.muted.small { (a.address) } }
+                    details.menu {
+                        summary aria-label="Actions" { "⋯" }
+                        div {
+                            a href={"/mail/accounts/" (a.id)} { "Edit" }
+                            @if a.oauth.is_some() && !login_shown(a) {
+                                a href={"/mail?relogin=" (a.id)} { "Log in to Microsoft again" }
+                            }
+                            form method="post" action={"/mail/accounts/" (a.id) "/delete"}
+                                onsubmit="return confirm('Remove this account from valet? Its mail stays at the provider; the copy kept here goes.')" {
+                                button.danger type="submit" { "Remove" }
+                            }
                         }
                     }
-                    a href={"/mail/accounts/" (a.id)} { "Edit" }
                 }
-                @if pastes(a) {
-                    form method="post" action="/mail/oauth/paste" style="margin-top:12px" {
-                        ol.small style="margin:0 0 8px; padding-left:20px" {
-                            li { "Log in to Microsoft (it opens in a new tab)." }
-                            li { "You end on a page that doesn't load, at " code { "https://localhost/?code=…" } ": that's expected. Copy its whole address from the address bar." }
-                            li { "Paste it here within a few minutes, and press Finish." }
-                        }
-                        div style="display:flex; gap:8px" {
-                            input name="url" required placeholder="https://localhost/?code=…" style="flex:1";
-                            button type="submit" { "Finish" }
+                (account_status(&app, a, &boxes))
+                @if login_shown(a) {
+                    form method="post" action={"/mail/oauth/" (a.id) "/start"} target="_blank" style="margin-top:8px" {
+                        button type="submit" { "Log in to Microsoft" }
+                    }
+                    @if pastes(a) {
+                        form method="post" action="/mail/oauth/paste" style="margin-top:12px" {
+                            ol.small style="margin:0 0 8px; padding-left:20px" {
+                                li { "Log in to Microsoft (it opens in a new tab)." }
+                                li { "You end on a page that doesn't load, at " code { "https://localhost/?code=…" } ": that's expected. Copy its whole address from the address bar." }
+                                li { "Paste it here within a few minutes, and press Finish." }
+                            }
+                            div style="display:flex; gap:8px" {
+                                input name="url" required placeholder="https://localhost/?code=…" style="flex:1";
+                                button type="submit" { "Finish" }
+                            }
                         }
                     }
                 }
@@ -841,6 +887,20 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
             }
             " · " a href="/mail/accounts/new" { "other (IMAP and SMTP)" }
         }
+        // Status lines follow the sync without reloading (forms being typed in stay as they are).
+        script { (PreEscaped(r#"
+setInterval(async () => {
+  if (document.hidden) return;
+  try {
+    const r = await fetch('/mail/status');
+    if (!r.ok) return;
+    for (const [id, html] of Object.entries(await r.json())) {
+      const el = document.getElementById('status-' + id);
+      if (el && el.innerHTML !== html) el.innerHTML = html;
+    }
+  } catch (_) {}
+}, 3000);
+"#)) }
         h1 { "Invitations" }
         @if invites.is_empty() {
             p.muted { "None yet: invitations arriving in your inboxes appear here and in the Invitations calendar." }
