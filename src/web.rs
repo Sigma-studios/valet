@@ -2,7 +2,6 @@
 //! choices, .ics import, and how to connect each app.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::{Form, Multipart, Path, Query, State};
@@ -34,6 +33,11 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/events/choice", post(set_choice))
         .route("/import", get(import_page).post(import_upload))
         .route("/connect", get(connect_page))
+        .route("/mail", get(mail_page))
+        .route("/mail/oauth/{account}/start", post(oauth_start))
+        .route("/mail/oauth", get(oauth_callback))
+        .route("/mail/oauth/paste", post(oauth_paste))
+        .route("/invites/{id}", post(answer_invite))
 }
 
 const COOKIE: &str = "valet_session";
@@ -95,7 +99,7 @@ fn page(title: &str, on: &str, body: Markup) -> Response {
             body {
                 header { nav {
                     span.brand { "valet" }
-                    (link("/", "Overview")) (link("/events", "Events")) (link("/patterns", "Patterns"))
+                    (link("/", "Overview")) (link("/mail", "Mail")) (link("/events", "Events")) (link("/patterns", "Patterns"))
                     (link("/calendars", "Calendars")) (link("/import", "Import")) (link("/connect", "Connect apps"))
                     form method="post" action="/logout" { button.plain type="submit" { "Log out" } }
                 } }
@@ -511,20 +515,8 @@ struct ChoiceForm {
     back: String,
 }
 
-/// Today as `YYYYMMDD` (UTC).
 fn today() -> String {
-    let days = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() / 86400).unwrap_or(0) as i64;
-    // Howard Hinnant's civil_from_days.
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}{m:02}{d:02}")
+    crate::util::today()
 }
 
 /// `2026-10-23 10:00` (or `2026-10-23, all day`) from a DTSTART value.
@@ -761,7 +753,202 @@ async fn connect_page(State(app): St, headers: HeaderMap) -> Response {
             }
         }
         p.muted.small { "Thunderbird and DAVx⁵ can also find everything from " code { (base) "/.well-known/caldav" } "." }
+
+        h1 { "Mail apps" }
+        p { "One account in each app, for all your mailboxes:" }
+        div.card.scroll { table {
+            tr { th {} th { "Server" } th { "Port" } th { "Security" } }
+            tr { td { "Incoming (IMAP)" } td { code { (host) } } td { "993" } td { "SSL/TLS" } }
+            tr { td { "Outgoing (SMTP)" } td { code { (host) } } td { "465" } td { "SSL/TLS" } }
+        } }
+        p { "User name " code { (user) } ", valet's password (normal password authentication)." }
+        p { "Then add one " b { "identity" } " (Thunderbird: account settings → Manage identities; Apple Mail: the account's Email Addresses field, comma-separated) per address, so replies go out from the address they were sent to:" }
+        ul { @for a in &app.accounts { li { code { (a.address) } " (" (a.name) ")" @for al in &a.aliases { ", " code { (al) } } } } }
+        p.muted.small { "INBOX holds every account's inbox; each account's folders are under its name. "
+            "Running valet without façade in front (on your own machine): IMAP on port 1143 and SMTP on 1587, with no encryption." }
     })
+}
+
+// Mail
+
+fn when_unix(t: i64) -> String {
+    crate::util::imap_datetime(t).trim_end_matches(" +0000").to_string() + " UTC"
+}
+
+async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> Response {
+    guard!(app, headers);
+    let boxes = app.mail.mailboxes();
+    let invites = app.mail.invites();
+    let calendars: Vec<Calendar> = app.store.calendars().into_iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
+    page("Mail", "/mail", html! {
+        h1 { "Mail accounts" }
+        (flash(&m))
+        @if app.accounts.is_empty() {
+            p.muted { "No account: set " code { "VALET_ACCOUNTS" } " (see the README)." }
+        }
+        @for a in &app.accounts {
+            @let status = app.mail.status(&a.id);
+            @let (ops, op_error) = app.mail.pending_ops(&a.id);
+            @let folders: Vec<_> = boxes.iter().filter(|b| b.account.as_deref() == Some(a.id.as_str())).collect();
+            @let count: u32 = folders.iter().map(|b| app.mail.count(b.id).0).sum();
+            div.card {
+                h2 style="margin-top:0" { (a.name) " " span.muted.small { (a.address) } }
+                @match &status {
+                    Some((true, msg, at)) => p.ok { "● " (msg) span.muted.small { " · " (when_unix(*at)) } },
+                    Some((false, msg, at)) => p.err { "● " (msg) span.muted.small { " · " (when_unix(*at)) } },
+                    None => p.muted { "Not connected yet." },
+                }
+                p.small.muted { (folders.len()) " folders, " (count) " messages kept here"
+                    @if ops > 0 { " · " (ops) " changes waiting to reach the provider" } }
+                @if let Some(e) = op_error { p.small.err { "Last refused change: " (e) } }
+                @if a.oauth.is_some() {
+                    form method="post" action={"/mail/oauth/" (a.id) "/start"} {
+                        button type="submit" { @if app.mail.token(&a.id).is_some() { "Log in to Microsoft again" } @else { "Log in to Microsoft" } }
+                    }
+                }
+            }
+        }
+        @if app.accounts.iter().any(|a| a.oauth.as_ref().is_some_and(|o| o.redirect_uri.is_some())) {
+            form.card method="post" action="/mail/oauth/paste" {
+                p.small { "After logging in, the browser lands on a page that fails to load (like " code { "https://localhost/?code=…" } "): paste its address here." }
+                div.row style="display:flex; gap:8px" {
+                    input name="url" required placeholder="https://localhost/?code=…" style="flex:1";
+                    button type="submit" { "Finish" }
+                }
+            }
+        }
+        h1 { "Invitations" }
+        @if invites.is_empty() {
+            p.muted { "None yet: invitations arriving in your inboxes appear here and in the Invitations calendar." }
+        } @else {
+            div.card.scroll { table {
+                tr { th { "When" } th { "Event" } th { "Answer" } }
+                @for i in &invites {
+                    tr {
+                        td.small { (when(&i.dtstart)) }
+                        td { (i.summary) br; span.muted.small { "from " (i.organizer) } }
+                        td {
+                            @if let Some(r) = &i.response { p.small.ok { (r.to_lowercase()) } }
+                            form.row method="post" action={"/invites/" (i.id)} {
+                                select name="calendar" {
+                                    @for c in &calendars { option value=(c.id) { (c.name) } }
+                                    option value="" { "Keep in Invitations" }
+                                }
+                                button type="submit" name="answer" value="ACCEPTED" { "Accept" }
+                                button type="submit" name="answer" value="TENTATIVE" { "Maybe" }
+                                button.plain type="submit" name="answer" value="DECLINED" { "Decline" }
+                            }
+                        }
+                    }
+                }
+            } }
+            p.muted.small { "Answering emails the organizer from the account the invitation came to. Accepting from a mail app works too: the event then moves to the calendar the app saves it in." }
+        }
+    })
+}
+
+fn redirect_uri(app: &App, account: &crate::accounts::Account, headers: &HeaderMap) -> String {
+    let _ = app;
+    account.oauth.as_ref().and_then(|o| o.redirect_uri.clone()).unwrap_or_else(|| {
+        let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("localhost");
+        format!("https://{host}/mail/oauth")
+    })
+}
+
+async fn oauth_start(State(app): St, headers: HeaderMap, Path(account): Path<String>) -> Response {
+    guard!(app, headers);
+    let Some(acc) = app.accounts.iter().find(|a| a.id == account) else { return StatusCode::NOT_FOUND.into_response() };
+    let redirect = redirect_uri(&app, acc, &headers);
+    let state = uuid::Uuid::new_v4().simple().to_string();
+    match crate::accounts::authorize_url(acc, &redirect, &state) {
+        Ok((verifier, url)) => {
+            app.oauth_pending.lock().unwrap().insert(state, (acc.id.clone(), verifier, redirect));
+            Redirect::to(&url).into_response()
+        }
+        Err(e) => back("/mail", None, Some(&e.to_string())),
+    }
+}
+
+async fn finish_oauth(app: &App, code: &str, state: &str) -> Response {
+    let pending = app.oauth_pending.lock().unwrap().remove(state);
+    let Some((account, verifier, redirect)) = pending else {
+        return back("/mail", None, Some("That login expired: start again."));
+    };
+    let Some(acc) = app.accounts.iter().find(|a| a.id == account) else { return back("/mail", None, Some("Unknown account.")) };
+    match crate::accounts::exchange_code(acc, &app.mail, code, &verifier, &redirect).await {
+        Ok(()) => {
+            app.mail.waker(&acc.id).notify_one();
+            back("/mail", Some(&format!("{} is connected.", acc.name)), None)
+        }
+        Err(e) => back("/mail", None, Some(&format!("{e:#}"))),
+    }
+}
+
+#[derive(Deserialize)]
+struct OAuthQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error_description: Option<String>,
+}
+
+async fn oauth_callback(State(app): St, headers: HeaderMap, Query(q): Query<OAuthQuery>) -> Response {
+    guard!(app, headers);
+    match (q.code, q.state) {
+        (Some(code), Some(state)) => finish_oauth(&app, &code, &state).await,
+        _ => back("/mail", None, Some(q.error_description.as_deref().unwrap_or("The login did not finish."))),
+    }
+}
+
+#[derive(Deserialize)]
+struct PasteForm {
+    url: String,
+}
+
+async fn oauth_paste(State(app): St, headers: HeaderMap, Form(f): Form<PasteForm>) -> Response {
+    guard!(app, headers);
+    let query = f.url.split_once('?').map(|(_, q)| q).unwrap_or(&f.url);
+    let mut code = None;
+    let mut state = None;
+    for (k, v) in form_urlencoded_pairs(query) {
+        match k.as_str() {
+            "code" => code = Some(v),
+            "state" => state = Some(v),
+            _ => {}
+        }
+    }
+    match (code, state) {
+        (Some(c), Some(s)) => finish_oauth(&app, &c, &s).await,
+        _ => back("/mail", None, Some("That address has no code= and state= in it.")),
+    }
+}
+
+fn form_urlencoded_pairs(q: &str) -> Vec<(String, String)> {
+    q.split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| {
+            let dec = |s: &str| percent_encoding::percent_decode_str(&s.replace('+', " ")).decode_utf8_lossy().into_owned();
+            (dec(k), dec(v))
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct AnswerForm {
+    answer: String,
+    #[serde(default)]
+    calendar: String,
+}
+
+async fn answer_invite(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Form(f): Form<AnswerForm>) -> Response {
+    guard!(app, headers);
+    if !matches!(f.answer.as_str(), "ACCEPTED" | "TENTATIVE" | "DECLINED") {
+        return back("/mail", None, Some("Unknown answer."));
+    }
+    let calendar = (!f.calendar.is_empty()).then_some(f.calendar.as_str());
+    match crate::invites::respond(&app, id, &f.answer, calendar).await {
+        Ok(()) => back("/mail", Some("Answered: the organizer gets your reply by email."), None),
+        Err(e) => back("/mail", None, Some(&format!("{e:#}"))),
+    }
 }
 
 #[cfg(test)]
