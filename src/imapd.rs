@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -269,7 +269,18 @@ impl Conn {
             "STATUS" => self.status(tag, args).await?,
             "SELECT" | "EXAMINE" => self.select(tag, &mailbox_arg(args, 0)?, name == "EXAMINE").await?,
             "CREATE" | "DELETE" | "RENAME" => {
-                self.line(&format!("{tag} NO [CANNOT] folders are managed at each provider")).await?;
+                let done = match name {
+                    "CREATE" => self.create(&mailbox_arg(args, 0)?).await,
+                    "DELETE" => match self.app.mail.mailbox_named(&mailbox_arg(args, 0)?) {
+                        Some(b) => crate::folders::delete(&self.app, b.id).await,
+                        None => Err(anyhow::anyhow!("no such folder")),
+                    },
+                    _ => self.rename(&mailbox_arg(args, 0)?, &mailbox_arg(args, 1)?).await,
+                };
+                match done {
+                    Ok(()) => self.ok(tag, name).await?,
+                    Err(e) => self.line(&format!("{tag} NO {}", format!("{e:#}").replace(['\r', '\n'], " "))).await?,
+                }
             }
             "SUBSCRIBE" | "UNSUBSCRIBE" => self.ok(tag, name).await?,
             "APPEND" => self.append(tag, args).await?,
@@ -318,6 +329,26 @@ impl Conn {
             _ => self.line(&format!("{tag} BAD unknown command {name}")).await?,
         }
         Ok(Flow::Continue)
+    }
+
+    /// CREATE `<Account>/…/<name>`: inside an account, at the provider.
+    async fn create(&mut self, path: &str) -> Result<()> {
+        let path = path.trim_end_matches('/');
+        let (parent, leaf) = path.rsplit_once('/').context("folders go inside an account: <Account>/<name>")?;
+        if let Some(acc) = self.app.accounts().into_iter().find(|a| a.name == parent) {
+            return crate::folders::create(&self.app, &acc.id, None, leaf).await.map(|_| ());
+        }
+        let p = self.app.mail.mailbox_named(parent).filter(|b| !b.is_all_inboxes()).context("no such parent folder")?;
+        crate::folders::create(&self.app, p.account.as_deref().unwrap_or(""), Some(p.id), leaf).await.map(|_| ())
+    }
+
+    /// RENAME within the same parent folder.
+    async fn rename(&mut self, from: &str, to: &str) -> Result<()> {
+        let b = self.app.mail.mailbox_named(from).context("no such folder")?;
+        let (fp, _) = from.rsplit_once('/').unwrap_or(("", from));
+        let (tp, leaf) = to.trim_end_matches('/').rsplit_once('/').unwrap_or(("", to));
+        anyhow::ensure!(fp == tp, "folders can be renamed, not moved to another parent");
+        crate::folders::rename(&self.app, b.id, leaf).await
     }
 
     async fn ok(&mut self, tag: &str, what: &str) -> Result<()> {

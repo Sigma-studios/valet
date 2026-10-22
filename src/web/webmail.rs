@@ -116,7 +116,7 @@ fn sidebar(app: &App, current: i64) -> Markup {
             a.compose href="/compose" { "Write" }
             @for b in &top { (item(b)) }
             @for (a, boxes) in &per {
-                div.account { (a.name) }
+                div.account { span { (a.name) } a href={"/folders/" (a.id)} title="Manage folders" { "Edit" } }
                 @for b in boxes { (item(b)) }
             }
         }
@@ -138,7 +138,8 @@ const MAIL_CSS: &str = r#"
 .folders a.folder { display:flex; justify-content:space-between; gap:8px; padding:5px 10px; border-radius:6px; color:var(--fg); }
 .folders a.folder:hover { background:var(--line); text-decoration:none; }
 .folders a.folder.on { background:var(--accent); color:#fff; }
-.folders .account { margin:14px 10px 4px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.folders .account { display:flex; justify-content:space-between; margin:14px 10px 4px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.folders .account a { text-transform:none; letter-spacing:0; font-weight:400; color:var(--muted); }
 .badge { font-size:12px; font-weight:600; }
 a.compose { display:block; text-align:center; background:var(--accent); color:#fff; border-radius:6px; padding:7px 10px; margin-bottom:10px; font-weight:600; }
 a.compose:hover { text-decoration:none; filter:brightness(1.1); }
@@ -244,6 +245,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         app.mail.mailbox(src.mailbox).and_then(|b| b.account).and_then(|a| names.get(&a).cloned())
     };
     let title = short_name(&mbox);
+    let drafts = mbox.special.eq_ignore_ascii_case("\\Drafts");
     let link = |page: usize| {
         let mut l = format!("/box/{id}?page={page}");
         if !q.q.is_empty() {
@@ -268,7 +270,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                     @let subject = parsed.as_ref().and_then(|p| p.subject().map(str::to_string)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "(no subject)".into());
                     @let from = parsed.as_ref().map(|p| if mbox.special.eq_ignore_ascii_case("\\Sent") { format!("To: {}", who(p.to())) } else { who(p.from()) }).unwrap_or_default();
                     @let preview: String = parsed.as_ref().and_then(|p| p.body_text(0).map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(140).collect())).unwrap_or_default();
-                    a.row.unread[!has_flag(m, "\\Seen")] href={"/msg/" (m.id)} {
+                    a.row.unread[!has_flag(m, "\\Seen")] href=(if drafts { format!("/compose?draft={}", m.id) } else { format!("/msg/{}", m.id) }) {
                         span.star { @if has_flag(m, "\\Flagged") { "★" } }
                         span.from { (from) }
                         span.line {
@@ -326,6 +328,7 @@ pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         (flash_of(&q))
         div.toolbar {
             a.button href={"/box/" (back)} { "← Back" }
+            @if is_draft(&src, &folder) { a.button href={"/compose?draft=" (id)} { "Continue writing" } }
             a.button href={"/compose?reply=" (id)} { "Reply" }
             a.button href={"/compose?all=" (id)} { "Reply all" }
             a.button href={"/compose?forward=" (id)} { "Forward" }
@@ -538,6 +541,86 @@ pub async fn action(State(app): St, headers: HeaderMap, Path(id): Path<i64>, axu
     }
 }
 
+// Folders
+
+pub async fn folders_page(State(app): St, headers: HeaderMap, Path(account): Path<String>, Query(q): Query<ListQuery>) -> Response {
+    guard!(app, headers);
+    let Some(acc) = app.account(&account) else { return StatusCode::NOT_FOUND.into_response() };
+    let (_, per) = folders(&app);
+    let boxes = per.into_iter().find(|(a, _)| a.id == acc.id).map(|(_, b)| b).unwrap_or_default();
+    let inbox = app.mail.all_inboxes();
+    mail_page(&format!("{} folders", acc.name), inbox, &app, html! {
+        (flash_of(&q))
+        h1 { (acc.name) " folders" }
+        div.card {
+            @for b in &boxes {
+                @let fixed = b.special.is_empty() && !b.remote.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("INBOX"));
+                div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:6px 0; border-bottom:1px solid var(--line)" {
+                    @if fixed {
+                        form.row method="post" action={"/folders/" (acc.id) "/" (b.id) "/rename"} style="flex:1" {
+                            input name="name" value=(b.name.rsplit('/').next().unwrap_or(&b.name)) aria-label="Name" style="flex:1; min-width:140px";
+                            button type="submit" { "Rename" }
+                        }
+                        form method="post" action={"/folders/" (acc.id) "/" (b.id) "/delete"}
+                            onsubmit="return confirm('Delete this folder and the mail in it, at the provider too?')" {
+                            button.plain type="submit" { "Delete" }
+                        }
+                        span.muted.small style="flex-basis:100%" { (short_name(b)) " · " (app.mail.count(b.id).0) " messages" }
+                    } @else {
+                        span style="flex:1" { (short_name(b)) }
+                        span.muted.small { "the provider's own folder" }
+                    }
+                }
+            }
+        }
+        h2 { "New folder" }
+        form.card.row method="post" action={"/folders/" (acc.id)} {
+            label { "Name" input name="name" required; }
+            label { "Inside" select name="parent" {
+                option value="" { "(top level)" }
+                @for b in &boxes { option value=(b.id) { (short_name(b)) } }
+            } }
+            button type="submit" { "Create" }
+        }
+        p.muted.small { "Folders are made, renamed and deleted at the provider too, so they match in every app. Mail apps can do the same." }
+    })
+}
+
+#[derive(Deserialize)]
+pub struct FolderForm {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    parent: String,
+}
+
+pub async fn create_folder(State(app): St, headers: HeaderMap, Path(account): Path<String>, axum::extract::Form(f): axum::extract::Form<FolderForm>) -> Response {
+    guard!(app, headers);
+    let here = format!("/folders/{account}");
+    match crate::folders::create(&app, &account, f.parent.parse().ok(), &f.name).await {
+        Ok(_) => back(&here, Some(&format!("Created {}.", f.name.trim())), None),
+        Err(e) => back(&here, None, Some(&format!("{e:#}"))),
+    }
+}
+
+pub async fn rename_folder(State(app): St, headers: HeaderMap, Path((account, id)): Path<(String, i64)>, axum::extract::Form(f): axum::extract::Form<FolderForm>) -> Response {
+    guard!(app, headers);
+    let here = format!("/folders/{account}");
+    match crate::folders::rename(&app, id, &f.name).await {
+        Ok(()) => back(&here, Some("Renamed."), None),
+        Err(e) => back(&here, None, Some(&format!("{e:#}"))),
+    }
+}
+
+pub async fn delete_folder(State(app): St, headers: HeaderMap, Path((account, id)): Path<(String, i64)>) -> Response {
+    guard!(app, headers);
+    let here = format!("/folders/{account}");
+    match crate::folders::delete(&app, id).await {
+        Ok(()) => back(&here, Some("Deleted."), None),
+        Err(e) => back(&here, None, Some(&format!("{e:#}"))),
+    }
+}
+
 // Writing
 
 #[derive(Deserialize, Default)]
@@ -545,19 +628,27 @@ pub struct ComposeQuery {
     reply: Option<i64>,
     all: Option<i64>,
     forward: Option<i64>,
+    draft: Option<i64>,
 }
 
-/// What the form starts with.
+/// What the form holds: a new message, a reply, a forward, or a draft.
 #[derive(Default)]
 struct Draft {
     from: String,
     to: String,
     cc: String,
+    bcc: String,
     subject: String,
-    body: String,
+    /// The text, as HTML (sanitized when it comes from the form).
+    html: String,
     in_reply_to: String,
     references: String,
-    forward: Option<i64>,
+    /// The message whose attachments go along (the forwarded one, or the
+    /// draft last saved), minus those in `drop`.
+    carry: Option<i64>,
+    drop: Vec<usize>,
+    /// The saved draft this replaces.
+    draft_id: Option<i64>,
     replying: Option<i64>,
 }
 
@@ -566,14 +657,28 @@ fn prefixed(prefix: &str, subject: &str) -> String {
     if s.to_lowercase().starts_with(&prefix.to_lowercase()) { s.to_string() } else { format!("{prefix} {s}") }
 }
 
-fn quote(text: &str) -> String {
-    text.lines().map(|l| if l.starts_with('>') { format!(">{l}") } else { format!("> {l}") }).collect::<Vec<_>>().join("\n")
+/// What a message reads as, in HTML fit to quote or edit: its HTML part
+/// cleaned up, or its text.
+fn quotable_html(m: &mail_parser::Message) -> String {
+    let real_html = m.html_body.first().and_then(|&i| m.part(i)).is_some_and(|p| p.is_text_html());
+    match (real_html, m.body_html(0)) {
+        (true, Some(h)) => clean(&h),
+        _ => mail_parser::decoders::html::text_to_html(&m.body_text(0).unwrap_or_default()),
+    }
 }
 
-/// The text of a message, for quoting (the HTML part stripped of tags when
-/// there is no text part).
-fn plain_text(m: &mail_parser::Message) -> String {
-    m.body_text(0).map(|t| t.into_owned()).unwrap_or_default()
+/// HTML written in the editor (or pasted into it), reduced to what mail needs.
+fn clean(html: &str) -> String {
+    ammonia::Builder::default()
+        .add_tags(["font", "center"])
+        .add_generic_attributes(["align"])
+        .url_schemes(["http", "https", "mailto", "tel"].into_iter().collect())
+        .clean(html)
+        .to_string()
+}
+
+fn escape(s: &str) -> String {
+    maud::html! { (s) }.into_string()
 }
 
 /// The address of mine the message was sent to, for answering from it.
@@ -590,33 +695,62 @@ fn my_address(app: &App, m: &mail_parser::Message, account: Option<&str>) -> Opt
     account.and_then(|id| accounts.iter().find(|a| a.id == id)).map(|a| a.address.clone())
 }
 
+fn is_draft(m: &Msg, folder: &Mailbox) -> bool {
+    folder.special.eq_ignore_ascii_case("\\Drafts") || has_flag(m, "\\Draft")
+}
+
+fn header_ids(v: &mail_parser::HeaderValue) -> Vec<String> {
+    match v {
+        mail_parser::HeaderValue::Text(t) => vec![format!("<{t}>")],
+        mail_parser::HeaderValue::TextList(l) => l.iter().map(|t| format!("<{t}>")).collect(),
+        _ => vec![],
+    }
+}
+
 fn draft_for(app: &App, q: &ComposeQuery) -> Draft {
-    let (id, mode) = match (q.reply, q.all, q.forward) {
-        (Some(id), _, _) => (id, "reply"),
-        (_, Some(id), _) => (id, "all"),
-        (_, _, Some(id)) => (id, "forward"),
-        _ => return Draft::default(),
+    let (id, mode) = match (q.reply, q.all, q.forward, q.draft) {
+        (Some(id), ..) => (id, "reply"),
+        (_, Some(id), ..) => (id, "all"),
+        (_, _, Some(id), _) => (id, "forward"),
+        (.., Some(id)) => (id, "draft"),
+        _ => return Draft { html: "<p><br></p>".into(), ..Default::default() },
     };
     let Some((_, src, folder)) = locate(app, id) else { return Draft::default() };
     let raw = app.mail.blob(&src.blob).unwrap_or_default();
     let Some(m) = parse(&raw) else { return Draft::default() };
-    let from = my_address(app, &m, folder.account.as_deref()).unwrap_or_default();
     let subject = m.subject().unwrap_or("");
+    if mode == "draft" {
+        return Draft {
+            from: addresses_of(m.from()).into_iter().next().unwrap_or_default(),
+            to: everyone(m.to()),
+            cc: everyone(m.cc()),
+            bcc: everyone(m.bcc()),
+            subject: subject.to_string(),
+            html: quotable_html(&m),
+            in_reply_to: header_ids(m.in_reply_to()).join(" "),
+            references: header_ids(m.references()).join(" "),
+            carry: (m.attachment_count() > 0).then_some(id),
+            draft_id: is_draft(&src, &folder).then_some(id),
+            ..Default::default()
+        };
+    }
+    let from = my_address(app, &m, folder.account.as_deref()).unwrap_or_default();
     let when = m.date().map(|d| d.to_rfc822()).unwrap_or_default();
     let mut d = Draft { from: from.clone(), ..Default::default() };
     if mode == "forward" {
         d.subject = prefixed("Fwd:", subject);
-        d.body = format!(
-            "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {when}\nSubject: {subject}\nTo: {}\n\n{}",
-            everyone(m.from()),
-            everyone(m.to()),
-            plain_text(&m)
+        d.html = format!(
+            "<p><br></p><p>---------- Forwarded message ----------<br>From: {}<br>Date: {}<br>Subject: {}<br>To: {}</p>{}",
+            escape(&everyone(m.from())),
+            escape(&when),
+            escape(subject),
+            escape(&everyone(m.to())),
+            quotable_html(&m)
         );
-        d.forward = Some(id);
+        d.carry = (m.attachment_count() > 0).then_some(id);
         return d;
     }
-    let reply_to = if m.reply_to().is_some() { everyone(m.reply_to()) } else { everyone(m.from()) };
-    d.to = reply_to;
+    d.to = if m.reply_to().is_some() { everyone(m.reply_to()) } else { everyone(m.from()) };
     if mode == "all" {
         let mine = |a: &str| a.eq_ignore_ascii_case(&from) || app.accounts().iter().any(|x| x.sends_as(a));
         let mut others: Vec<String> = Vec::new();
@@ -633,19 +767,113 @@ fn draft_for(app: &App, q: &ComposeQuery) -> Draft {
         d.cc = others.join(", ");
     }
     d.subject = prefixed("Re:", subject);
-    d.body = format!("\n\nOn {when}, {} wrote:\n{}", who(m.from()), quote(&plain_text(&m)));
+    d.html = format!(
+        "<p><br></p><p>On {}, {} wrote:</p><blockquote>{}</blockquote>",
+        escape(&when),
+        escape(&who(m.from())),
+        quotable_html(&m)
+    );
     if let Some(mid) = m.message_id() {
         d.in_reply_to = format!("<{mid}>");
-        let refs: Vec<String> = match m.references() {
-            mail_parser::HeaderValue::Text(t) => vec![format!("<{t}>")],
-            mail_parser::HeaderValue::TextList(l) => l.iter().map(|t| format!("<{t}>")).collect(),
-            _ => vec![],
-        };
-        d.references = refs.into_iter().chain(std::iter::once(d.in_reply_to.clone())).collect::<Vec<_>>().join(" ");
+        d.references = header_ids(m.references()).into_iter().chain(std::iter::once(d.in_reply_to.clone())).collect::<Vec<_>>().join(" ");
     }
     d.replying = Some(id);
     d
 }
+
+/// The names of the attachments a draft carries along.
+fn carried(app: &App, d: &Draft) -> Vec<(usize, String)> {
+    use mail_parser::MimeHeaders;
+    let Some((_, src, _)) = d.carry.and_then(|c| locate(app, c)) else { return vec![] };
+    let raw = app.mail.blob(&src.blob).unwrap_or_default();
+    let Some(m) = parse(&raw) else { return vec![] };
+    m.attachments().enumerate().filter(|(i, _)| !d.drop.contains(i)).map(|(i, a)| (i, a.attachment_name().unwrap_or("attachment").to_string())).collect()
+}
+
+const EDITOR_CSS: &str = r#"
+.editor-bar { display:flex; gap:4px; flex-wrap:wrap; border:1px solid var(--line); border-bottom:none; border-radius:6px 6px 0 0; padding:4px; background:var(--bg); }
+.editor-bar button { background:none; color:var(--fg); border:1px solid transparent; border-radius:4px; padding:3px 9px; min-width:32px; }
+.editor-bar button:hover { background:var(--line); }
+.editor { min-height:320px; padding:10px 12px; border:1px solid var(--line); border-radius:0 0 6px 6px; background:var(--bg); color:var(--fg); overflow-wrap:anywhere; }
+.editor:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+.editor blockquote { margin:0 0 0 4px; padding-left:10px; border-left:3px solid var(--line); color:var(--muted); }
+.editor img { max-width:100%; }
+.write-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.write-actions .status { color:var(--muted); font-size:13px; }
+.carried label { display:inline-flex; flex-direction:row; align-items:center; gap:4px; margin-right:12px; color:var(--fg); }
+"#;
+
+const EDITOR_SCRIPT: &str = r#"
+(() => {
+  const form = document.querySelector('form.write'), ed = form.querySelector('.editor');
+  const status = form.querySelector('.status');
+  let dirty = false, saving = null, sending = false;
+  for (const b of form.querySelectorAll('.editor-bar button')) {
+    b.addEventListener('mousedown', e => e.preventDefault());
+    b.addEventListener('click', () => {
+      const cmd = b.dataset.cmd;
+      if (cmd === 'createLink') {
+        const url = prompt('Link to');
+        if (url) document.execCommand('createLink', false, /^[a-z]+:/i.test(url) ? url : 'https://' + url);
+      } else if (cmd === 'formatBlock') {
+        document.execCommand('formatBlock', false, b.dataset.arg);
+      } else {
+        document.execCommand(cmd, false, null);
+      }
+      ed.focus(); dirty = true;
+    });
+  }
+  const sync = () => { form.elements.html.value = ed.innerHTML; };
+  form.addEventListener('input', () => { dirty = true; });
+  form.addEventListener('change', () => { dirty = true; });
+  const carried = form.querySelector('.carried');
+  const show = names => {
+    carried.innerHTML = '';
+    names.forEach(([i, n]) => {
+      const l = document.createElement('label');
+      const c = document.createElement('input');
+      c.type = 'checkbox'; c.name = 'drop'; c.value = i; c.title = 'Leave out';
+      l.append('📎 ' + n + ' ', c, ' leave out');
+      carried.append(l);
+    });
+  };
+  async function save() {
+    if (!dirty || saving || sending) return saving;
+    dirty = false; sync();
+    const data = new FormData(form);
+    const hadFiles = data.getAll('files').some(f => f.size);
+    saving = (async () => {
+      try {
+        const r = await fetch('/compose/draft', { method: 'POST', body: data });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || 'not saved');
+        form.elements.draft_id.value = j.draft;
+        form.elements.carry.value = j.draft;
+        if (hadFiles) form.elements.files.value = '';
+        show(j.attachments);
+        status.textContent = 'Draft saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } catch (e) {
+        dirty = true;
+        status.textContent = 'Draft not saved: ' + e.message;
+      } finally {
+        saving = null;
+      }
+    })();
+    return saving;
+  }
+  setInterval(save, 8000);
+  form.querySelector('[data-save]').addEventListener('click', () => { dirty = true; save(); });
+  form.addEventListener('submit', async e => {
+    sync();
+    if (e.submitter && e.submitter.name === 'discard') { sending = true; return; }
+    sending = true;
+    if (saving) { e.preventDefault(); await saving; form.submit(); }
+  });
+  window.addEventListener('pagehide', () => {
+    if (dirty && !sending) { sync(); navigator.sendBeacon('/compose/draft', new FormData(form)); }
+  });
+})();
+"#;
 
 fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
     let accounts = app.accounts();
@@ -654,7 +882,11 @@ fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
         .flat_map(|a| std::iter::once(&a.address).chain(&a.aliases).map(move |addr| (addr.clone(), a.name.clone())))
         .collect();
     let inbox = app.mail.all_inboxes();
+    let tool = |cmd: &str, arg: &str, label: Markup, title: &str| {
+        html! { button type="button" data-cmd=(cmd) data-arg=(arg) title=(title) { (label) } }
+    };
     mail_page("Write", inbox, app, html! {
+        style { (PreEscaped(EDITOR_CSS)) }
         @if let Some(e) = err { p.err { (e) } }
         @if senders.is_empty() {
             p.muted { "Add a mail account first, on the " a href="/mail" { "Accounts" } " page." }
@@ -665,17 +897,45 @@ fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
                 } }
                 label { "To" input name="to" value=(d.to) placeholder="name@example.com, …" autofocus[d.to.is_empty()]; }
                 label { "Cc" input name="cc" value=(d.cc); }
-                details { summary.small { "Bcc" } label { input name="bcc"; } }
+                details open[!d.bcc.is_empty()] { summary.small { "Bcc" } label { input name="bcc" value=(d.bcc); } }
                 label { "Subject" input name="subject" value=(d.subject); }
-                textarea name="body" autofocus[!d.to.is_empty()] { (d.body) }
-                label { "Attachments" input type="file" name="files" multiple; }
-                @if d.forward.is_some() { p.small.muted { "The original attachments go along." } }
+                div {
+                    div.editor-bar {
+                        (tool("bold", "", html! { b { "B" } }, "Bold"))
+                        (tool("italic", "", html! { i { "I" } }, "Italic"))
+                        (tool("underline", "", html! { u { "U" } }, "Underline"))
+                        (tool("strikeThrough", "", html! { s { "S" } }, "Strikethrough"))
+                        (tool("createLink", "", html! { "Link" }, "Link"))
+                        (tool("insertUnorderedList", "", html! { "• List" }, "Bulleted list"))
+                        (tool("insertOrderedList", "", html! { "1. List" }, "Numbered list"))
+                        (tool("formatBlock", "blockquote", html! { "Quote" }, "Quote"))
+                        (tool("formatBlock", "h3", html! { "Heading" }, "Heading"))
+                        (tool("formatBlock", "p", html! { "Text" }, "Normal text"))
+                        (tool("removeFormat", "", html! { "Clear" }, "Clear formatting"))
+                    }
+                    div.editor contenteditable="true" autofocus[!d.to.is_empty()] { (PreEscaped(&d.html)) }
+                }
+                div.carried.small {
+                    @for (i, name) in carried(app, d) {
+                        label { "📎 " (name) " " input type="checkbox" name="drop" value=(i) title="Leave out"; " leave out" }
+                    }
+                }
+                label { "Attach files" input type="file" name="files" multiple; }
+                input type="hidden" name="html";
                 input type="hidden" name="in_reply_to" value=(d.in_reply_to);
                 input type="hidden" name="references" value=(d.references);
-                @if let Some(f) = d.forward { input type="hidden" name="forward" value=(f); }
-                @if let Some(r) = d.replying { input type="hidden" name="replying" value=(r); }
-                div { button type="submit" { "Send" } }
+                input type="hidden" name="carry" value=(d.carry.map(|c| c.to_string()).unwrap_or_default());
+                input type="hidden" name="draft_id" value=(d.draft_id.map(|c| c.to_string()).unwrap_or_default());
+                input type="hidden" name="replying" value=(d.replying.map(|c| c.to_string()).unwrap_or_default());
+                div.write-actions {
+                    button type="submit" name="send" value="1" { "Send" }
+                    button.plain type="button" data-save style="color:var(--fg)" { "Save draft" }
+                    button.plain type="submit" name="discard" value="1" formnovalidate
+                        onclick="return confirm('Discard this message?')" { "Discard" }
+                    span.status { @if d.draft_id.is_some() { "Draft" } }
+                }
             }
+            script { (PreEscaped(EDITOR_SCRIPT)) }
         }
     })
 }
@@ -692,10 +952,13 @@ fn saves_sent(acc: &Account) -> bool {
     smtp.contains("gmail.com") || smtp.contains("office365.com") || smtp.contains("outlook.com")
 }
 
-pub async fn send(State(app): St, headers: HeaderMap, mut form: Multipart) -> Response {
-    guard!(app, headers);
+type Files = Vec<(String, String, Vec<u8>)>;
+
+/// The compose form, and the buttons pressed.
+async fn read_form(mut form: Multipart) -> (Draft, Files, std::collections::HashMap<String, String>) {
     let mut fields: std::collections::HashMap<String, String> = Default::default();
-    let mut files: Vec<(String, String, Vec<u8>)> = Vec::new();
+    let mut drop = Vec::new();
+    let mut files: Files = Vec::new();
     while let Ok(Some(field)) = form.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         if name == "files" {
@@ -706,7 +969,11 @@ pub async fn send(State(app): St, headers: HeaderMap, mut form: Multipart) -> Re
                 files.push((filename, ctype, data.to_vec()));
             }
         } else if let Ok(v) = field.text().await {
-            fields.insert(name, v);
+            if name == "drop" {
+                drop.extend(v.parse::<usize>().ok());
+            } else {
+                fields.insert(name, v);
+            }
         }
     }
     let get = |k: &str| fields.get(k).cloned().unwrap_or_default();
@@ -714,38 +981,99 @@ pub async fn send(State(app): St, headers: HeaderMap, mut form: Multipart) -> Re
         from: get("from"),
         to: get("to"),
         cc: get("cc"),
+        bcc: get("bcc"),
         subject: get("subject"),
-        body: get("body"),
+        html: clean(&get("html")),
         in_reply_to: get("in_reply_to"),
         references: get("references"),
-        forward: get("forward").parse().ok(),
+        carry: get("carry").parse().ok(),
+        drop,
+        draft_id: get("draft_id").parse().ok(),
         replying: get("replying").parse().ok(),
     };
-    match deliver(&app, &draft, &get("bcc"), files).await {
+    (draft, files, fields)
+}
+
+pub async fn send(State(app): St, headers: HeaderMap, form: Multipart) -> Response {
+    guard!(app, headers);
+    let (draft, files, fields) = read_form(form).await;
+    let inbox = format!("/box/{}", app.mail.all_inboxes());
+    if fields.contains_key("discard") {
+        if let Some(d) = draft.draft_id {
+            let _ = forget_draft(&app, d);
+        }
+        return back(&inbox, Some("Discarded."), None);
+    }
+    match deliver(&app, &draft, files).await {
         Ok(name) => {
             if let Some(r) = draft.replying.and_then(|r| locate(&app, r)) {
                 let _ = app.mail.store(&[r.1.id], &StoreMode::Add, &["\\Answered".to_string()]);
             }
-            back(&format!("/box/{}", app.mail.all_inboxes()), Some(&format!("Sent from {name}.")), None)
+            if let Some(d) = draft.draft_id {
+                let _ = forget_draft(&app, d);
+            }
+            back(&inbox, Some(&format!("Sent from {name}.")), None)
         }
         Err(e) => compose_view(&app, &draft, Some(&format!("Not sent: {e:#}"))),
     }
 }
 
-/// Builds the message, sends it through the account it is from, and keeps a
-/// copy in that account's Sent folder. Returns the account's name.
-async fn deliver(app: &App, d: &Draft, bcc: &str, mut files: Vec<(String, String, Vec<u8>)>) -> anyhow::Result<String> {
+fn forget_draft(app: &App, id: i64) -> anyhow::Result<()> {
+    let Some((row, src, folder)) = locate(app, id) else { return Ok(()) };
+    if is_draft(&src, &folder) {
+        app.mail.expunge(&[row.id])?;
+    }
+    Ok(())
+}
+
+/// Saves the form as a draft in the From account's Drafts folder, replacing
+/// the one saved before. Answers the new draft's id and its attachments.
+pub async fn save_draft(State(app): St, headers: HeaderMap, form: Multipart) -> Response {
+    if !super::authed(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "logged out" }))).into_response();
+    }
+    let (draft, files, _) = read_form(form).await;
+    let saved = async {
+        use anyhow::Context;
+        let acc = app.accounts().into_iter().find(|a| a.sends_as(&draft.from)).context("pick an address to send from")?;
+        let message = build(&app, &draft, files, true)?;
+        let folder = match app.mail.mailboxes().into_iter().find(|b| b.account.as_deref() == Some(acc.id.as_str()) && b.special.eq_ignore_ascii_case("\\Drafts")) {
+            Some(b) => b.id,
+            None => match app.mail.mailboxes().into_iter().find(|b| b.account.as_deref() == Some(acc.id.as_str()) && short_name(b) == "Drafts") {
+                Some(b) => b.id,
+                None => crate::folders::create(&app, &acc.id, None, "Drafts").await?,
+            },
+        };
+        let id = app.mail.append_row(folder, &message.formatted(), &["\\Draft".into(), "\\Seen".into()], crate::mailstore::now())?;
+        if let Some(old) = draft.draft_id.filter(|&o| o != id) {
+            forget_draft(&app, old)?;
+        }
+        app.mail.waker(&acc.id).notify_one();
+        anyhow::Ok(id)
+    }
+    .await;
+    match saved {
+        Ok(id) => {
+            let names: Vec<(usize, String)> = carried(&app, &Draft { carry: Some(id), ..Default::default() });
+            axum::Json(serde_json::json!({ "draft": id, "attachments": names })).into_response()
+        }
+        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+/// The message the form describes. A draft may have no recipient yet and
+/// keeps its Bcc.
+fn build(app: &App, d: &Draft, mut files: Files, draft: bool) -> anyhow::Result<lettre::Message> {
     use anyhow::Context;
     use lettre::message::header::ContentType;
-    use lettre::message::{Attachment, Mailboxes, MultiPart, SinglePart};
-    let acc = app.accounts().into_iter().find(|a| a.sends_as(&d.from)).context("pick an address to send from")?;
+    use lettre::message::{Attachment, Mailboxes, MultiPart};
     let parse_list = |s: &str| -> anyhow::Result<Mailboxes> {
         let s = s.trim().trim_end_matches(',');
         if s.is_empty() { Ok(Mailboxes::new()) } else { s.parse::<Mailboxes>().map_err(|e| anyhow::anyhow!("{s}: {e}")) }
     };
-    let (to, cc, bcc) = (parse_list(&d.to)?, parse_list(&d.cc)?, parse_list(bcc)?);
-    anyhow::ensure!(to.iter().chain(cc.iter()).chain(bcc.iter()).next().is_some(), "who is it for?");
-    let mut b = lettre::Message::builder().from(d.from.parse().context("the From address")?).subject(d.subject.clone()).date_now();
+    let (to, cc, bcc) = (parse_list(&d.to)?, parse_list(&d.cc)?, parse_list(&d.bcc)?);
+    let from: lettre::message::Mailbox = d.from.parse().context("the From address")?;
+    let mut b = lettre::Message::builder().from(from.clone()).subject(d.subject.clone()).date_now();
     for m in to.iter() {
         b = b.to(m.clone());
     }
@@ -755,32 +1083,55 @@ async fn deliver(app: &App, d: &Draft, bcc: &str, mut files: Vec<(String, String
     for m in bcc.iter() {
         b = b.bcc(m.clone());
     }
+    if draft {
+        b = b.keep_bcc();
+        if to.iter().chain(cc.iter()).chain(bcc.iter()).next().is_none() {
+            b = b.envelope(lettre::address::Envelope::new(Some(from.email.clone()), vec![from.email.clone()])?);
+        }
+    } else {
+        anyhow::ensure!(to.iter().chain(cc.iter()).chain(bcc.iter()).next().is_some(), "who is it for?");
+    }
     if !d.in_reply_to.is_empty() {
         b = b.in_reply_to(d.in_reply_to.clone()).references(d.references.clone());
     }
     let domain = d.from.rsplit_once('@').map(|(_, h)| h.to_string()).unwrap_or_else(|| "valet".into());
     b = b.message_id(Some(format!("<{}@{domain}>", uuid::Uuid::new_v4().simple())));
-    if let Some(f) = d.forward.and_then(|f| locate(app, f)) {
-        let raw = app.mail.blob(&f.1.blob).unwrap_or_default();
+    let mut all: Files = Vec::new();
+    if let Some((_, src, _)) = d.carry.and_then(|c| locate(app, c)) {
+        let raw = app.mail.blob(&src.blob).unwrap_or_default();
         if let Some(m) = parse(&raw) {
             use mail_parser::MimeHeaders;
-            for a in m.attachments() {
+            for (i, a) in m.attachments().enumerate() {
+                if d.drop.contains(&i) {
+                    continue;
+                }
                 let ct = a.content_type().map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or("octet-stream"))).unwrap_or_default();
-                files.push((a.attachment_name().unwrap_or("attachment").to_string(), ct, a.contents().to_vec()));
+                all.push((a.attachment_name().unwrap_or("attachment").to_string(), ct, a.contents().to_vec()));
             }
         }
     }
-    let text = SinglePart::plain(d.body.replace("\r\n", "\n"));
-    let message = if files.is_empty() {
-        b.singlepart(text)?
+    all.append(&mut files);
+    let text = mail_parser::decoders::html::html_to_text(&d.html);
+    let body = MultiPart::alternative_plain_html(text.trim_end().to_string(), format!("<!doctype html><html><body>{}</body></html>", d.html));
+    let message = if all.is_empty() {
+        b.multipart(body)?
     } else {
-        let mut mp = MultiPart::mixed().singlepart(text);
-        for (name, ct, data) in files {
+        let mut mp = MultiPart::mixed().multipart(body);
+        for (name, ct, data) in all {
             let ct = ContentType::parse(&ct).unwrap_or(ContentType::parse("application/octet-stream").unwrap());
             mp = mp.singlepart(Attachment::new(name).body(data, ct));
         }
         b.multipart(mp)?
     };
+    Ok(message)
+}
+
+/// Sends through the account the message is from, and keeps a copy in that
+/// account's Sent folder. Returns the account's name.
+async fn deliver(app: &App, d: &Draft, files: Files) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let acc = app.accounts().into_iter().find(|a| a.sends_as(&d.from)).context("pick an address to send from")?;
+    let message = build(app, d, files, false)?;
     let recipients: Vec<String> = message.envelope().to().iter().map(|a| a.to_string()).collect();
     let raw = crate::smtpd::strip_bcc(&message.formatted());
     crate::accounts::send(&acc, &app.mail, &d.from, &recipients, &raw).await?;
@@ -804,7 +1155,6 @@ mod tests {
         assert!(has_remote(r#"<img SRC="https://t.example/p.gif">"#) && !has_remote("<p>http://x</p>"));
         assert_eq!(prefixed("Re:", "re: hi"), "re: hi");
         assert_eq!(prefixed("Re:", "hi"), "Re: hi");
-        assert_eq!(quote("a\n> b"), "> a\n>> b");
         assert_eq!(human_size(2048), "2 KB");
     }
 

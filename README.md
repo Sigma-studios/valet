@@ -18,8 +18,11 @@ the native apps of every device.
   organizer gets the reply from the account the invitation came to.
 
 - **Webmail** on valet's own site, from any browser: every folder of every
-  account (and all inboxes together), search, reading, and writing (reply,
-  reply all, forward, attachments). It works on the same copy as the mail
+  account (and all inboxes together), search, reading, and writing with
+  formatting (reply, reply all, forward, attachments). What you write is saved
+  as a draft in the account's Drafts folder every few seconds, so it carries on
+  from another device or app. Folders can be created, renamed and deleted, here
+  or from a mail app, and the provider follows. It works on the same copy as the mail
   apps, so read, flagged, moved and deleted messages match everywhere. HTML
   mail is shown in a frame where nothing runs, and remote images (which tell
   senders you opened a message) stay blocked until asked for.
