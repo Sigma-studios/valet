@@ -200,11 +200,12 @@ async fn relay(app: &App, envelope_from: &str, to: &[String], data: &[u8]) -> Re
         p.header(data, "From").and_then(|f| mime::addresses(&f).into_iter().next()).map(|(_, m, h)| format!("{m}@{h}"))
     };
     let candidates = [Some(envelope_from.to_string()), header_from];
+    let accounts = app.accounts();
     let (acc, sender) = candidates
         .iter()
         .flatten()
-        .find_map(|addr| app.accounts.iter().find(|a| a.sends_as(addr)).map(|a| (a, addr.clone())))
-        .ok_or_else(|| anyhow::anyhow!("no account sends as {envelope_from}: add it to an account's address or aliases"))?;
+        .find_map(|addr| accounts.iter().find(|a| a.sends_as(addr)).map(|a| (a, addr.clone())))
+        .ok_or_else(|| anyhow::anyhow!("no account sends as {envelope_from}: add it to an account's aliases on valet's Mail page"))?;
     accounts::send(acc, &app.mail, &sender, to, &strip_bcc(data)).await?;
     Ok(acc.name.clone())
 }

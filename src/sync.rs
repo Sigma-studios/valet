@@ -16,28 +16,39 @@ use crate::mailstore::{Op, now};
 use crate::{invites, mutf7, util};
 
 pub fn start(app: Arc<App>) {
-    for acc in app.accounts.clone() {
-        let app = app.clone();
-        tokio::spawn(async move {
-            let mut backoff = 15;
-            loop {
-                match session(&app, &acc).await {
-                    Ok(()) => backoff = 15,
-                    Err(e) => {
-                        let msg = format!("{e:#}");
-                        tracing::warn!(account = %acc.id, "sync: {msg}");
-                        app.mail.set_status(&acc.id, false, &msg);
-                        let waker = app.mail.waker(&acc.id);
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
-                            _ = waker.notified() => {}
-                        }
-                        backoff = (backoff * 2).min(600);
+    for acc in app.accounts() {
+        restart(&app, &acc.id);
+    }
+}
+
+/// (Re)starts the account's sync task, with its current settings.
+pub fn restart(app: &Arc<App>, id: &str) {
+    let mut syncs = app.syncs.lock().unwrap();
+    if let Some(old) = syncs.remove(id) {
+        old.abort();
+    }
+    let Some(acc) = app.account(id) else { return };
+    let app = app.clone();
+    let task = tokio::spawn(async move {
+        let mut backoff = 15;
+        loop {
+            match session(&app, &acc).await {
+                Ok(()) => backoff = 15,
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    tracing::warn!(account = %acc.id, "sync: {msg}");
+                    app.mail.set_status(&acc.id, false, &msg);
+                    let waker = app.mail.waker(&acc.id);
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                        _ = waker.notified() => {}
                     }
+                    backoff = (backoff * 2).min(600);
                 }
             }
-        });
-    }
+        }
+    });
+    syncs.insert(id.to_string(), task.abort_handle());
 }
 
 struct Folder {

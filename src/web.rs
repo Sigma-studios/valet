@@ -34,6 +34,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/import", get(import_page).post(import_upload))
         .route("/connect", get(connect_page))
         .route("/mail", get(mail_page))
+        .route("/mail/accounts/new", get(new_account_page).post(create_account))
+        .route("/mail/accounts/{id}", get(edit_account_page).post(update_account))
+        .route("/mail/accounts/{id}/delete", post(delete_account))
         .route("/mail/oauth/{account}/start", post(oauth_start))
         .route("/mail/oauth", get(oauth_callback))
         .route("/mail/oauth/paste", post(oauth_paste))
@@ -763,7 +766,7 @@ async fn connect_page(State(app): St, headers: HeaderMap) -> Response {
         } }
         p { "User name " code { (user) } ", valet's password (normal password authentication)." }
         p { "Then add one " b { "identity" } " (Thunderbird: account settings → Manage identities; Apple Mail: the account's Email Addresses field, comma-separated) per address, so replies go out from the address they were sent to:" }
-        ul { @for a in &app.accounts { li { code { (a.address) } " (" (a.name) ")" @for al in &a.aliases { ", " code { (al) } } } } }
+        ul { @for a in &app.accounts() { li { code { (a.address) } " (" (a.name) ")" @for al in &a.aliases { ", " code { (al) } } } } }
         p.muted.small { "INBOX holds every account's inbox; each account's folders are under its name. "
             "Running valet without façade in front (on your own machine): IMAP on port 1143 and SMTP on 1587, with no encryption." }
     })
@@ -780,13 +783,14 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
     let boxes = app.mail.mailboxes();
     let invites = app.mail.invites();
     let calendars: Vec<Calendar> = app.store.calendars().into_iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
+    let accounts = app.accounts();
     page("Mail", "/mail", html! {
         h1 { "Mail accounts" }
         (flash(&m))
-        @if app.accounts.is_empty() {
-            p.muted { "No account: set " code { "VALET_ACCOUNTS" } " (see the README)." }
+        @if accounts.is_empty() {
+            p.muted { "No account yet: add your mailboxes below. valet logs in to each, keeps a copy, and serves them all to your mail apps as one account." }
         }
-        @for a in &app.accounts {
+        @for a in &accounts {
             @let status = app.mail.status(&a.id);
             @let (ops, op_error) = app.mail.pending_ops(&a.id);
             @let folders: Vec<_> = boxes.iter().filter(|b| b.account.as_deref() == Some(a.id.as_str())).collect();
@@ -801,14 +805,17 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
                 p.small.muted { (folders.len()) " folders, " (count) " messages kept here"
                     @if ops > 0 { " · " (ops) " changes waiting to reach the provider" } }
                 @if let Some(e) = op_error { p.small.err { "Last refused change: " (e) } }
-                @if a.oauth.is_some() {
-                    form method="post" action={"/mail/oauth/" (a.id) "/start"} {
-                        button type="submit" { @if app.mail.token(&a.id).is_some() { "Log in to Microsoft again" } @else { "Log in to Microsoft" } }
+                div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center" {
+                    @if a.oauth.is_some() {
+                        form method="post" action={"/mail/oauth/" (a.id) "/start"} {
+                            button type="submit" { @if app.mail.token(&a.id).is_some() { "Log in to Microsoft again" } @else { "Log in to Microsoft" } }
+                        }
                     }
+                    a href={"/mail/accounts/" (a.id)} { "Edit" }
                 }
             }
         }
-        @if app.accounts.iter().any(|a| a.oauth.as_ref().is_some_and(|o| o.redirect_uri.is_some())) {
+        @if accounts.iter().any(|a| a.oauth.as_ref().is_some_and(|o| o.redirect_uri.is_some())) {
             form.card method="post" action="/mail/oauth/paste" {
                 p.small { "After logging in, the browser lands on a page that fails to load (like " code { "https://localhost/?code=…" } "): paste its address here." }
                 div.row style="display:flex; gap:8px" {
@@ -816,6 +823,13 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
                     button type="submit" { "Finish" }
                 }
             }
+        }
+        p { "Add an account: "
+            @for (i, p) in crate::accounts::PRESETS.iter().enumerate() {
+                @if i > 0 { " · " }
+                a href={"/mail/accounts/new?preset=" (p.key)} { (p.label) }
+            }
+            " · " a href="/mail/accounts/new" { "other (IMAP and SMTP)" }
         }
         h1 { "Invitations" }
         @if invites.is_empty() {
@@ -857,7 +871,7 @@ fn redirect_uri(app: &App, account: &crate::accounts::Account, headers: &HeaderM
 
 async fn oauth_start(State(app): St, headers: HeaderMap, Path(account): Path<String>) -> Response {
     guard!(app, headers);
-    let Some(acc) = app.accounts.iter().find(|a| a.id == account) else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(acc) = &app.account(&account) else { return StatusCode::NOT_FOUND.into_response() };
     let redirect = redirect_uri(&app, acc, &headers);
     let state = uuid::Uuid::new_v4().simple().to_string();
     match crate::accounts::authorize_url(acc, &redirect, &state) {
@@ -869,15 +883,15 @@ async fn oauth_start(State(app): St, headers: HeaderMap, Path(account): Path<Str
     }
 }
 
-async fn finish_oauth(app: &App, code: &str, state: &str) -> Response {
+async fn finish_oauth(app: &Arc<App>, code: &str, state: &str) -> Response {
     let pending = app.oauth_pending.lock().unwrap().remove(state);
     let Some((account, verifier, redirect)) = pending else {
         return back("/mail", None, Some("That login expired: start again."));
     };
-    let Some(acc) = app.accounts.iter().find(|a| a.id == account) else { return back("/mail", None, Some("Unknown account.")) };
+    let Some(acc) = &app.account(&account) else { return back("/mail", None, Some("Unknown account.")) };
     match crate::accounts::exchange_code(acc, &app.mail, code, &verifier, &redirect).await {
         Ok(()) => {
-            app.mail.waker(&acc.id).notify_one();
+            crate::sync::restart(app, &acc.id);
             back("/mail", Some(&format!("{} is connected.", acc.name)), None)
         }
         Err(e) => back("/mail", None, Some(&format!("{e:#}"))),
@@ -930,6 +944,202 @@ fn form_urlencoded_pairs(q: &str) -> Vec<(String, String)> {
             (dec(k), dec(v))
         })
         .collect()
+}
+
+// Mail accounts
+
+use crate::accounts::{Account, OAuth, PRESETS, Preset, preset};
+
+fn blank_account(p: Option<&Preset>) -> Account {
+    Account {
+        id: String::new(),
+        name: p.map(|p| p.label.split(' ').next().unwrap_or(p.label).to_string()).unwrap_or_default(),
+        address: String::new(),
+        aliases: Vec::new(),
+        imap: p.map(|p| p.imap.to_string()).unwrap_or_default(),
+        smtp: p.map(|p| p.smtp.to_string()).unwrap_or_default(),
+        user: None,
+        password: None,
+        oauth: p.filter(|p| p.microsoft).map(|_| OAuth {
+            client_id: crate::accounts::THUNDERBIRD_CLIENT.into(),
+            client_secret: None,
+            tenant: "common".into(),
+            redirect_uri: Some("https://localhost".into()),
+            scopes: "offline_access https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send".into(),
+        }),
+        history_days: 90,
+        skip: Vec::new(),
+        tls: true,
+    }
+}
+
+/// The add or edit form; `existing` is false for a new account.
+fn account_view(draft: &Account, existing: bool, preset_key: &str, err: Option<&str>) -> Response {
+    let p = preset(preset_key);
+    let known_servers = p.is_some_and(|p| draft.imap == p.imap && draft.smtp == p.smtp);
+    let title = if existing { draft.name.clone() } else { format!("Add {}", p.map(|p| p.label).unwrap_or("an account")) };
+    let action = if existing { format!("/mail/accounts/{}", draft.id) } else { "/mail/accounts/new".into() };
+    let join = |v: &[String]| v.join(", ");
+    page(&title, "/mail", html! {
+        p.small { a href="/mail" { "← Mail" } }
+        h1 { (title) }
+        @if let Some(e) = err { p.err { (e) } }
+        form.card method="post" action=(action) style="display:flex; flex-direction:column; gap:10px; max-width:520px" {
+            input type="hidden" name="preset" value=(preset_key);
+            label { "Name (the folder mail apps show for it)" input name="name" required value=(draft.name) placeholder="Work"; }
+            label { "Email address" input name="address" type="email" required value=(draft.address) placeholder="me@example.com"; }
+            label { "Other addresses it sends as (comma-separated)" input name="aliases" value=(join(&draft.aliases)); }
+            @if draft.oauth.is_none() {
+                label {
+                    @if existing { "Password (leave empty to keep it)" } @else { "Password" }
+                    input name="password" type="password" autocomplete="new-password" required[!existing];
+                }
+            }
+            @if let Some(p) = p { p.small.muted { (p.hint) } }
+            details open[!known_servers] {
+                summary.small { "Servers and sync" }
+                div style="display:flex; flex-direction:column; gap:10px; margin-top:8px" {
+                    label { "IMAP server (host:port, SSL/TLS)" input name="imap" required value=(draft.imap) placeholder="imap.example.com:993"; }
+                    label { "SMTP server (host:port; 465 is SSL/TLS, others STARTTLS)" input name="smtp" required value=(draft.smtp) placeholder="smtp.example.com:465"; }
+                    label { "Login, if it isn't the address" input name="user" value=(draft.user.clone().unwrap_or_default()); }
+                    label { "Days of mail to fetch on the first sync" input name="history_days" type="number" min="1" value=(draft.history_days); }
+                    label { "Provider folders to leave out (comma-separated)" input name="skip" value=(join(&draft.skip)); }
+                }
+            }
+            div { button type="submit" { @if existing { "Save" } @else { "Add" } } }
+            p.small.muted { @if draft.oauth.is_some() { "Microsoft accounts log in with Microsoft, from the Mail page, once saved." }
+                @else { "valet logs in to both servers before saving, so a wrong password shows up here." } }
+        }
+        @if existing {
+            form method="post" action={"/mail/accounts/" (draft.id) "/delete"}
+                onsubmit="return confirm('Remove this account from valet? Its mail stays at the provider; the copy kept here goes.')" {
+                button.plain type="submit" { "Remove account" }
+            }
+        }
+    })
+}
+
+#[derive(Deserialize)]
+struct PresetQuery {
+    #[serde(default)]
+    preset: String,
+}
+
+async fn new_account_page(State(app): St, headers: HeaderMap, Query(q): Query<PresetQuery>) -> Response {
+    guard!(app, headers);
+    account_view(&blank_account(preset(&q.preset)), false, &q.preset, None)
+}
+
+async fn edit_account_page(State(app): St, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    guard!(app, headers);
+    let Some(acc) = app.account(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    let key = PRESETS.iter().find(|p| p.imap == acc.imap).map(|p| p.key).unwrap_or("");
+    account_view(&acc, true, key, None)
+}
+
+#[derive(Deserialize)]
+struct AccountForm {
+    #[serde(default)]
+    preset: String,
+    name: String,
+    address: String,
+    #[serde(default)]
+    aliases: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    imap: String,
+    #[serde(default)]
+    smtp: String,
+    #[serde(default)]
+    user: String,
+    #[serde(default)]
+    history_days: String,
+    #[serde(default)]
+    skip: String,
+}
+
+fn list(s: &str) -> Vec<String> {
+    s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()
+}
+
+/// The account the form describes, over `base` (the saved account or a blank one).
+fn apply_form(base: &Account, f: &AccountForm) -> Account {
+    let mut a = base.clone();
+    a.name = f.name.trim().to_string();
+    a.address = f.address.trim().to_string();
+    a.aliases = list(&f.aliases);
+    if !f.password.is_empty() && a.oauth.is_none() {
+        a.password = Some(f.password.clone());
+    }
+    a.imap = f.imap.trim().to_string();
+    a.smtp = f.smtp.trim().to_string();
+    a.user = Some(f.user.trim().to_string()).filter(|u| !u.is_empty());
+    a.history_days = f.history_days.trim().parse().unwrap_or(a.history_days).max(1);
+    a.skip = list(&f.skip);
+    a
+}
+
+/// Checks, tries the login when it matters, saves, and restarts the sync.
+async fn save_account_form(app: &Arc<App>, base: Account, existing: bool, f: AccountForm) -> Response {
+    let mut acc = apply_form(&base, &f);
+    if !existing {
+        let stem = slug(&acc.name);
+        acc.id = stem.clone();
+        let mut n = 2;
+        while app.account(&acc.id).is_some() {
+            acc.id = format!("{stem}-{n}");
+            n += 1;
+        }
+    }
+    let shown = |e: &str| {
+        let mut draft = acc.clone();
+        draft.password = None;
+        account_view(&draft, existing, &f.preset, Some(e))
+    };
+    if let Err(e) = acc.check() {
+        return shown(&e.to_string());
+    }
+    let login_changed =
+        !existing || acc.password != base.password || acc.imap != base.imap || acc.smtp != base.smtp || acc.login() != base.login();
+    if login_changed && acc.oauth.is_none() {
+        let test = tokio::time::timeout(std::time::Duration::from_secs(40), crate::accounts::test_login(&acc, &app.mail)).await;
+        match test {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return shown(&format!("Login failed, nothing saved: {e:#}")),
+            Err(_) => return shown("The servers didn't answer within 40 seconds, nothing saved."),
+        }
+    }
+    if let Err(e) = app.save_account(acc.clone()) {
+        return shown(&format!("{e:#}"));
+    }
+    let msg = if acc.oauth.is_some() && app.mail.token(&acc.id).is_none() {
+        format!("Saved {}: now log in to Microsoft.", acc.name)
+    } else {
+        format!("Saved {}: syncing.", acc.name)
+    };
+    back("/mail", Some(&msg), None)
+}
+
+async fn create_account(State(app): St, headers: HeaderMap, Form(f): Form<AccountForm>) -> Response {
+    guard!(app, headers);
+    let base = blank_account(preset(&f.preset));
+    save_account_form(&app, base, false, f).await
+}
+
+async fn update_account(State(app): St, headers: HeaderMap, Path(id): Path<String>, Form(f): Form<AccountForm>) -> Response {
+    guard!(app, headers);
+    let Some(base) = app.account(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    save_account_form(&app, base, true, f).await
+}
+
+async fn delete_account(State(app): St, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    guard!(app, headers);
+    let Some(acc) = app.account(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    match app.delete_account(&id) {
+        Ok(()) => back("/mail", Some(&format!("Removed {}.", acc.name)), None),
+        Err(e) => back("/mail", None, Some(&format!("{e:#}"))),
+    }
 }
 
 #[derive(Deserialize)]

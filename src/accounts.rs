@@ -1,5 +1,6 @@
-//! The mailboxes valet gathers: their settings (from `VALET_ACCOUNTS`),
-//! logging in to their IMAP and SMTP servers, and OAuth for Microsoft 365.
+//! The mailboxes valet gathers: their settings (kept in `mail.db`, edited on
+//! the Mail page), logging in to their IMAP and SMTP servers, and OAuth for
+//! Microsoft 365.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,14 +8,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use lettre::AsyncTransport;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 use crate::mailstore::{MailStore, now};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Account {
     /// Short, stable identifier (`work`).
     pub id: String,
@@ -54,7 +55,7 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OAuth {
     pub client_id: String,
     #[serde(default)]
@@ -86,20 +87,92 @@ impl Account {
     pub fn sends_as(&self, address: &str) -> bool {
         self.address.eq_ignore_ascii_case(address) || self.aliases.iter().any(|a| a.eq_ignore_ascii_case(address))
     }
+
+    /// What makes an account unusable, said for the person typing it in.
+    pub fn check(&self) -> Result<()> {
+        if self.id.is_empty() {
+            bail!("the account needs an id");
+        }
+        if self.name.trim().is_empty() || self.name.contains('/') {
+            bail!("the account's name can't be empty or contain a /");
+        }
+        if !self.address.contains('@') {
+            bail!("{} is not an email address", self.address);
+        }
+        if self.password.as_deref().is_none_or(str::is_empty) && self.oauth.is_none() {
+            bail!("{} needs a password", self.name);
+        }
+        for (what, server) in [("IMAP", &self.imap), ("SMTP", &self.smtp)] {
+            if server.trim().is_empty() {
+                bail!("the {what} server is missing");
+            }
+        }
+        Ok(())
+    }
 }
 
+/// Accounts from `VALET_ACCOUNTS`, the way they used to be configured: imported
+/// once into valet's database.
 pub fn from_env() -> Result<Vec<Account>> {
     let Ok(json) = std::env::var("VALET_ACCOUNTS") else { return Ok(Vec::new()) };
     let accounts: Vec<Account> = serde_json::from_str(&json).context("VALET_ACCOUNTS is not valid JSON")?;
     for a in &accounts {
-        if a.password.is_none() && a.oauth.is_none() {
-            bail!("account {} needs a password or oauth", a.id);
-        }
-        if a.id.is_empty() || a.name.contains('/') {
-            bail!("account {}: empty id or a / in its name", a.id);
-        }
+        a.check().with_context(|| format!("account {}", a.id))?;
     }
     Ok(accounts)
+}
+
+/// A provider whose servers are known: only the address and password to type.
+pub struct Preset {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub imap: &'static str,
+    pub smtp: &'static str,
+    /// Microsoft 365: OAuth with Thunderbird's public client, which
+    /// organisations commonly allow.
+    pub microsoft: bool,
+    pub hint: &'static str,
+}
+
+pub const PRESETS: &[Preset] = &[
+    Preset {
+        key: "gmail",
+        label: "Gmail",
+        imap: "imap.gmail.com:993",
+        smtp: "smtp.gmail.com:465",
+        microsoft: false,
+        hint: "An app password (myaccount.google.com/apppasswords, needs 2-step verification), not your Google password.",
+    },
+    Preset {
+        key: "ionos",
+        label: "IONOS",
+        imap: "imap.ionos.fr:993",
+        smtp: "smtp.ionos.fr:465",
+        microsoft: false,
+        hint: "The mailbox's password.",
+    },
+    Preset {
+        key: "microsoft",
+        label: "Microsoft 365 / Outlook",
+        imap: "outlook.office365.com:993",
+        smtp: "smtp.office365.com:587",
+        microsoft: true,
+        hint: "No password: after saving, log in to Microsoft from this page.",
+    },
+];
+
+pub const THUNDERBIRD_CLIENT: &str = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
+pub fn preset(key: &str) -> Option<&'static Preset> {
+    PRESETS.iter().find(|p| p.key == key)
+}
+
+/// Logs in to both servers, to tell a wrong password at once.
+pub async fn test_login(acc: &Account, mail: &MailStore) -> Result<()> {
+    let mut s = imap(acc, mail).await.context("IMAP")?;
+    let _ = s.logout().await;
+    smtp(acc, mail).await?.test_connection().await.context("SMTP")?.then_some(()).context("SMTP: the server refused")?;
+    Ok(())
 }
 
 fn host_port(s: &str, default: u16) -> (String, u16) {
@@ -148,15 +221,27 @@ pub async fn imap(acc: &Account, mail: &MailStore) -> Result<Imap> {
     let session = match &acc.oauth {
         Some(_) => {
             let token = access_token(acc, mail).await?;
-            client.authenticate("XOAUTH2", XOAuth2(xoauth2(acc.login(), &token))).await.map_err(|(e, _)| e)?
+            client.authenticate("XOAUTH2", XOAuth2(xoauth2(acc.login(), &token))).await.map_err(|(e, _)| refused(e))?
         }
-        None => client.login(acc.login(), acc.password.as_deref().unwrap_or("")).await.map_err(|(e, _)| e)?,
+        None => client.login(acc.login(), acc.password.as_deref().unwrap_or("")).await.map_err(|(e, _)| refused(e))?,
     };
     Ok(session)
 }
 
-/// Relays a message through the account's SMTP server.
-pub async fn send(acc: &Account, mail: &MailStore, from: &str, to: &[String], raw: &[u8]) -> Result<()> {
+/// A refused login, with the server's own words (async-imap wraps them in a
+/// debug dump: `code: None, info: Some("…")`).
+fn refused(e: async_imap::error::Error) -> anyhow::Error {
+    use async_imap::error::Error;
+    match &e {
+        Error::No(s) | Error::Bad(s) => {
+            let said = s.split_once("info: Some(\"").and_then(|(_, r)| r.rsplit_once("\")")).map(|(m, _)| m.replace("\\\"", "\""));
+            anyhow!("login refused: {}", said.as_deref().unwrap_or(s))
+        }
+        _ => e.into(),
+    }
+}
+
+async fn smtp(acc: &Account, mail: &MailStore) -> Result<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>> {
     use lettre::transport::smtp::authentication::{Credentials, Mechanism};
     use lettre::{AsyncSmtpTransport, Tokio1Executor};
     let (host, port) = host_port(&acc.smtp, 465);
@@ -169,18 +254,22 @@ pub async fn send(acc: &Account, mail: &MailStore, from: &str, to: &[String], ra
     }
     .port(port)
     .timeout(Some(Duration::from_secs(60)));
-    let transport = match &acc.oauth {
+    Ok(match &acc.oauth {
         Some(_) => builder
             .credentials(Credentials::new(acc.login().into(), access_token(acc, mail).await?))
             .authentication(vec![Mechanism::Xoauth2]),
         None => builder.credentials(Credentials::new(acc.login().into(), acc.password.clone().unwrap_or_default())),
     }
-    .build();
+    .build())
+}
+
+/// Relays a message through the account's SMTP server.
+pub async fn send(acc: &Account, mail: &MailStore, from: &str, to: &[String], raw: &[u8]) -> Result<()> {
     let envelope = lettre::address::Envelope::new(
         Some(from.parse()?),
         to.iter().map(|t| t.parse()).collect::<Result<Vec<lettre::Address>, _>>()?,
     )?;
-    transport.send_raw(&envelope, raw).await?;
+    smtp(acc, mail).await?.send_raw(&envelope, raw).await?;
     Ok(())
 }
 
