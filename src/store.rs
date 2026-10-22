@@ -265,6 +265,14 @@ impl Store {
             .unwrap()
     }
 
+    /// The event with this UID, in whichever calendar.
+    pub fn find_uid(&self, uid: &str) -> Option<Object> {
+        let c = self.db();
+        c.query_row(&format!("SELECT {OBJ_COLS} FROM objects WHERE uid = ?1 ORDER BY calendar = 'invitations'"), [uid], obj_row)
+            .optional()
+            .unwrap()
+    }
+
     /// Objects changed and names deleted after revision `since`.
     pub fn changes(&self, calendar: &str, since: i64) -> (Vec<Object>, Vec<String>) {
         let c = self.db();
@@ -337,6 +345,19 @@ impl Store {
             .unwrap();
         }
         c.execute("DELETE FROM tombstones WHERE calendar = ?1 AND name = ?2", [calendar, name]).unwrap();
+        // An invitation saved into a real calendar (by an app accepting it)
+        // leaves the Invitations calendar.
+        let copy: Option<String> = (calendar != crate::invites::CALENDAR)
+            .then(|| {
+                c.query_row("SELECT name FROM objects WHERE calendar = ?1 AND uid = ?2", [crate::invites::CALENDAR, &uid], |r| r.get(0))
+                    .optional()
+                    .unwrap()
+            })
+            .flatten();
+        drop(c);
+        if let Some(copy) = copy {
+            let _ = self.delete_object(crate::invites::CALENDAR, &copy);
+        }
         Ok(Put { etag: tag, created, rewritten })
     }
 

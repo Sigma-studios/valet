@@ -1,12 +1,22 @@
+mod accounts;
 mod alarms;
 mod dav;
 mod ical;
+mod imapd;
 mod import;
+mod invites;
+mod mailstore;
+mod mime;
+mod mutf7;
+mod smtpd;
 mod store;
+mod sync;
+mod util;
 mod web;
 mod xml;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,7 +30,9 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use crate::accounts::Account;
 use crate::ical::Component;
+use crate::mailstore::MailStore;
 use crate::store::{Calendar, Store};
 
 pub struct Config {
@@ -72,6 +84,10 @@ impl Config {
 pub struct App {
     pub store: Store,
     pub config: Config,
+    pub mail: MailStore,
+    pub accounts: Vec<Account>,
+    /// OAuth logins in progress: state → (account id, PKCE verifier, redirect URI).
+    pub oauth_pending: Mutex<HashMap<String, (String, String, String)>>,
 }
 
 /// All of a calendar's events as one iCalendar file.
@@ -126,13 +142,26 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     let data_dir = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "data".into()));
     std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let store = Store::open(&data_dir.join("valet.db"))?;
-    let app = Arc::new(App { store, config });
+    let mail = MailStore::open(&data_dir.join("mail.db"))?;
+    let accounts = accounts::from_env()?;
+    let app = Arc::new(App { store, config, mail, accounts, oauth_pending: Mutex::new(HashMap::new()) });
 
-    let listen = std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let listener = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("binding {listen}"))?;
-    tracing::info!("listening on {listen}");
-    axum::serve(listener, router(app)).with_graceful_shutdown(shutdown()).await?;
+    let bind = async |var: &str, default: &str| -> Result<tokio::net::TcpListener> {
+        let addr = std::env::var(var).unwrap_or_else(|_| default.into());
+        let l = tokio::net::TcpListener::bind(&addr).await.with_context(|| format!("binding {addr} ({var})"))?;
+        tracing::info!("{var}: listening on {addr}");
+        Ok(l)
+    };
+    let http = bind("LISTEN", "0.0.0.0:8080").await?;
+    let imap = bind("IMAP_LISTEN", "0.0.0.0:1143").await?;
+    let smtp = bind("SMTP_LISTEN", "0.0.0.0:1587").await?;
+    tokio::spawn(imapd::serve(app.clone(), imap));
+    tokio::spawn(smtpd::serve(app.clone(), smtp));
+    sync::start(app.clone());
+    tracing::info!("{} mail accounts", app.accounts.len());
+    axum::serve(http, router(app)).with_graceful_shutdown(shutdown()).await?;
     Ok(())
 }
 
