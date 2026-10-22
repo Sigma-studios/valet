@@ -17,6 +17,13 @@ the native apps of every device.
   calendar until answered), and can be answered from valet's Mail page: the
   organizer gets the reply from the account the invitation came to.
 
+- **Webmail** on valet's own site, from any browser: every folder of every
+  account (and all inboxes together), search, reading, and writing (reply,
+  reply all, forward, attachments). It works on the same copy as the mail
+  apps, so read, flagged, moved and deleted messages match everywhere. HTML
+  mail is shown in a frame where nothing runs, and remote images (which tell
+  senders you opened a message) stay blocked until asked for.
+
 ## Alert patterns
 
 A pattern is a named, reusable set of alerts with a tag: *Meeting* (`#meeting`)

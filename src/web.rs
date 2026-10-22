@@ -42,6 +42,13 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/mail/oauth", get(oauth_callback))
         .route("/mail/oauth/paste", post(oauth_paste))
         .route("/invites/{id}", post(answer_invite))
+        .route("/inbox", get(webmail::inbox))
+        .route("/box/{id}", get(webmail::list))
+        .route("/msg/{id}", get(webmail::view).post(webmail::action))
+        .route("/msg/{id}/html", get(webmail::html_body))
+        .route("/msg/{id}/att/{n}", get(webmail::attachment))
+        .route("/msg/{id}/cid/{cid}", get(webmail::cid))
+        .route("/compose", get(webmail::compose).post(webmail::send))
 }
 
 const COOKIE: &str = "valet_session";
@@ -65,6 +72,8 @@ macro_rules! guard {
     };
 }
 
+mod webmail;
+
 const CSS: &str = r#"
 :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --card:#fff; --accent:#2563eb; --bad:#b91c1c; --good:#15803d; }
 @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --card:#292524; --accent:#60a5fa; --bad:#f87171; --good:#4ade80; } }
@@ -75,7 +84,7 @@ nav { max-width:960px; margin:0 auto; padding:10px 16px; display:flex; gap:16px;
 a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
 nav a { color:var(--fg); } nav a.on { color:var(--accent); font-weight:600; }
 nav .brand { font-weight:700; margin-right:8px; } nav form { margin-left:auto; }
-main { max-width:960px; margin:0 auto; padding:16px; }
+main { max-width:960px; margin:0 auto; padding:16px; } body.wide main, body.wide nav { max-width:1400px; }
 h1 { font-size:22px; margin:8px 0 16px; } h2 { font-size:17px; margin:24px 0 8px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin:12px 0; }
 .muted { color:var(--muted); } .small { font-size:13px; }
@@ -95,6 +104,15 @@ code { background:var(--line); padding:1px 5px; border-radius:4px; word-break:br
 "#;
 
 fn page(title: &str, on: &str, body: Markup) -> Response {
+    page_with(title, on, false, body)
+}
+
+/// A page using the whole window's width (webmail).
+fn page_wide(title: &str, on: &str, body: Markup) -> Response {
+    page_with(title, on, true, body)
+}
+
+fn page_with(title: &str, on: &str, wide: bool, body: Markup) -> Response {
     let link = |href: &str, label: &str| {
         html! { a href=(href) class=[(on == href).then_some("on")] { (label) } }
     };
@@ -107,10 +125,10 @@ fn page(title: &str, on: &str, body: Markup) -> Response {
                 title { (title) " · valet" }
                 style { (PreEscaped(CSS)) }
             }
-            body {
+            body.wide[wide] {
                 header { nav {
                     span.brand { "valet" }
-                    (link("/", "Overview")) (link("/mail", "Mail")) (link("/events", "Events")) (link("/patterns", "Patterns"))
+                    (link("/inbox", "Mail")) (link("/", "Overview")) (link("/mail", "Accounts")) (link("/events", "Events")) (link("/patterns", "Patterns"))
                     (link("/calendars", "Calendars")) (link("/import", "Import")) (link("/connect", "Connect apps"))
                     form method="post" action="/logout" { button.plain type="submit" { "Log out" } }
                 } }
@@ -205,7 +223,7 @@ async fn login(State(app): St, Form(f): Form<LoginForm>) -> Response {
         return back("/login", None, Some("Wrong password."));
     }
     let cookie = format!("{COOKIE}={}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000", app.config.session());
-    ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
+    ([(header::SET_COOKIE, cookie)], Redirect::to("/inbox")).into_response()
 }
 
 async fn logout() -> Response {
@@ -835,7 +853,7 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
     let login_shown = |a: &crate::accounts::Account| {
         a.oauth.is_some() && (app.mail.token(&a.id).is_none() || m.relogin.as_deref() == Some(a.id.as_str()))
     };
-    page("Mail", "/mail", html! {
+    page("Accounts", "/mail", html! {
         h1 { "Mail accounts" }
         (flash(&m))
         @if accounts.is_empty() {
@@ -905,27 +923,26 @@ setInterval(async () => {
         @if invites.is_empty() {
             p.muted { "None yet: invitations arriving in your inboxes appear here and in the Invitations calendar." }
         } @else {
-            div.card.scroll { table {
-                tr { th { "When" } th { "Event" } th { "Answer" } }
-                @for i in &invites {
-                    tr {
-                        td.small { (when(&i.dtstart)) }
-                        td { (i.summary) br; span.muted.small { "from " (i.organizer) } }
-                        td {
-                            @if let Some(r) = &i.response { p.small.ok { (r.to_lowercase()) } }
-                            form.row method="post" action={"/invites/" (i.id)} {
-                                select name="calendar" {
-                                    @for c in &calendars { option value=(c.id) { (c.name) } }
-                                    option value="" { "Keep in Invitations" }
-                                }
-                                button type="submit" name="answer" value="ACCEPTED" { "Accept" }
-                                button type="submit" name="answer" value="TENTATIVE" { "Maybe" }
-                                button.plain type="submit" name="answer" value="DECLINED" { "Decline" }
-                            }
+            @for i in &invites {
+                div.card {
+                    div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap" {
+                        div {
+                            b { (i.summary) }
+                            div.small.muted { (when(&i.dtstart)) " · from " (i.organizer) }
                         }
+                        @if let Some(r) = &i.response { span.small.ok { "answered: " (r.to_lowercase()) } }
+                    }
+                    form.row method="post" action={"/invites/" (i.id)} style="margin-top:10px" {
+                        label { "Put it in" select name="calendar" {
+                            @for c in &calendars { option value=(c.id) { (c.name) } }
+                            option value="" { "Invitations" }
+                        } }
+                        button type="submit" name="answer" value="ACCEPTED" { "Accept" }
+                        button type="submit" name="answer" value="TENTATIVE" { "Maybe" }
+                        button.plain type="submit" name="answer" value="DECLINED" { "Decline" }
                     }
                 }
-            } }
+            }
             p.muted.small { "Answering emails the organizer from the account the invitation came to. Accepting from a mail app works too: the event then moves to the calendar the app saves it in." }
         }
     })
