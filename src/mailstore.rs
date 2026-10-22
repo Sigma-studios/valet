@@ -428,7 +428,8 @@ impl MailStore {
     }
 
     /// The row an INBOX row stands for (itself otherwise).
-    fn source(&self, m: Msg) -> Msg {
+    /// The account folder's row behind an INBOX row (itself otherwise).
+    pub fn source(&self, m: Msg) -> Msg {
         match m.link.and_then(|l| self.message(l)) {
             Some(s) => s,
             None => m,
