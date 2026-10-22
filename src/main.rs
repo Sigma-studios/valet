@@ -16,7 +16,7 @@ mod web;
 mod xml;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -85,9 +85,56 @@ pub struct App {
     pub store: Store,
     pub config: Config,
     pub mail: MailStore,
-    pub accounts: Vec<Account>,
+    accounts: RwLock<Vec<Account>>,
+    /// Each account's sync task.
+    pub syncs: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     /// OAuth logins in progress: state → (account id, PKCE verifier, redirect URI).
     pub oauth_pending: Mutex<HashMap<String, (String, String, String)>>,
+}
+
+impl App {
+    pub fn new(store: Store, config: Config, mail: MailStore) -> App {
+        let accounts = RwLock::new(mail.accounts());
+        App { store, config, mail, accounts, syncs: Mutex::default(), oauth_pending: Mutex::default() }
+    }
+
+    pub fn accounts(&self) -> Vec<Account> {
+        self.accounts.read().unwrap().clone()
+    }
+
+    pub fn account(&self, id: &str) -> Option<Account> {
+        self.accounts.read().unwrap().iter().find(|a| a.id == id).cloned()
+    }
+
+    /// Saves an account (new, or replacing the one with its id) and restarts its sync.
+    pub fn save_account(self: &Arc<Self>, acc: Account) -> Result<()> {
+        self.mail.put_account(&acc)?;
+        *self.accounts.write().unwrap() = self.mail.accounts();
+        sync::restart(self, &acc.id);
+        Ok(())
+    }
+
+    pub fn delete_account(self: &Arc<Self>, id: &str) -> Result<()> {
+        if let Some(task) = self.syncs.lock().unwrap().remove(id) {
+            task.abort();
+        }
+        self.mail.delete_account(id)?;
+        *self.accounts.write().unwrap() = self.mail.accounts();
+        Ok(())
+    }
+
+    /// Every address that is the user: `VALET_ADDRESSES` and the accounts'.
+    pub fn addresses(&self) -> Vec<String> {
+        let mut all = self.config.addresses.clone();
+        for a in self.accounts.read().unwrap().iter() {
+            for addr in std::iter::once(&a.address).chain(&a.aliases) {
+                if !all.iter().any(|x| x.eq_ignore_ascii_case(addr)) {
+                    all.push(addr.clone());
+                }
+            }
+        }
+        all
+    }
 }
 
 /// All of a calendar's events as one iCalendar file.
@@ -145,8 +192,16 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let store = Store::open(&data_dir.join("valet.db"))?;
     let mail = MailStore::open(&data_dir.join("mail.db"))?;
-    let accounts = accounts::from_env()?;
-    let app = Arc::new(App { store, config, mail, accounts, oauth_pending: Mutex::new(HashMap::new()) });
+    if mail.accounts().is_empty() {
+        let from_env = accounts::from_env()?;
+        for a in &from_env {
+            mail.put_account(a)?;
+        }
+        if !from_env.is_empty() {
+            tracing::info!("imported {} accounts from VALET_ACCOUNTS: they are managed on the Mail page now, VALET_ACCOUNTS can go", from_env.len());
+        }
+    }
+    let app = Arc::new(App::new(store, config, mail));
 
     let bind = async |var: &str, default: &str| -> Result<tokio::net::TcpListener> {
         let addr = std::env::var(var).unwrap_or_else(|_| default.into());
@@ -160,7 +215,7 @@ async fn main() -> Result<()> {
     tokio::spawn(imapd::serve(app.clone(), imap));
     tokio::spawn(smtpd::serve(app.clone(), smtp));
     sync::start(app.clone());
-    tracing::info!("{} mail accounts", app.accounts.len());
+    tracing::info!("{} mail accounts", app.accounts().len());
     axum::serve(http, router(app)).with_graceful_shutdown(shutdown()).await?;
     Ok(())
 }

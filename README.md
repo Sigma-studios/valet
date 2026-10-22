@@ -52,8 +52,7 @@ All through the environment:
 |---|---|
 | `VALET_PASSWORD` | the one password (at least 12 characters), for the web UI and the apps |
 | `VALET_USER` | the user name apps log in with (default `valet`) |
-| `VALET_ADDRESSES` | your email addresses, comma-separated, so apps recognise you in invitations |
-| `VALET_ACCOUNTS` | the mailboxes, as JSON (below) |
+| `VALET_ADDRESSES` | more addresses of yours, comma-separated, for invitations (the accounts' own addresses count already) |
 | `DATA_DIR` | where `valet.db` (calendar) and `mail.db` live (default `data`) |
 | `LISTEN` | web UI and CalDAV, default `0.0.0.0:8080` |
 | `IMAP_LISTEN` | default `0.0.0.0:1143` |
@@ -64,42 +63,31 @@ valet speaks plain HTTP, IMAP and SMTP: put it behind something that adds TLS
 
 ### Mail accounts
 
-```json
-[
-  {"id": "work", "name": "Work", "address": "me@company.example",
-   "imap": "imap.ionos.fr:993", "smtp": "smtp.ionos.fr:465", "password": "…"},
-  {"id": "perso", "name": "Gmail", "address": "me@gmail.com",
-   "imap": "imap.gmail.com:993", "smtp": "smtp.gmail.com:465", "password": "Google app password"},
-  {"id": "school", "name": "School", "address": "me@school.example",
-   "imap": "outlook.office365.com:993", "smtp": "smtp.office365.com:587",
-   "oauth": {"client_id": "…", "redirect_uri": "https://localhost"}}
-]
-```
+Added, edited and removed on the Mail page, and kept in `mail.db`. Gmail,
+IONOS and Microsoft 365 are presets: type the address and the password; any
+other provider takes its IMAP and SMTP servers. valet logs in to both servers
+before saving, so a wrong password is caught there. Each account has:
 
 | Field | |
 |---|---|
-| `id` | short and stable: it keys valet's data |
-| `name` | the folder mail apps show for the account |
-| `address`, `aliases` | what the account may send as |
-| `imap`, `smtp` | `host:port`; SMTP port 465 is TLS from the start, others use STARTTLS |
-| `user` | the login, if it isn't `address` |
-| `password` | or, for Microsoft 365, `oauth` |
-| `history_days` | how far back the first sync of each folder goes (default 90) |
-| `skip` | provider folders to leave out, by name |
+| name | the folder mail apps show for the account |
+| address, other addresses | what the account may send as |
+| IMAP, SMTP servers | `host:port`; IMAP is SSL/TLS; SMTP port 465 is SSL/TLS, others STARTTLS |
+| login | if it isn't the address |
+| days of mail | how far back the first sync of each folder goes (default 90) |
+| folders to leave out | provider folders, by name |
 
 Gmail needs an app password (myaccount.google.com/apppasswords, with 2-step
 verification on). Its "All Mail", "Important" and "Starred" views are left out:
 they only repeat other folders.
 
-**Microsoft 365** only accepts OAuth. `oauth` takes a `client_id` (and
-`client_secret` for a confidential client, `tenant`, default `common`, and
-`scopes`): an app registered in Microsoft Entra with the delegated
-`IMAP.AccessAsUser.All`, `SMTP.Send` and `offline_access` permissions and
-`https://<valet's host>/mail/oauth` as redirect URI; or the public client of a
-mail app your organisation already allows, with that app's redirect URI. Then
-press *Log in to Microsoft* on the Mail page; when the redirect URI isn't
-valet's, the browser ends on a page that doesn't load: paste its address into
-the Mail page.
+**Microsoft 365** only accepts OAuth. The preset uses Thunderbird's public
+client (organisations that allow Thunderbird allow it), whose redirect URI is
+`https://localhost`: press *Log in to Microsoft* on the Mail page, and once the
+browser ends on a page that doesn't load, paste its address into the Mail page.
+
+Accounts used to come from a `VALET_ACCOUNTS` variable (a JSON list of the same
+fields); if it is set when valet has no account yet, they are imported once.
 
 ## Running it on façade
 
@@ -108,9 +96,11 @@ facade app create valet --git https://github.com/Sigma-studios/valet \
   --rust-bin valet --port 8080 --domain mail.example.com --volume data:/data --memory 512 \
   --tls-port 993:1143 --tls-port 465:1587
 facade env set valet DATA_DIR=/data VALET_USER=me --public
-facade env set valet VALET_PASSWORD VALET_ADDRESSES VALET_ACCOUNTS   # each read from stdin
+facade env set valet VALET_PASSWORD   # read from stdin
 facade deploy valet
 ```
+
+Then add the mailboxes on the Mail page.
 
 Mail apps then use `mail.example.com`, IMAP on 993 and SMTP on 465, both
 SSL/TLS, with valet's user name and password (the Connect apps page lists it
@@ -140,5 +130,5 @@ VALET_PASSWORD='a long test password' cargo run   # http://localhost:8080
 ```
 
 Locally, mail apps connect to `localhost` on 1143 (IMAP) and 1587 (SMTP)
-without encryption. For a test provider, an account can set `"tls": false`
-(a local GreenMail, say).
+without encryption. For a test provider without encryption (a local
+GreenMail, say), import an account with `"tls": false` through `VALET_ACCOUNTS`.

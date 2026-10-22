@@ -115,14 +115,14 @@ fn handle(app: &App, acc: &Account, text: &str) -> Result<()> {
 
 fn is_me(app: &App, acc: &Account, value: &str) -> bool {
     let a = mailto(value);
-    acc.sends_as(&a) || app.config.addresses.iter().any(|x| x.eq_ignore_ascii_case(&a))
+    acc.sends_as(&a) || app.addresses().iter().any(|x| x.eq_ignore_ascii_case(&a))
 }
 
 /// Answers invitation `id` (`ACCEPTED`, `TENTATIVE`, `DECLINED`): emails the
 /// organizer, updates the event, and moves it to `calendar` when given.
 pub async fn respond(app: &App, id: i64, partstat: &str, calendar: Option<&str>) -> Result<()> {
     let inv = app.mail.invite(id).context("no such invitation")?;
-    let acc = app.accounts.iter().find(|a| a.id == inv.account).context("account gone")?;
+    let acc = &app.account(&inv.account).context("account gone")?;
     let cal = ical::parse(&inv.ics)?.pop().context("bad invitation")?;
     let ev = master(&cal).context("no VEVENT")?;
     let me = ev

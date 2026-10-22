@@ -225,8 +225,7 @@ impl Dav<'_> {
             (CALDAV, "calendar-user-address-set", Node::Principal) => {
                 let mut s: String = self
                     .app
-                    .config
-                    .addresses
+                    .addresses()
                     .iter()
                     .map(|a| format!("<D:href>mailto:{}</D:href>", escape(a)))
                     .collect();

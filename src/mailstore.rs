@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS ops (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, op TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS tokens (account TEXT PRIMARY KEY, refresh TEXT NOT NULL, access TEXT, expires INTEGER);
 CREATE TABLE IF NOT EXISTS status (account TEXT PRIMARY KEY, ok INTEGER NOT NULL, message TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS invites (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, uid TEXT NOT NULL, method TEXT NOT NULL, sequence INTEGER NOT NULL,
     summary TEXT NOT NULL, organizer TEXT NOT NULL, dtstart TEXT NOT NULL, ics TEXT NOT NULL,
@@ -197,6 +198,43 @@ impl MailStore {
     /// Wakes the account's sync task (it has ops to replay).
     pub fn waker(&self, account: &str) -> Arc<Notify> {
         self.wake.lock().unwrap().entry(account.to_string()).or_default().clone()
+    }
+
+    // Accounts
+
+    pub fn accounts(&self) -> Vec<crate::accounts::Account> {
+        let c = self.db();
+        let mut st = c.prepare("SELECT data FROM accounts ORDER BY position, id").unwrap();
+        st.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|d| serde_json::from_str(&d).ok())
+            .collect()
+    }
+
+    /// Adds the account, or replaces the one with its id (keeping its place).
+    pub fn put_account(&self, acc: &crate::accounts::Account) -> Result<()> {
+        self.db().execute(
+            "INSERT INTO accounts (id, position, data) VALUES (?1, (SELECT COALESCE(MAX(position), 0) + 1 FROM accounts), ?2)
+             ON CONFLICT (id) DO UPDATE SET data = excluded.data",
+            params![acc.id, serde_json::to_string(acc)?],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets the account and everything kept for it (its mail stays at the provider).
+    pub fn delete_account(&self, id: &str) -> Result<()> {
+        self.prune_mailboxes(id, &[])?;
+        let c = self.db();
+        for table in ["accounts WHERE id", "ops WHERE account", "tokens WHERE account", "status WHERE account", "invites WHERE account"] {
+            c.execute(&format!("DELETE FROM {table} = ?1"), [id])?;
+        }
+        c.execute(
+            "DELETE FROM blobs WHERE hash NOT IN (SELECT blob FROM messages)
+             AND NOT EXISTS (SELECT 1 FROM ops WHERE instr(ops.op, blobs.hash) > 0)",
+            [],
+        )?;
+        Ok(())
     }
 
     // Mailboxes
@@ -699,6 +737,29 @@ pub struct Invite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accounts_are_kept_in_order_and_forgotten_whole() {
+        let m = MailStore::memory();
+        let json = r#"[{"id":"a","name":"A","address":"a@x.fr","imap":"i:993","smtp":"s:465","password":"p"},
+            {"id":"b","name":"B","address":"b@x.fr","imap":"i:993","smtp":"s:465","password":"p"}]"#;
+        let accs: Vec<crate::accounts::Account> = serde_json::from_str(json).unwrap();
+        m.put_account(&accs[1]).unwrap();
+        m.put_account(&accs[0]).unwrap();
+        let mut renamed = accs[1].clone();
+        renamed.name = "B2".into();
+        m.put_account(&renamed).unwrap();
+        let names: Vec<String> = m.accounts().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["B2", "A"]);
+        let inbox = m.remote_mailbox("b", "INBOX", "B2/INBOX", "").unwrap();
+        m.add_fetched(inbox, &raw("1@x"), &[], 0, 1).unwrap();
+        m.set_status("b", true, "ok");
+        m.delete_account("b").unwrap();
+        assert_eq!(m.accounts().len(), 1);
+        assert!(m.mailbox(inbox).is_none() && m.status("b").is_none());
+        assert_eq!(m.count(m.all_inboxes()).0, 0);
+        assert_eq!(m.db().query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
 
     fn raw(id: &str) -> Vec<u8> {
         format!("Message-ID: <{id}>\r\nSubject: s\r\n\r\nbody\r\n").into_bytes()
