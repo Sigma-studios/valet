@@ -19,6 +19,14 @@ def main():
     side = s.get(f"{WEB}/box/{inbox}").text
     check('<details class="accounts" id="accounts">' in side, "Accounts is closed by default")
     check('<optgroup label="Accounts › Org">' in side and "Edit folders" in side, "the phone menu lists the tree, then each account")
+    # Refresh: a message in a folder IDLE doesn't watch shows at once.
+    check('class="refresh"' in side, "the list has a Refresh button")
+    g = gm_imap("org")
+    g.append("Projects", None, None, message("fresh-one", to="org@local.test"))
+    g.logout()
+    r = s.post(f"{WEB}/mail/refresh")
+    check(r.ok and r.json()["done"], f"Refresh waits for every account's pass: {r.text}")
+    check("fresh-one" in rows(s, node_id(s, "Projects")), "the new message is listed when it answers")
     in_box = rows(s, inbox)
     view = s.get(f"{WEB}/msg/{in_box['hello-1']}").text
     check('<optgroup label="Your folders">' in view and '<optgroup label="Accounts › Test">' in view, "Move to… offers the tree, then the account's folders")

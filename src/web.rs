@@ -62,6 +62,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/msg/{id}/cid/{cid}", get(webmail::cid))
         .route("/compose", get(webmail::compose).post(webmail::send))
         .route("/compose/draft", post(webmail::save_draft))
+        .route("/mail/refresh", post(webmail::refresh))
         .route("/folders/{account}", get(webmail::folders_page).post(webmail::create_folder))
         .route("/folders/{account}/{id}/rename", post(webmail::rename_folder))
         .route("/folders/{account}/{id}/delete", post(webmail::delete_folder))

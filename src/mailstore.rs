@@ -97,6 +97,8 @@ pub struct MailStore {
     /// Something changed in some mailbox (sessions in IDLE re-check theirs).
     pub changed: broadcast::Sender<()>,
     wake: Mutex<HashMap<String, Arc<Notify>>>,
+    /// Per account: sync passes started, and finished.
+    passes: Mutex<HashMap<String, (u64, u64)>>,
 }
 
 const SCHEMA: &str = "
@@ -210,7 +212,7 @@ impl MailStore {
 
     fn with(conn: Connection) -> Result<MailStore> {
         conn.execute_batch(SCHEMA)?;
-        let store = MailStore { conn: Mutex::new(conn), changed: broadcast::channel(64).0, wake: Mutex::new(HashMap::new()) };
+        let store = MailStore { conn: Mutex::new(conn), changed: broadcast::channel(64).0, wake: Mutex::new(HashMap::new()), passes: Mutex::new(HashMap::new()) };
         {
             let c = store.db();
             c.execute(
@@ -242,6 +244,18 @@ impl MailStore {
     /// Wakes the account's sync task (it has ops to replay).
     pub fn waker(&self, account: &str) -> Arc<Notify> {
         self.wake.lock().unwrap().entry(account.to_string()).or_default().clone()
+    }
+
+    /// Counts a sync pass of the account: started (`done` false) or finished.
+    pub fn pass(&self, account: &str, done: bool) {
+        let mut p = self.passes.lock().unwrap();
+        let e = p.entry(account.to_string()).or_default();
+        if done { e.1 += 1 } else { e.0 += 1 }
+    }
+
+    /// (passes started, passes finished) of the account.
+    pub fn passes(&self, account: &str) -> (u64, u64) {
+        self.passes.lock().unwrap().get(account).copied().unwrap_or_default()
     }
 
     // Accounts

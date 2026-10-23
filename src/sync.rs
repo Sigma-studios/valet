@@ -83,6 +83,7 @@ async fn session(app: &App, acc: &Account) -> Result<()> {
     let has_idle = caps.has_str("IDLE");
     let waker = app.mail.waker(&acc.id);
     loop {
+        app.mail.pass(&acc.id, false);
         replay(app, acc, &mut s, has_move, has_uidplus).await?;
         let folders = folders(app, acc, &mut s).await?;
         let mut fetched = 0;
@@ -95,6 +96,7 @@ async fn session(app: &App, acc: &Account) -> Result<()> {
             fetched += sync_folder(app, acc, &mut s, f).await?;
         }
         app.mail.set_status(&acc.id, true, &format!("{} folders in sync{}", folders.len(), if fetched > 0 { format!(", {fetched} new") } else { String::new() }));
+        app.mail.pass(&acc.id, true);
         // Ops queued while syncing go out before waiting.
         if !app.mail.ops(&acc.id).is_empty() {
             continue;
