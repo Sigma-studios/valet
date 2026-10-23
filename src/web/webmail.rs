@@ -125,46 +125,56 @@ fn indent(depth: usize) -> String {
     "\u{a0}\u{a0}\u{a0}".repeat(depth)
 }
 
+/// Folders start closed, but for the way to the one shown; what is opened
+/// stays open from page to page until the browser is closed.
 const SIDEBAR_SCRIPT: &str = r#"
 (() => {
   const nav = document.querySelector('nav.folders');
   if (!nav) return;
-  const closed = new Set(JSON.parse(localStorage.getItem('valet.closed') || '[]'));
+  const opened = new Set(JSON.parse(sessionStorage.getItem('valet.open') || '[]'));
   const rows = [...nav.querySelectorAll('.node')];
+  // The folders around the one shown.
+  const here = rows.findIndex((r) => r.querySelector('a.folder.on'));
+  const around = new Set();
+  for (let i = here - 1, d = here >= 0 ? +rows[here].dataset.depth : 0; i >= 0 && d > 0; i--) {
+    if (+rows[i].dataset.depth < d) { d = +rows[i].dataset.depth; around.add(rows[i].dataset.id); }
+  }
   const apply = () => {
     let limit = Infinity;
     for (const r of rows) {
-      const d = +r.dataset.depth, shut = closed.has(r.dataset.id);
+      const d = +r.dataset.depth, open = opened.has(r.dataset.id) || around.has(r.dataset.id);
       if (d <= limit) limit = Infinity;
       r.hidden = d > limit;
-      const t = r.querySelector('button.twisty');
-      if (t) { t.textContent = shut ? '▸' : '▾'; t.setAttribute('aria-expanded', String(!shut)); }
-      if (!r.hidden && shut) limit = d;
+      r.querySelector('button.twisty')?.setAttribute('aria-expanded', String(open));
+      if (!r.hidden && !open) limit = d;
     }
   };
   for (const t of nav.querySelectorAll('button.twisty')) {
     t.addEventListener('click', () => {
       const id = t.closest('.node').dataset.id;
-      closed.has(id) ? closed.delete(id) : closed.add(id);
-      localStorage.setItem('valet.closed', JSON.stringify([...closed]));
+      if (t.getAttribute('aria-expanded') === 'true') { opened.delete(id); around.delete(id); } else opened.add(id);
+      sessionStorage.setItem('valet.open', JSON.stringify([...opened]));
       apply();
     });
   }
   apply();
   const acc = document.getElementById('accounts');
-  if (!acc.open) acc.open = localStorage.getItem('valet.accounts') === 'open';
-  acc.querySelector('summary').addEventListener('click', () => setTimeout(() => localStorage.setItem('valet.accounts', acc.open ? 'open' : 'closed')));
+  if (!acc.open) acc.open = sessionStorage.getItem('valet.accounts') === 'open';
+  acc.addEventListener('toggle', () => sessionStorage.setItem('valet.accounts', acc.open ? 'open' : 'closed'));
 })();
 "#;
+
+/// The arrow of a folder that has folders inside, turned by the stylesheet.
+const CHEVRON: &str = r#"<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 
 fn sidebar(app: &App, current: i64) -> Markup {
     let (tree, per) = folders(app);
     let item = |b: &Mailbox| {
         let (_, unseen) = app.mail.count(b.id);
         html! {
-            a.folder.on[b.id == current] href={"/box/" (b.id)} {
-                span { (short_name(b)) }
-                @if unseen > 0 { span.badge { (unseen) } }
+            a.folder.on[b.id == current] href={"/box/" (b.id)} title=(place_name(b)) {
+                span.name { (short_name(b)) }
+                @if unseen > 0 { span.badge title={(unseen) " unread"} { (unseen) } }
             }
         }
     };
@@ -173,16 +183,17 @@ fn sidebar(app: &App, current: i64) -> Markup {
     html! {
         nav.folders {
             a.compose href="/compose" { "Write" }
+            div.section { "Folders" }
             @for (i, (n, b)) in tree.iter().enumerate() {
-                div.node data-id=(n.id) data-depth=(n.depth) style={"padding-left:" (n.depth * 14) "px"} {
-                    @if has_kids(i) { button.twisty type="button" aria-label="Show or hide the folders inside" aria-expanded="true" { "▾" } }
+                div.node data-id=(n.id) data-depth=(n.depth) style={"--depth:" (n.depth)} {
+                    @if has_kids(i) { button.twisty type="button" aria-label="Show or hide the folders inside" aria-expanded="false" { (PreEscaped(CHEVRON)) } }
                     @else { span.twisty {} }
                     (item(b))
                 }
             }
             a.edit-tree href="/tree" { "Edit folders" }
             details.accounts #accounts open[in_accounts] {
-                summary { "Accounts" }
+                summary { span.twisty { (PreEscaped(CHEVRON)) } "Accounts" }
                 @for (a, boxes) in &per {
                     div.account { span { (a.name) } a href={"/folders/" (a.id)} title="Manage this account's folders" { "Edit" } }
                     @for b in boxes { (item(b)) }
@@ -204,20 +215,29 @@ fn sidebar(app: &App, current: i64) -> Markup {
 }
 
 const MAIL_CSS: &str = r#"
-.mail { display:grid; grid-template-columns: 210px 1fr; gap:20px; align-items:start; }
-.folders { display:flex; flex-direction:column; gap:1px; position:sticky; top:12px; }
-.folders a.folder { display:flex; justify-content:space-between; gap:8px; padding:5px 10px; border-radius:6px; color:var(--fg); }
+.mail { display:grid; grid-template-columns: 230px 1fr; gap:20px; align-items:start; }
+.folders { display:flex; flex-direction:column; gap:1px; position:sticky; top:12px; max-height:calc(100vh - 24px); overflow-y:auto; scrollbar-width:thin; scrollbar-color:var(--line) transparent; font-size:14px; }
+.folders .section, .folders details.accounts summary { padding:4px 8px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+.folders .section { margin-top:6px; }
+.folders .node { display:flex; align-items:center; padding-left:calc(var(--depth, 0) * 16px); } .folders .node[hidden] { display:none; }
+.folders .twisty { flex:none; width:22px; height:28px; display:flex; align-items:center; justify-content:center; padding:0; border:none; border-radius:4px; background:none; color:var(--muted); cursor:pointer; }
+.folders button.twisty:hover { background:var(--line); color:var(--fg); }
+.folders .twisty svg { transition:transform .12s; }
+.folders button.twisty[aria-expanded=true] svg, .folders details[open] > summary .twisty svg { transform:rotate(90deg); }
+.folders a.folder { flex:1; min-width:0; display:flex; align-items:center; gap:8px; padding:4px 8px; border-radius:6px; color:var(--fg); text-align:left; }
+.folders a.folder .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .folders a.folder:hover { background:var(--line); text-decoration:none; }
-.folders a.folder.on { background:var(--accent); color:#fff; }
-.folders .account { display:flex; justify-content:space-between; margin:14px 10px 4px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
-.folders .account a { text-transform:none; letter-spacing:0; font-weight:400; color:var(--muted); }
-.folders .node { display:flex; align-items:center; } .folders .node[hidden] { display:none; }
-.folders .node a.folder { flex:1; min-width:0; }
-.folders .twisty { flex:none; width:16px; padding:0; border:none; background:none; color:var(--muted); font-size:11px; line-height:1; cursor:pointer; }
-.folders a.edit-tree { font-size:13px; color:var(--muted); padding:4px 10px 0 26px; }
-.folders details.accounts { margin-top:14px; }
-.folders details.accounts summary { cursor:pointer; padding:4px 10px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
-.badge { font-size:12px; font-weight:600; }
+.folders a.folder.on { background:color-mix(in srgb, var(--accent) 20%, transparent); color:var(--fg); font-weight:600; box-shadow:inset 3px 0 0 var(--accent); }
+.folders .badge { flex:none; min-width:20px; padding:0 6px; border-radius:10px; background:var(--line); color:var(--fg); font-size:11px; font-weight:700; line-height:18px; text-align:center; }
+.folders a.folder.on .badge { background:var(--accent); color:#fff; }
+.folders .account { display:flex; justify-content:space-between; align-items:baseline; margin:10px 8px 2px 30px; font-size:12px; font-weight:600; color:var(--muted); }
+.folders .account a { font-weight:400; color:var(--muted); }
+.folders details.accounts > a.folder { margin-left:22px; }
+.folders a.edit-tree { font-size:13px; color:var(--muted); padding:6px 8px 0 30px; }
+.folders details.accounts { margin-top:12px; border-top:1px solid var(--line); padding-top:8px; }
+.folders details.accounts summary { cursor:pointer; list-style:none; display:flex; align-items:center; padding-left:0; }
+.folders details.accounts summary::-webkit-details-marker { display:none; }
+.folders details.accounts summary .twisty { height:20px; }
 a.compose { display:block; text-align:center; background:var(--accent); color:#fff; border-radius:6px; padding:7px 10px; margin-bottom:10px; font-weight:600; }
 a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .folders-menu { display:none; width:100%; margin-bottom:10px; }

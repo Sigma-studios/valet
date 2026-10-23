@@ -85,7 +85,7 @@ def main():
     adds = re.findall(r'action="/tree/add/(\d+)"', page)
     real_id = adds[real.index("Org › Real")]
     r = s.post(f"{WEB}/tree/add/{real_id}")
-    check(node_id(s, "Real") and "Org › Real" not in s.get(f"{WEB}/tree").text, "Add to the tree")
+    check(node_id(s, "Real") and f'action="/tree/add/{real_id}"' not in s.get(f"{WEB}/tree").text, "Add to the tree")
 
     r = s.post(f"{WEB}/tree/reset")
     labels = [(l, p is None) for _, p, l in tree_rows(s)]
