@@ -1,5 +1,7 @@
 """The webmail with the tree, against GreenMail."""
 
+import re
+
 from common import (WEB, check, flash, gm_folders, gm_imap, gm_subjects, members_on_page, message, node_id, q, rows,
                     subjects, valet_imap, wait)
 
@@ -78,6 +80,35 @@ def main():
     wait(lambda: "Test › Later" in s.get(f"{WEB}/tree").text, "Later shows among the folders not in the tree")
     r = s.post(f"{WEB}/tree/add/{members_on_page(s, receipts)[('Test', 'Later')]}")
     check(flash(r)[0] == "Added." and node_id(s, "Later"), "Add to the tree")
+
+    # Reading beside the list.
+    g = gm_imap("test")
+    for i in range(3):
+        g.append("INBOX", None, None, message(f"bulk-{i}"))
+    g.logout()
+    s.post(f"{WEB}/mail/refresh")
+    in_box = rows(s, inbox)
+    b0, b1, b2 = in_box["bulk-0"], in_box["bulk-1"], in_box["bulk-2"]
+    listed = f"/box/{inbox}?page=0"
+    page = s.get(f"{WEB}{listed}&open={b0}").text
+    check('class="readcol"' in page and "<h1>bulk-0</h1>" in page and 'value="archive"' in page, "a message opens beside the list, with Archive among its actions")
+    check(re.search(rf'<div class="row open">\s*<label class="pick"><input type="checkbox" name="id" value="{b0}"', page), "its row is marked open, and read")
+    r = s.post(f"{WEB}/msg/{b0}", data={"action": "flag", "back": str(inbox), "list": listed}, allow_redirects=False)
+    check(r.headers["location"] == f"{listed}&open={b0}", "an action there comes back to the list, the message still open")
+    r = s.post(f"{WEB}/msg/{b0}", data={"action": "flag", "list": "https://evil.example/box/1"}, allow_redirects=False)
+    check(r.headers["location"].startswith("/msg/"), "a list address that isn't valet's is ignored")
+
+    # Several at once.
+    bulk = lambda action, *ids: s.post(f"{WEB}/box/{inbox}/bulk", data=[("back", listed), ("action", action)] + [("id", str(i)) for i in ids])
+    check(flash(bulk("unseen", b0, b1))[0] == "Marked 2 messages unread.", "mark two unread")
+    check(flash(bulk("seen", b0, b1))[0] == "Marked 2 messages read.", "and read again")
+    check(flash(bulk("archive", b0, b1))[0] == "Archived 2 messages.", "archive two")
+    check(node_id(s, "Archive") and "Archive" in gm_folders("test"), "Test had no Archive: one is made, in the tree and at the provider")
+    wait(lambda: {"bulk-0", "bulk-1"} <= set(gm_subjects("test", "Archive")), "they are in Test's Archive at GreenMail")
+    check("bulk-0" not in rows(s, inbox) and "bulk-0" in rows(s, node_id(s, "Archive")), "out of the inbox, in the Archive folder")
+    check(flash(bulk("delete", b2))[0] == "Moved 1 message to the Trash.", "delete one")
+    wait(lambda: "bulk-2" in gm_subjects("test", "Trash"), "it is in Test's Trash at GreenMail")
+    check(flash(bulk("archive"))[1] == "No message selected.", "nothing ticked: said so")
     m.logout()
 
 

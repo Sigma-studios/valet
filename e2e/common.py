@@ -159,5 +159,5 @@ def members_on_page(s, node):
 def rows(s, box):
     """{subject: message id} of a webmail list."""
     page = s.get(f"{WEB}/box/{box}").text
-    found = re.findall(r'<a class="row[^"]*" href="/(?:msg/|compose\?draft=)(\d+)">.*?<span class="subject">([^<]*)</span>', page, re.S)
+    found = re.findall(r'<input type="checkbox" name="id" value="(\d+)"[^>]*>.*?<span class="subject">([^<]*)</span>', page, re.S)
     return {html.unescape(subj): int(i) for i, subj in found}
