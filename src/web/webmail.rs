@@ -283,6 +283,12 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .toolbar a.button, .toolbar button { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; }
 .toolbar a.button:hover, .toolbar button:hover { background:var(--line); text-decoration:none; }
 .toolbar button.danger { color:var(--bad); }
+/* "Move to…" as wide as what it shows, not as its longest folder name (which
+   the open menu still shows in full), so the actions after it don't wrap. */
+.toolbar select[name=to] { field-sizing:content; max-width:9.5em; }
+/* A message's many actions, compact so they hold on one line where they can. */
+.toolbar.msg-actions { gap:5px; }
+.toolbar.msg-actions :is(a.button, button, select) { padding:4px 7px; font-size:14px; }
 .toolbar button.refresh { white-space:nowrap; }
 /* The toolbar: refresh and search, or, while messages are ticked, what to do with them. */
 .toolbar .normal, .toolbar .bulk-actions { flex:1; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
@@ -293,17 +299,16 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .toolbar label.pickall { display:flex; flex-direction:row; align-items:center; margin:0 4px 0 12px; }
 /* A message opened from the list: beside it when there's room (the list
    then shows subjects only), instead of it otherwise. */
-@media (min-width: 1100px) {
+@media (min-width: 1260px) {
   .pane:has(> .split.reading) { overflow:hidden; display:flex; flex-direction:column; padding-bottom:0; }
-  .split.reading { flex:1; min-height:0; display:grid; grid-template-columns:minmax(240px, 30%) 1fr; gap:16px; }
+  .split.reading { flex:1; min-height:0; display:grid; grid-template-columns:minmax(220px, 26%) 1fr; gap:14px; }
   .split.reading > .listcol, .split.reading > .readcol { min-height:0; overflow-y:auto; padding-bottom:16px; scrollbar-width:thin; }
   .split.reading .list a.link { display:block; padding:9px 10px 9px 8px; }
   .split.reading .list .star, .split.reading .list .from, .split.reading .list .tag, .split.reading .list .preview, .split.reading .list .when { display:none; }
   .split.reading .list .line { display:block; }
-  .split.reading .readcol > .toolbar { position:sticky; top:0; z-index:2; background:var(--bg); padding-bottom:10px; margin-bottom:2px; gap:6px; }
-  .split.reading .readcol > .toolbar :is(a.button, button, select) { padding:4px 8px; font-size:14px; }
+  .split.reading .readcol > .toolbar { position:sticky; top:0; z-index:2; background:var(--bg); padding-bottom:10px; margin-bottom:2px; }
 }
-@media (max-width: 1099px) { .split.reading > .listcol { display:none; } }
+@media (max-width: 1259px) { .split.reading > .listcol { display:none; } }
 .toolbar button.refresh:disabled { opacity:.7; cursor:progress; }
 .headers { margin-bottom:12px; } .headers h1 { margin:0 0 8px; }
 .headers .meta { color:var(--muted); font-size:13px; }
@@ -568,7 +573,7 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
         @if let Some((_, l)) = &pane { input type="hidden" name="list" value=(l); }
     };
     let body = html! {
-        div.toolbar {
+        div.toolbar.msg-actions {
             @if pane.is_some() { a.button href=(close) title="Close this message" { "✕ Close" } }
             @else { a.button href=(close) { "← Back" } }
             @if is_draft(&src, &folder) { a.button href={"/compose?draft=" (id)} { "Continue writing" } }
