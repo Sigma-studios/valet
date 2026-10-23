@@ -1,6 +1,7 @@
-//! Webmail: folders, message lists, reading (HTML mail in a locked-down
-//! frame), actions, and writing. It works on valet's copy, like the mail apps
-//! do, so what happens here reaches the providers and the apps.
+//! Webmail: folders (the user's tree, then each account's own), message
+//! lists, reading (HTML mail in a locked-down frame), actions, writing, and
+//! the tree's editor. It works on valet's copy, like the mail apps do, so
+//! what happens here reaches the providers and the apps.
 
 use std::borrow::Cow;
 
@@ -13,7 +14,7 @@ use serde::Deserialize;
 
 use super::*;
 use crate::accounts::Account;
-use crate::mailstore::{Mailbox, Msg, StoreMode};
+use crate::mailstore::{ALL_INBOXES, Mailbox, Msg, Node, Place, SPECIALS, Shift, StoreMode};
 
 const PAGE: usize = 50;
 
@@ -70,10 +71,14 @@ for (const el of document.querySelectorAll('time[data-t]')) {
 }
 "#;
 
-/// Folders: all inboxes first, then each account's, in the accounts' order.
-fn folders(app: &App) -> (Vec<Mailbox>, Vec<(Account, Vec<Mailbox>)>) {
+type Folders = (Vec<(Node, Mailbox)>, Vec<(Account, Vec<Mailbox>)>);
+
+/// Folders: the tree's nodes (depth first), then each account's, in the
+/// accounts' order.
+fn folders(app: &App) -> Folders {
     let boxes = app.mail.mailboxes();
-    let top: Vec<Mailbox> = boxes.iter().filter(|b| b.is_all_inboxes()).cloned().collect();
+    let top: Vec<(Node, Mailbox)> =
+        app.mail.tree().into_iter().filter_map(|n| boxes.iter().find(|b| b.id == n.id).map(|b| (n, b.clone()))).collect();
     let order = |b: &Mailbox| {
         let rank = ["\\Inbox", "\\Drafts", "\\Sent", "\\Archive", "\\Junk", "\\Trash"].iter().position(|s| b.special.eq_ignore_ascii_case(s));
         let inbox = b.remote.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("INBOX"));
@@ -91,17 +96,63 @@ fn folders(app: &App) -> (Vec<Mailbox>, Vec<(Account, Vec<Mailbox>)>) {
     (top, per)
 }
 
-/// A folder's name within its account (`Work/Projects/2026` → `Projects/2026`).
+/// A node's label, or an account folder's path within its account
+/// (`Accounts/Work/Projects/2026` → `Projects/2026`).
 fn short_name(b: &Mailbox) -> String {
-    if b.is_all_inboxes() {
-        return "All inboxes".into();
+    if b.is_node() {
+        return if b.name == ALL_INBOXES { "Inbox".into() } else { b.name.rsplit('/').next().unwrap_or(&b.name).to_string() };
     }
-    let name = b.name.split_once('/').map(|(_, r)| r).unwrap_or(&b.name);
-    if b.remote.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("INBOX")) { "Inbox".into() } else { name.to_string() }
+    if b.is_inbox() { "Inbox".into() } else { b.path().to_string() }
 }
 
+/// Where a folder is, in full: `Work › Clients`, `Gmail › Spam`.
+fn place_name(b: &Mailbox) -> String {
+    if b.is_node() {
+        return if b.name == ALL_INBOXES { "Inbox".into() } else { b.name.replace('/', " › ") };
+    }
+    let account = b.name.split('/').nth(1).unwrap_or("");
+    format!("{account} › {}", short_name(b))
+}
+
+/// Spaces before a node's label in a menu, by its depth.
+fn indent(depth: usize) -> String {
+    "\u{a0}\u{a0}\u{a0}".repeat(depth)
+}
+
+const SIDEBAR_SCRIPT: &str = r#"
+(() => {
+  const nav = document.querySelector('nav.folders');
+  if (!nav) return;
+  const closed = new Set(JSON.parse(localStorage.getItem('valet.closed') || '[]'));
+  const rows = [...nav.querySelectorAll('.node')];
+  const apply = () => {
+    let limit = Infinity;
+    for (const r of rows) {
+      const d = +r.dataset.depth, shut = closed.has(r.dataset.id);
+      if (d <= limit) limit = Infinity;
+      r.hidden = d > limit;
+      const t = r.querySelector('button.twisty');
+      if (t) { t.textContent = shut ? '▸' : '▾'; t.setAttribute('aria-expanded', String(!shut)); }
+      if (!r.hidden && shut) limit = d;
+    }
+  };
+  for (const t of nav.querySelectorAll('button.twisty')) {
+    t.addEventListener('click', () => {
+      const id = t.closest('.node').dataset.id;
+      closed.has(id) ? closed.delete(id) : closed.add(id);
+      localStorage.setItem('valet.closed', JSON.stringify([...closed]));
+      apply();
+    });
+  }
+  apply();
+  const acc = document.getElementById('accounts');
+  if (!acc.open) acc.open = localStorage.getItem('valet.accounts') === 'open';
+  acc.querySelector('summary').addEventListener('click', () => setTimeout(() => localStorage.setItem('valet.accounts', acc.open ? 'open' : 'closed')));
+})();
+"#;
+
 fn sidebar(app: &App, current: i64) -> Markup {
-    let (top, per) = folders(app);
+    let (tree, per) = folders(app);
     let item = |b: &Mailbox| {
         let (_, unseen) = app.mail.count(b.id);
         html! {
@@ -111,24 +162,38 @@ fn sidebar(app: &App, current: i64) -> Markup {
             }
         }
     };
+    let has_kids = |i: usize| tree.get(i + 1).is_some_and(|(n, _)| n.depth > tree[i].0.depth);
+    let in_accounts = per.iter().any(|(_, boxes)| boxes.iter().any(|b| b.id == current));
     html! {
         nav.folders {
             a.compose href="/compose" { "Write" }
-            @for b in &top { (item(b)) }
-            @for (a, boxes) in &per {
-                div.account { span { (a.name) } a href={"/folders/" (a.id)} title="Manage folders" { "Edit" } }
-                @for b in boxes { (item(b)) }
+            @for (i, (n, b)) in tree.iter().enumerate() {
+                div.node data-id=(n.id) data-depth=(n.depth) style={"padding-left:" (n.depth * 14) "px"} {
+                    @if has_kids(i) { button.twisty type="button" aria-label="Show or hide the folders inside" aria-expanded="true" { "▾" } }
+                    @else { span.twisty {} }
+                    (item(b))
+                }
+            }
+            a.edit-tree href="/tree" { "Edit folders" }
+            details.accounts #accounts open[in_accounts] {
+                summary { "Accounts" }
+                @for (a, boxes) in &per {
+                    div.account { span { (a.name) } a href={"/folders/" (a.id)} title="Manage this account's folders" { "Edit" } }
+                    @for b in boxes { (item(b)) }
+                }
             }
         }
         // Phones: the folders as one menu.
         select.folders-menu onchange="location = this.value" {
-            @for b in &top { option value={"/box/" (b.id)} selected[b.id == current] { (short_name(b)) } }
+            @for (n, b) in &tree { option value={"/box/" (b.id)} selected[b.id == current] { (indent(n.depth)) (short_name(b)) } }
+            option value="/tree" { "Edit folders…" }
             @for (a, boxes) in &per {
-                optgroup label=(a.name) {
+                optgroup label={"Accounts › " (a.name)} {
                     @for b in boxes { option value={"/box/" (b.id)} selected[b.id == current] { (short_name(b)) } }
                 }
             }
         }
+        script { (PreEscaped(SIDEBAR_SCRIPT)) }
     }
 }
 
@@ -140,6 +205,12 @@ const MAIL_CSS: &str = r#"
 .folders a.folder.on { background:var(--accent); color:#fff; }
 .folders .account { display:flex; justify-content:space-between; margin:14px 10px 4px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
 .folders .account a { text-transform:none; letter-spacing:0; font-weight:400; color:var(--muted); }
+.folders .node { display:flex; align-items:center; } .folders .node[hidden] { display:none; }
+.folders .node a.folder { flex:1; min-width:0; }
+.folders .twisty { flex:none; width:16px; padding:0; border:none; background:none; color:var(--muted); font-size:11px; line-height:1; cursor:pointer; }
+.folders a.edit-tree { font-size:13px; color:var(--muted); padding:4px 10px 0 26px; }
+.folders details.accounts { margin-top:14px; }
+.folders details.accounts summary { cursor:pointer; padding:4px 10px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
 .badge { font-size:12px; font-weight:600; }
 a.compose { display:block; text-align:center; background:var(--accent); color:#fff; border-radius:6px; padding:7px 10px; margin-bottom:10px; font-weight:600; }
 a.compose:hover { text-decoration:none; filter:brightness(1.1); }
@@ -244,7 +315,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         let src = app.mail.source(m.clone());
         app.mail.mailbox(src.mailbox).and_then(|b| b.account).and_then(|a| names.get(&a).cloned())
     };
-    let title = short_name(&mbox);
+    let title = if mbox.is_node() { short_name(&mbox) } else { place_name(&mbox) };
     let drafts = mbox.special.eq_ignore_ascii_case("\\Drafts");
     let link = |page: usize| {
         let mut l = format!("/box/{id}?page={page}");
@@ -274,7 +345,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                         span.star { @if has_flag(m, "\\Flagged") { "★" } }
                         span.from { (from) }
                         span.line {
-                            @if mbox.is_all_inboxes() { @if let Some(a) = account_of(m) { span.tag { (a) } } }
+                            @if mbox.is_node() { @if let Some(a) = account_of(m) { span.tag { (a) } } }
                             span.subject { (subject) }
                             @if !preview.is_empty() { span.preview { " — " (preview) } }
                         }
@@ -313,6 +384,7 @@ pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     let remote = html_body && m.body_html(0).is_some_and(|h| has_remote(&h));
     let images = q.images.is_some();
     let back = row.mailbox;
+    let (tree, _) = folders(&app);
     let account_folders: Vec<Mailbox> = app.mail.mailboxes().into_iter().filter(|b| b.account == folder.account && b.id != folder.id).collect();
     let attachments: Vec<(usize, String, usize)> = m
         .attachments()
@@ -336,13 +408,18 @@ pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                 button name="action" value=(if flagged { "unflag" } else { "flag" }) { @if flagged { "★ Unflag" } @else { "☆ Flag" } } }
             form method="post" action={"/msg/" (id)} { input type="hidden" name="back" value=(back);
                 button name="action" value="unseen" { "Mark unread" } }
-            @if !account_folders.is_empty() {
-                form method="post" action={"/msg/" (id)} {
-                    input type="hidden" name="back" value=(back);
-                    input type="hidden" name="action" value="move";
-                    select name="to" onchange="this.form.submit()" {
-                        option value="" { "Move to…" }
-                        @for b in &account_folders { option value=(b.id) { (short_name(b)) } }
+            form method="post" action={"/msg/" (id)} {
+                input type="hidden" name="back" value=(back);
+                input type="hidden" name="action" value="move";
+                select name="to" onchange="this.form.submit()" {
+                    option value="" { "Move to…" }
+                    optgroup label="Your folders" {
+                        @for (n, b) in &tree { @if b.id != back { option value=(b.id) { (indent(n.depth)) (short_name(b)) } } }
+                    }
+                    @if !account_folders.is_empty() {
+                        optgroup label={"Accounts › " (place_name(&folder).split(" › ").next().unwrap_or(""))} {
+                            @for b in &account_folders { option value=(b.id) { (short_name(b)) } }
+                        }
                     }
                 }
             }
@@ -355,7 +432,7 @@ pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                 div { b { (everyone(m.from())) } }
                 div.meta { "To " (everyone(m.to()))
                     @let cc = everyone(m.cc()); @if !cc.is_empty() { br; "Cc " (cc) } }
-                div.meta { (time(src.date, true)) " · " (folder.name) }
+                div.meta { (time(src.date, true)) " · " (place_name(&folder)) }
             }
             @if html_body {
                 @if remote && !images {
@@ -515,18 +592,23 @@ pub async fn action(State(app): St, headers: HeaderMap, Path(id): Path<i64>, axu
         "unflag" => flag(StoreMode::Remove, "\\Flagged").map(|_| (here.clone(), None)),
         "move" => {
             let target = f.to.as_deref().and_then(|t| t.parse::<i64>().ok()).and_then(|t| app.mail.mailbox(t));
-            match target {
-                Some(t) if t.account == folder.account => {
+            match (target, folder.account.as_deref()) {
+                // Into a node: its folder in this message's account, made if it has none.
+                (Some(t), Some(acc)) if t.is_node() => match crate::folders::member_in(&app, t.id, acc).await {
+                    Ok(_) => app.mail.copy(&[src.id], t.id, true).map(|_| (list.clone(), Some("Moved."))),
+                    Err(e) => Err(e),
+                },
+                (Some(t), _) if t.account == folder.account => {
                     app.mail.copy(&[src.id], t.id, true).map(|_| (list.clone(), Some("Moved.")))
                 }
-                _ => return back(&here, None, Some("Pick a folder of the same account.")),
+                _ => return back(&here, None, Some("Pick one of your folders, or a folder of the same account.")),
             }
         }
         "delete" => {
             // To the account's Trash, like mail apps do; from the Trash itself, for good.
-            let trash = app.mail.mailboxes().into_iter().find(|b| b.account == folder.account && b.special.eq_ignore_ascii_case("\\Trash"));
+            let trash = folder.account.as_deref().and_then(|a| app.mail.special_folder(a, "\\Trash"));
             match trash {
-                Some(t) if t.id != folder.id => app.mail.copy(&[src.id], t.id, true).map(|_| (list.clone(), Some("Moved to the Trash."))),
+                Some(t) if t != folder.id => app.mail.copy(&[src.id], t, true).map(|_| (list.clone(), Some("Moved to the Trash."))),
                 _ => app.mail.expunge(&[src.id]).map(|_| (list.clone(), Some("Deleted."))),
             }
         }
@@ -618,6 +700,310 @@ pub async fn delete_folder(State(app): St, headers: HeaderMap, Path((account, id
     match crate::folders::delete(&app, id).await {
         Ok(()) => back(&here, Some("Deleted."), None),
         Err(e) => back(&here, None, Some(&format!("{e:#}"))),
+    }
+}
+
+// The tree of folders
+
+const TREE_CSS: &str = r#"
+.tree-edit .trow { display:flex; gap:6px; align-items:center; flex-wrap:wrap; padding:5px 0; border-bottom:1px solid var(--line); }
+.tree-edit .trow:last-child { border-bottom:none; }
+.tree-edit .trow.on { background:var(--bg); }
+.tree-edit .trow form { display:flex; gap:4px; align-items:center; margin:0; flex-wrap:wrap; }
+.tree-edit .trow input { width:180px; }
+.tree-edit .trow .label { flex:1; min-width:120px; }
+.tree-edit .handle { cursor:grab; color:var(--muted); user-select:none; padding:0 4px; }
+.tree-edit button.step { background:var(--card); color:var(--fg); border:1px solid var(--line); padding:2px 8px; }
+.tree-edit button.step:hover { background:var(--line); }
+.tree-edit .trow.dragging { opacity:.4; }
+.tree-edit .trow.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.tree-edit .trow.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.tree-edit .trow.drop-inside { outline:2px solid var(--accent); outline-offset:-2px; }
+.members fieldset { border:1px solid var(--line); border-radius:6px; margin:0 0 10px; padding:6px 12px; }
+.members legend { font-weight:600; font-size:13px; }
+.members label { flex-direction:row; align-items:center; gap:6px; color:var(--fg); font-size:14px; padding:2px 0; }
+"#;
+
+/// Drag and drop: a folder dropped on the top or bottom edge of another goes
+/// before or after it, in its middle goes inside it. The whole tree is sent.
+const TREE_SCRIPT: &str = r#"
+(() => {
+  const list = document.querySelector('.tree-edit');
+  if (!list) return;
+  const rows = () => [...list.querySelectorAll('.trow')];
+  const places = () => rows().map(r => ({ id: +r.dataset.id, parent: r.dataset.parent ? +r.dataset.parent : null, label: r.dataset.label }));
+  const within = (id, top) => {
+    const by = new Map(places().map(p => [p.id, p]));
+    for (let p = by.get(id); p; p = p.parent == null ? null : by.get(p.parent)) if (p.id === top) return true;
+    return false;
+  };
+  const zone = (r, e) => {
+    const b = r.getBoundingClientRect(), y = (e.clientY - b.top) / b.height;
+    return y < .3 ? 'before' : y > .7 ? 'after' : 'inside';
+  };
+  const clear = () => rows().forEach(x => x.classList.remove('drop-before', 'drop-after', 'drop-inside'));
+  let dragged = null;
+  for (const r of rows()) {
+    const h = r.querySelector('.handle');
+    if (h) {
+      h.addEventListener('dragstart', e => {
+        dragged = +r.dataset.id;
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', r.dataset.label);
+        e.dataTransfer.setDragImage(r, 10, 10);
+        r.classList.add('dragging');
+      });
+      h.addEventListener('dragend', () => { r.classList.remove('dragging'); dragged = null; clear(); });
+    }
+    r.addEventListener('dragover', e => {
+      if (dragged == null || within(+r.dataset.id, dragged)) return;
+      e.preventDefault();
+      clear();
+      r.classList.add('drop-' + zone(r, e));
+    });
+    r.addEventListener('dragleave', () => r.classList.remove('drop-before', 'drop-after', 'drop-inside'));
+    r.addEventListener('drop', async e => {
+      const target = +r.dataset.id, where = zone(r, e);
+      if (dragged == null || within(target, dragged)) return;
+      e.preventDefault();
+      let ps = places();
+      const me = ps.find(p => p.id === dragged);
+      ps = ps.filter(p => p.id !== dragged);
+      const t = ps.find(p => p.id === target);
+      if (where === 'inside') { me.parent = target; ps.push(me); }
+      else { me.parent = t.parent; ps.splice(ps.indexOf(t) + (where === 'after' ? 1 : 0), 0, me); }
+      const res = await fetch('/tree/layout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ps) });
+      const j = await res.json().catch(() => ({}));
+      const q = res.ok ? 'ok=' + encodeURIComponent('Moved.') : 'err=' + encodeURIComponent(j.error || 'Not moved.');
+      location = '/tree?node=' + dragged + '&' + q;
+    });
+  }
+})();
+"#;
+
+#[derive(Deserialize, Default)]
+pub struct TreeQuery {
+    node: Option<i64>,
+    ok: Option<String>,
+    err: Option<String>,
+}
+
+fn special_label(special: &str) -> &'static str {
+    SPECIALS.iter().find(|(s, _)| *s == special).map(|(_, l)| *l).unwrap_or("")
+}
+
+pub async fn tree_page(State(app): St, headers: HeaderMap, Query(q): Query<TreeQuery>) -> Response {
+    guard!(app, headers);
+    let (tree, per) = folders(&app);
+    let inbox = app.mail.all_inboxes();
+    let selected = q.node.and_then(|id| tree.iter().find(|(n, _)| n.id == id));
+    let unplaced = app.mail.unplaced();
+    // Each real folder's nodes, to tell where else a folder is.
+    let mut in_nodes: std::collections::HashMap<i64, Vec<String>> = Default::default();
+    for (n, b) in &tree {
+        for m in &n.members {
+            in_nodes.entry(*m).or_default().push(place_name(b));
+        }
+    }
+    let flash = flash(&super::Msg { ok: q.ok.clone(), err: q.err.clone(), ..Default::default() });
+    mail_page("Your folders", 0, &app, html! {
+        style { (PreEscaped(TREE_CSS)) }
+        h1 { "Your folders" }
+        (flash)
+        p.muted.small { "Each of your folders gathers folders of your accounts: one Spam can show the spam of all of them. "
+            "Drag a folder by its handle to move it (onto the middle of another to put it inside), or use the arrows. Mail apps see the same folders." }
+        div.card.tree-edit {
+            @for (n, b) in &tree {
+                div.trow.on[selected.is_some_and(|(s, _)| s.id == n.id)] data-id=(n.id) data-parent=(n.parent.map(|p| p.to_string()).unwrap_or_default()) data-label=(n.label)
+                    style={"padding-left:" (n.depth * 24) "px"} {
+                    @if n.id == inbox {
+                        span.handle aria-hidden="true" { "\u{a0}\u{a0}" }
+                        span.label { b { "INBOX" } span.muted.small { " · " (n.members.len()) " inboxes" } }
+                    } @else {
+                        span.handle draggable="true" title="Drag to move" { "⠿" }
+                        form.label method="post" action={"/tree/" (n.id)} {
+                            input name="label" value=(n.label) aria-label="Name" required;
+                            button.step name="action" value="rename" title="Rename" { "Rename" }
+                            span.muted.small {
+                                @if !n.special.is_empty() { span.tag { (special_label(&n.special)) } }
+                                (n.members.len()) @if n.members.len() == 1 { " folder" } @else { " folders" }
+                            }
+                        }
+                        form method="post" action={"/tree/" (n.id)} {
+                            button.step name="action" value="up" title="Up" aria-label="Up" { "↑" }
+                            button.step name="action" value="down" title="Down" aria-label="Down" { "↓" }
+                            button.step name="action" value="indent" title="Into the folder above" aria-label="Into the folder above" { "→" }
+                            button.step name="action" value="outdent" title="Out of its parent" aria-label="Out of its parent" { "←" }
+                        }
+                    }
+                    a.small href={"/tree?node=" (n.id) "#edit"} { "Choose folders" }
+                    a.small href={"/box/" (b.id)} { "Open" }
+                }
+            }
+        }
+        @if let Some((n, b)) = selected {
+            h2 #edit { (place_name(b)) }
+            form.card.members method="post" action={"/tree/" (n.id)} {
+                input type="hidden" name="action" value="members";
+                p.small.muted style="margin-top:0" { "The accounts' folders this one gathers:" }
+                @for (a, boxes) in &per {
+                    fieldset {
+                        legend { (a.name) }
+                        @for f in boxes {
+                            label {
+                                input type="checkbox" name="member" value=(f.id) checked[n.members.contains(&f.id)];
+                                (short_name(f))
+                                @let elsewhere: Vec<&String> = in_nodes.get(&f.id).map(|v| v.iter().filter(|x| **x != place_name(b)).collect()).unwrap_or_default();
+                                @if !elsewhere.is_empty() { span.muted.small { " also in " (elsewhere.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")) } }
+                            }
+                        }
+                    }
+                }
+                button type="submit" { "Save" }
+            }
+            @if n.id != inbox {
+                form.card.row method="post" action={"/tree/" (n.id)} {
+                    input type="hidden" name="action" value="special";
+                    label { "Mail apps use it as their" select name="special" {
+                        option value="" selected[n.special.is_empty()] { "(nothing special)" }
+                        @for (s, l) in SPECIALS { option value=(s) selected[n.special == *s] { (l) " folder" } }
+                    } }
+                    button type="submit" { "Set" }
+                    span.muted.small { "Each goes to one of your folders only." }
+                }
+                @let missing: Vec<&Account> = per.iter().map(|(a, _)| a).filter(|a| app.mail.member_of(n.id, &a.id).is_none()).collect();
+                div.card style="display:flex; gap:10px; flex-wrap:wrap; align-items:center" {
+                    @if !missing.is_empty() {
+                        form method="post" action={"/tree/" (n.id)} {
+                            button name="action" value="create_all" { "Make it in every account" }
+                        }
+                        span.muted.small { "Creates a folder named after it in " (missing.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")) ", at the provider." }
+                    }
+                    form method="post" action={"/tree/" (n.id)} style="margin-left:auto"
+                        onsubmit="return confirm('Delete this folder? The mail in it stays in the accounts\\' folders.')" {
+                        button.plain name="action" value="delete" { "Delete" }
+                    }
+                }
+            }
+        }
+        h2 { "New folder" }
+        form.card.row method="post" action="/tree" {
+            label { "Name" input name="name" required; }
+            label { "Inside" select name="parent" {
+                option value="" { "(top level)" }
+                @for (n, b) in &tree { option value=(n.id) selected[selected.is_some_and(|(s, _)| s.id == n.id)] { (indent(n.depth)) (short_name(b)) } }
+            } }
+            button type="submit" { "Create" }
+        }
+        p.muted.small { "A new folder is only valet's until mail is moved into it: then it is made in that message's account." }
+        @if !unplaced.is_empty() {
+            h2 { "Folders not in your tree" }
+            p.muted.small { "Made later, at the provider or in another app: they are under Accounts." }
+            div.card {
+                @for f in &unplaced {
+                    form method="post" action={"/tree/add/" (f.id)} style="display:flex; gap:8px; align-items:center; padding:4px 0" {
+                        span style="flex:1" { (place_name(f)) }
+                        button.step type="submit" { "Add to the tree" }
+                    }
+                }
+            }
+        }
+        form method="post" action="/tree/reset" style="margin-top:24px"
+            onsubmit="return confirm('Put back the default tree? Your folders are made again from the accounts\\' folders; the mail stays where it is.')" {
+            button.plain type="submit" { "Reset to the default tree" }
+        }
+        script { (PreEscaped(TREE_SCRIPT)) }
+    })
+}
+
+#[derive(Deserialize)]
+pub struct NewNodeForm {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    parent: String,
+}
+
+pub async fn create_node(State(app): St, headers: HeaderMap, axum::extract::Form(f): axum::extract::Form<NewNodeForm>) -> Response {
+    guard!(app, headers);
+    match app.mail.create_node(f.parent.parse().ok(), &f.name) {
+        Ok(id) => back(&format!("/tree?node={id}"), Some(&format!("Created {}.", f.name.trim())), None),
+        Err(e) => back("/tree", None, Some(&format!("{e:#}"))),
+    }
+}
+
+/// One node's buttons: rename, move, members, special use, making it in
+/// every account, deleting.
+pub async fn node_action(State(app): St, headers: HeaderMap, Path(id): Path<i64>, body: String) -> Response {
+    guard!(app, headers);
+    let pairs = form_urlencoded_pairs(&body);
+    let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+    let here = format!("/tree?node={id}");
+    let shift = |how| app.mail.shift_node(id, how).map(|_| None);
+    let done: anyhow::Result<Option<String>> = match get("action").as_str() {
+        "rename" => app.mail.rename_node(id, &get("label")).map(|_| Some("Renamed.".into())),
+        "up" => shift(Shift::Up),
+        "down" => shift(Shift::Down),
+        "indent" => shift(Shift::Indent),
+        "outdent" => shift(Shift::Outdent),
+        "members" => {
+            let members: Vec<i64> = pairs.iter().filter(|(n, _)| n == "member").filter_map(|(_, v)| v.parse().ok()).collect();
+            app.mail.set_members(id, &members).map(|_| Some("Saved.".into()))
+        }
+        "special" => app.mail.set_special(id, &get("special")).map(|_| Some("Saved.".into())),
+        "create_all" => {
+            let mut made = Vec::new();
+            let mut err = None;
+            for a in app.accounts() {
+                if app.mail.member_of(id, &a.id).is_some() {
+                    continue;
+                }
+                match crate::folders::member_in(&app, id, &a.id).await {
+                    Ok(_) => made.push(a.name),
+                    Err(e) => err = Some(anyhow::anyhow!("{}: {e:#}", a.name)),
+                }
+            }
+            match err {
+                Some(e) => Err(e),
+                None => Ok(Some(format!("Made in {}.", made.join(", ")))),
+            }
+        }
+        "delete" => match app.mail.delete_node(id) {
+            Ok(()) => return back("/tree", Some("Deleted."), None),
+            Err(e) => Err(e),
+        },
+        _ => Err(anyhow::anyhow!("unknown action")),
+    };
+    match done {
+        Ok(ok) => back(&here, ok.as_deref(), None),
+        Err(e) => back(&here, None, Some(&format!("{e:#}"))),
+    }
+}
+
+/// The whole tree, from the drag and drop script.
+pub async fn tree_layout(State(app): St, headers: HeaderMap, axum::Json(places): axum::Json<Vec<Place>>) -> Response {
+    if !super::authed(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "logged out" }))).into_response();
+    }
+    match app.mail.arrange(&places) {
+        Ok(()) => axum::Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(serde_json::json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+pub async fn add_to_tree(State(app): St, headers: HeaderMap, Path(folder): Path<i64>) -> Response {
+    guard!(app, headers);
+    match app.mail.place_folder(folder) {
+        Ok(node) => back(&format!("/tree?node={node}"), Some("Added."), None),
+        Err(e) => back("/tree", None, Some(&format!("{e:#}"))),
+    }
+}
+
+pub async fn reset_tree(State(app): St, headers: HeaderMap) -> Response {
+    guard!(app, headers);
+    match app.mail.reset_tree() {
+        Ok(()) => back("/tree", Some("Back to the default tree."), None),
+        Err(e) => back("/tree", None, Some(&format!("{e:#}"))),
     }
 }
 
@@ -1037,8 +1423,8 @@ pub async fn save_draft(State(app): St, headers: HeaderMap, form: Multipart) -> 
         use anyhow::Context;
         let acc = app.accounts().into_iter().find(|a| a.sends_as(&draft.from)).context("pick an address to send from")?;
         let message = build(&app, &draft, files, true)?;
-        let folder = match app.mail.mailboxes().into_iter().find(|b| b.account.as_deref() == Some(acc.id.as_str()) && b.special.eq_ignore_ascii_case("\\Drafts")) {
-            Some(b) => b.id,
+        let folder = match app.mail.special_folder(&acc.id, "\\Drafts") {
+            Some(b) => b,
             None => match app.mail.mailboxes().into_iter().find(|b| b.account.as_deref() == Some(acc.id.as_str()) && short_name(b) == "Drafts") {
                 Some(b) => b.id,
                 None => crate::folders::create(&app, &acc.id, None, "Drafts").await?,
@@ -1135,12 +1521,11 @@ async fn deliver(app: &App, d: &Draft, files: Files) -> anyhow::Result<String> {
     let recipients: Vec<String> = message.envelope().to().iter().map(|a| a.to_string()).collect();
     let raw = crate::smtpd::strip_bcc(&message.formatted());
     crate::accounts::send(&acc, &app.mail, &d.from, &recipients, &raw).await?;
-    if !saves_sent(&acc) {
-        let sent = app.mail.mailboxes().into_iter().find(|b| b.account.as_deref() == Some(acc.id.as_str()) && b.special.eq_ignore_ascii_case("\\Sent"));
-        if let Some(sent) = sent {
-            app.mail.append(sent.id, &raw, &["\\Seen".to_string()], crate::mailstore::now())?;
-            app.mail.waker(&acc.id).notify_one();
-        }
+    if !saves_sent(&acc)
+        && let Some(sent) = app.mail.special_folder(&acc.id, "\\Sent")
+    {
+        app.mail.append(sent, &raw, &["\\Seen".to_string()], crate::mailstore::now())?;
+        app.mail.waker(&acc.id).notify_one();
     }
     Ok(acc.name)
 }

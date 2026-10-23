@@ -1,10 +1,11 @@
 //! The IMAP server mail apps connect to (IMAP4rev1 with IDLE, MOVE, UIDPLUS,
 //! SPECIAL-USE, LITERAL+). It speaks plain TCP: façade adds TLS in front.
 //!
-//! Folders: `INBOX` (every account's inbox together) and `<Account>/<folder>`
-//! for each folder of each account.
+//! Folders: the user's tree (`INBOX`, `Sent`, `Work/Clients`…, each gathering
+//! folders of several accounts; special-use flags come from it), then
+//! `Accounts/<Account>/<folder>` for each folder of each account.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::App;
-use crate::mailstore::{ALL_INBOXES, Mailbox, Msg, StoreMode};
+use crate::mailstore::{ACCOUNTS, ALL_INBOXES, Mailbox, Msg, StoreMode};
 use crate::mime::{self, istr};
 use crate::mutf7;
 use crate::util;
@@ -272,6 +273,7 @@ impl Conn {
                 let done = match name {
                     "CREATE" => self.create(&mailbox_arg(args, 0)?).await,
                     "DELETE" => match self.app.mail.mailbox_named(&mailbox_arg(args, 0)?) {
+                        Some(b) if b.is_node() => self.app.mail.delete_node(b.id),
                         Some(b) => crate::folders::delete(&self.app, b.id).await,
                         None => Err(anyhow::anyhow!("no such folder")),
                     },
@@ -331,24 +333,76 @@ impl Conn {
         Ok(Flow::Continue)
     }
 
-    /// CREATE `<Account>/…/<name>`: inside an account, at the provider.
+    /// CREATE `Accounts/<Account>/…/<name>`: inside an account, at the
+    /// provider. Anywhere else: a node of the tree (and those above it).
     async fn create(&mut self, path: &str) -> Result<()> {
         let path = path.trim_end_matches('/');
-        let (parent, leaf) = path.rsplit_once('/').context("folders go inside an account: <Account>/<name>")?;
-        if let Some(acc) = self.app.accounts().into_iter().find(|a| a.name == parent) {
-            return crate::folders::create(&self.app, &acc.id, None, leaf).await.map(|_| ());
+        if let Some(rest) = in_accounts(path) {
+            let (parent, leaf) = rest.rsplit_once('/').context("folders go inside an account: Accounts/<Account>/<name>")?;
+            if let Some(acc) = self.app.accounts().into_iter().find(|a| a.name == parent) {
+                return crate::folders::create(&self.app, &acc.id, None, leaf).await.map(|_| ());
+            }
+            let p = self.app.mail.mailbox_named(&format!("{ACCOUNTS}/{parent}")).filter(|b| !b.is_node()).context("no such parent folder")?;
+            return crate::folders::create(&self.app, p.account.as_deref().unwrap_or(""), Some(p.id), leaf).await.map(|_| ());
         }
-        let p = self.app.mail.mailbox_named(parent).filter(|b| !b.is_all_inboxes()).context("no such parent folder")?;
-        crate::folders::create(&self.app, p.account.as_deref().unwrap_or(""), Some(p.id), leaf).await.map(|_| ())
+        let parts: Vec<&str> = path.split('/').collect();
+        let mut parent = None;
+        for (i, part) in parts.iter().enumerate() {
+            parent = Some(match self.app.mail.mailbox_named(&parts[..=i].join("/")) {
+                Some(b) if b.is_node() && i + 1 < parts.len() => b.id,
+                Some(_) => bail!("{path} exists already"),
+                None => self.app.mail.create_node(parent, part)?,
+            });
+        }
+        Ok(())
     }
 
-    /// RENAME within the same parent folder.
+    /// RENAME: an account's folder within its parent folder; a node anywhere
+    /// in the tree.
     async fn rename(&mut self, from: &str, to: &str) -> Result<()> {
         let b = self.app.mail.mailbox_named(from).context("no such folder")?;
-        let (fp, _) = from.rsplit_once('/').unwrap_or(("", from));
-        let (tp, leaf) = to.trim_end_matches('/').rsplit_once('/').unwrap_or(("", to));
-        anyhow::ensure!(fp == tp, "folders can be renamed, not moved to another parent");
-        crate::folders::rename(&self.app, b.id, leaf).await
+        let to = to.trim_end_matches('/');
+        if !b.is_node() {
+            let (fp, _) = from.rsplit_once('/').unwrap_or(("", from));
+            let (tp, leaf) = to.rsplit_once('/').unwrap_or(("", to));
+            anyhow::ensure!(fp == tp, "an account's folders can be renamed, not moved to another parent");
+            return crate::folders::rename(&self.app, b.id, leaf).await;
+        }
+        anyhow::ensure!(in_accounts(to).is_none(), "{ACCOUNTS} holds the accounts' own folders");
+        let (parent, leaf) = match to.rsplit_once('/') {
+            Some((p, leaf)) => (Some(self.app.mail.mailbox_named(p).filter(|b| b.is_node()).context("no such parent folder")?.id), leaf),
+            None => (None, to),
+        };
+        let mut places = self.app.mail.places();
+        let i = places.iter().position(|p| p.id == b.id).context("no such folder")?;
+        let mut p = places.remove(i);
+        p.label = leaf.to_string();
+        if p.parent == parent {
+            places.insert(i, p);
+        } else {
+            p.parent = parent;
+            places.push(p);
+        }
+        self.app.mail.arrange(&places)
+    }
+
+    /// Before filing these messages into a node: the node gets a folder in
+    /// each of their accounts that it has none in.
+    async fn landing(&self, target: &Mailbox, ids: &[i64]) -> Result<()> {
+        if !target.is_node() {
+            return Ok(());
+        }
+        let mut accounts: Vec<String> = ids
+            .iter()
+            .filter_map(|&id| self.app.mail.message(id))
+            .filter_map(|m| self.app.mail.mailbox(self.app.mail.source(m).mailbox)?.account)
+            .collect();
+        accounts.sort();
+        accounts.dedup();
+        for a in accounts {
+            crate::folders::member_in(&self.app, target.id, &a).await?;
+        }
+        Ok(())
     }
 
     async fn ok(&mut self, tag: &str, what: &str) -> Result<()> {
@@ -367,11 +421,14 @@ impl Conn {
 
     // Folders
 
-    /// Every name an app can see: mailboxes, plus account names as parents.
+    /// Every name an app can see: the tree's nodes in order, then the
+    /// accounts' folders, with `Accounts` and account names as parents.
     fn names(&self) -> Vec<(String, Option<Mailbox>)> {
         let boxes = self.app.mail.mailboxes();
-        let mut out: Vec<(String, Option<Mailbox>)> = Vec::new();
-        for m in &boxes {
+        let by_id: HashMap<i64, &Mailbox> = boxes.iter().map(|b| (b.id, b)).collect();
+        let mut out: Vec<(String, Option<Mailbox>)> =
+            self.app.mail.tree().iter().filter_map(|n| by_id.get(&n.id)).map(|m| (m.name.clone(), Some((*m).clone()))).collect();
+        for m in boxes.iter().filter(|b| !b.is_node()) {
             let mut path = String::new();
             let parts: Vec<&str> = m.name.split('/').collect();
             for p in &parts[..parts.len() - 1] {
@@ -411,7 +468,8 @@ impl Conn {
             let mut flags = vec![if children { "\\HasChildren" } else { "\\HasNoChildren" }.to_string()];
             match mbox {
                 None => flags.push("\\Noselect".into()),
-                Some(m) if !m.special.is_empty() => flags.push(m.special.clone()),
+                // Only the tree's: an account's own Sent isn't *the* Sent.
+                Some(m) if m.is_node() && !m.special.is_empty() => flags.push(m.special.clone()),
                 _ => {}
             }
             lines.push(format!("* {cmd} ({}) \"/\" {}", flags.join(" "), istr(&mutf7::encode(name))));
@@ -550,6 +608,10 @@ impl Conn {
             }
         }
         let raw = raw.ok_or_else(|| anyhow::anyhow!("no message"))?;
+        if m.is_node() {
+            let account = self.app.mail.sender_account(&raw).context("no account sends as this message's From address: add it to an account's other addresses on valet's Mail page")?;
+            crate::folders::member_in(&self.app, m.id, &account).await?;
+        }
         let uid = self.app.mail.append(m.id, &raw, &flags, date)?;
         self.refresh(false).await?;
         self.line(&format!("{tag} OK [APPENDUID {} {uid}] APPEND completed", m.uidvalidity)).await
@@ -761,6 +823,7 @@ impl Conn {
         let target = self.find_mailbox(&mailbox_arg(args, 1)?)?;
         let indices = self.resolve(&set, uid);
         let ids: Vec<i64> = indices.iter().map(|&i| self.sel.as_ref().unwrap().seq[i].1).collect();
+        self.landing(&target, &ids).await?;
         let pairs = self.app.mail.copy(&ids, target.id, moving)?;
         let code = if pairs.is_empty() {
             String::new()
@@ -827,6 +890,11 @@ fn arg(args: &[Tok], i: usize) -> Result<String> {
 fn mailbox_arg(args: &[Tok], i: usize) -> Result<String> {
     let name = mutf7::decode(&arg(args, i)?);
     Ok(if name.eq_ignore_ascii_case("INBOX") { ALL_INBOXES.to_string() } else { name })
+}
+
+/// The rest of a name under `Accounts/`, if it is there.
+fn in_accounts(name: &str) -> Option<&str> {
+    name.strip_prefix(ACCOUNTS).and_then(|r| r.strip_prefix('/'))
 }
 
 fn has_flag(flags: &[String], f: &str) -> bool {

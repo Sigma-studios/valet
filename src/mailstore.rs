@@ -1,5 +1,7 @@
-//! Mail storage: a local copy of each account's folders, plus "INBOX", which
-//! gathers every account's inbox (its rows link to the account inbox's rows).
+//! Mail storage: a local copy of each account's folders (named
+//! `Accounts/<Account>/<folder>`), plus the user's own tree of folders, whose
+//! nodes gather real folders of several accounts (their rows link to the real
+//! rows). `INBOX` is the node gathering every account's inbox. See [`tree`].
 //!
 //! Mail apps see local UIDs; each row remembers its UID on the provider. What
 //! apps change (flags, deletions, moves, appends) is applied here at once and
@@ -18,7 +20,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, broadcast};
 
+mod tree;
+
+pub use tree::{Node, Place, SPECIALS, Shift};
+
 pub const ALL_INBOXES: &str = "INBOX";
+/// Where the accounts' real folders live: `Accounts/<Account>/<folder>`.
+pub const ACCOUNTS: &str = "Accounts";
+
+/// The local name of an account's folder.
+pub fn account_path(account_name: &str, folder: &str) -> String {
+    format!("{ACCOUNTS}/{account_name}/{folder}")
+}
 
 #[derive(Clone, Debug)]
 pub struct Mailbox {
@@ -28,15 +41,29 @@ pub struct Mailbox {
     pub account: Option<String>,
     /// The provider's name for it (modified UTF-7, as the provider spells it).
     pub remote: Option<String>,
-    /// `\Sent`, `\Trash`… or empty.
+    /// `\Sent`, `\Trash`… or empty: the provider's flag for a real folder,
+    /// the tree's for a node.
     pub special: String,
     pub uidvalidity: u32,
     pub uidnext: u32,
 }
 
 impl Mailbox {
-    pub fn is_all_inboxes(&self) -> bool {
+    /// A node of the tree (gathers real folders), not an account's folder.
+    pub fn is_node(&self) -> bool {
         self.account.is_none()
+    }
+
+    pub fn is_inbox(&self) -> bool {
+        self.remote.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("INBOX"))
+    }
+
+    /// An account folder's path within its account (`Accounts/Work/Projects/2026` → `Projects/2026`).
+    pub fn path(&self) -> &str {
+        if self.is_node() {
+            return &self.name;
+        }
+        self.name.splitn(3, '/').nth(2).unwrap_or(&self.name)
     }
 }
 
@@ -92,13 +119,19 @@ CREATE TABLE IF NOT EXISTS tokens (account TEXT PRIMARY KEY, refresh TEXT NOT NU
 CREATE TABLE IF NOT EXISTS status (account TEXT PRIMARY KEY, ok INTEGER NOT NULL, message TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS doomed (mailbox INTEGER NOT NULL, blob TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, position INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tree (
+    mailbox INTEGER PRIMARY KEY, parent INTEGER, position INTEGER NOT NULL, label TEXT NOT NULL, special TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS tree_members (node INTEGER NOT NULL, member INTEGER NOT NULL, PRIMARY KEY (node, member));
+CREATE INDEX IF NOT EXISTS tree_members_member ON tree_members (member);
 CREATE TABLE IF NOT EXISTS invites (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, uid TEXT NOT NULL, method TEXT NOT NULL, sequence INTEGER NOT NULL,
     summary TEXT NOT NULL, organizer TEXT NOT NULL, dtstart TEXT NOT NULL, ics TEXT NOT NULL,
     response TEXT, received INTEGER NOT NULL, UNIQUE (account, uid, method, sequence));
 ";
 
-const MBOX_COLS: &str = "id, name, account, remote, special, uidvalidity, uidnext";
+/// Mailboxes, with a node's special use taken from the tree.
+const MBOX_SELECT: &str = "SELECT m.id, m.name, m.account, m.remote, CASE WHEN m.account IS NULL THEN COALESCE(t.special, '') ELSE m.special END,
+    m.uidvalidity, m.uidnext FROM mailboxes m LEFT JOIN tree t ON t.mailbox = m.id";
 const MSG_COLS: &str = "id, mailbox, uid, blob, flags, date, size, modseq, remote_uid, link";
 
 fn mbox_row(r: &rusqlite::Row) -> rusqlite::Result<Mailbox> {
@@ -127,6 +160,15 @@ fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<Msg> {
         remote_uid: r.get(8)?,
         link: r.get(9)?,
     })
+}
+
+fn boxes(c: &Connection) -> Vec<Mailbox> {
+    let mut st = c.prepare(&format!("{MBOX_SELECT} ORDER BY m.name = 'INBOX' DESC, m.name")).unwrap();
+    st.query_map([], mbox_row).unwrap().filter_map(Result::ok).collect()
+}
+
+fn mailbox(c: &Connection, id: i64) -> Option<Mailbox> {
+    c.query_row(&format!("{MBOX_SELECT} WHERE m.id = ?1"), [id], mbox_row).optional().unwrap()
 }
 
 pub fn split_flags(s: &str) -> Vec<String> {
@@ -175,6 +217,7 @@ impl MailStore {
                 "INSERT OR IGNORE INTO mailboxes (name, uidvalidity) VALUES (?1, ?2)",
                 params![ALL_INBOXES, now() as u32],
             )?;
+            tree::migrate(&c)?;
         }
         Ok(store)
     }
@@ -241,20 +284,17 @@ impl MailStore {
     // Mailboxes
 
     pub fn mailboxes(&self) -> Vec<Mailbox> {
-        let c = self.db();
-        let mut st = c.prepare(&format!("SELECT {MBOX_COLS} FROM mailboxes ORDER BY name = 'INBOX' DESC, name")).unwrap();
-        st.query_map([], mbox_row).unwrap().filter_map(Result::ok).collect()
+        boxes(&self.db())
     }
 
     pub fn mailbox(&self, id: i64) -> Option<Mailbox> {
-        let c = self.db();
-        c.query_row(&format!("SELECT {MBOX_COLS} FROM mailboxes WHERE id = ?1"), [id], mbox_row).optional().unwrap()
+        mailbox(&self.db(), id)
     }
 
     pub fn mailbox_named(&self, name: &str) -> Option<Mailbox> {
         let c = self.db();
         let name = if name.eq_ignore_ascii_case("INBOX") { ALL_INBOXES } else { name };
-        c.query_row(&format!("SELECT {MBOX_COLS} FROM mailboxes WHERE name = ?1"), [name], mbox_row).optional().unwrap()
+        c.query_row(&format!("{MBOX_SELECT} WHERE m.name = ?1"), [name], mbox_row).optional().unwrap()
     }
 
     pub fn all_inboxes(&self) -> i64 {
@@ -279,7 +319,12 @@ impl MailStore {
             "INSERT INTO mailboxes (name, account, remote, special, uidvalidity) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![name, account, remote, special, now() as u32],
         )?;
-        Ok(c.last_insert_rowid())
+        let id = c.last_insert_rowid();
+        // Every account's inbox is in INBOX.
+        if remote == "INBOX" {
+            c.execute("INSERT OR IGNORE INTO tree_members (node, member) SELECT id, ?1 FROM mailboxes WHERE name = ?2", params![id, ALL_INBOXES])?;
+        }
+        Ok(id)
     }
 
     /// Mailboxes of `account` whose remote name is not in `keep` disappear.
@@ -292,7 +337,9 @@ impl MailStore {
             .collect();
         for id in gone {
             self.reset_mailbox(id)?;
-            self.db().execute("DELETE FROM mailboxes WHERE id = ?1", [id])?;
+            let c = self.db();
+            c.execute("DELETE FROM tree_members WHERE member = ?1", [id])?;
+            c.execute("DELETE FROM mailboxes WHERE id = ?1", [id])?;
         }
         Ok(())
     }
@@ -391,12 +438,11 @@ impl MailStore {
             params![mailbox, uid, blob, flags, date, size as i64, mid, remote_uid, link, modseq],
         )?;
         let id = c.last_insert_rowid();
-        // An account inbox's messages also appear in INBOX.
-        let is_inbox: bool = c
-            .query_row("SELECT account IS NOT NULL AND remote = 'INBOX' FROM mailboxes WHERE id = ?1", [mailbox], |r| r.get(0))?;
-        if is_inbox {
-            let all: i64 = c.query_row("SELECT id FROM mailboxes WHERE name = ?1", [ALL_INBOXES], |r| r.get(0))?;
-            Self::insert_row(c, all, blob, flags, date, size, mid, None, Some(id))?;
+        // A real folder's messages also appear in each node gathering it.
+        if link.is_none() {
+            for node in tree::nodes_of(c, mailbox)? {
+                Self::insert_row(c, node, blob, flags, date, size, mid, None, Some(id))?;
+            }
         }
         Ok(id)
     }
@@ -462,8 +508,7 @@ impl MailStore {
         .unwrap_or((0, 0))
     }
 
-    /// The row an INBOX row stands for (itself otherwise).
-    /// The account folder's row behind an INBOX row (itself otherwise).
+    /// The account folder's row behind a node's row (itself otherwise).
     pub fn source(&self, m: Msg) -> Msg {
         match m.link.and_then(|l| self.message(l)) {
             Some(s) => s,
@@ -521,6 +566,46 @@ impl MailStore {
     fn remote_of(&self, mailbox: i64) -> Option<(String, String)> {
         let m = self.mailbox(mailbox)?;
         Some((m.account?, m.remote?))
+    }
+
+    /// Where a message of `account` filed into `target` goes: `target` if it
+    /// is a real folder, else the node's folder in that account. Returns
+    /// (real folder, account, provider name).
+    fn landing(&self, target: i64, account: Option<&str>) -> Result<(i64, String, String)> {
+        let b = self.mailbox(target).context("no such folder")?;
+        let folder = if b.is_node() {
+            let account = account.context("that message isn't in an account")?;
+            self.member_of(target, account).with_context(|| format!("{} has no folder in that account yet", b.name))?
+        } else {
+            target
+        };
+        let (account, remote) = self.remote_of(folder).context("no such folder")?;
+        Ok((folder, account, remote))
+    }
+
+    /// The UID `row` (a real row, or one linking to it) has in `mailbox`.
+    fn uid_in(&self, mailbox: i64, row: i64) -> u32 {
+        let c = self.db();
+        c.query_row("SELECT uid FROM messages WHERE mailbox = ?1 AND (id = ?2 OR link = ?2)", params![mailbox, row], |r| r.get(0)).unwrap_or(0)
+    }
+
+    /// The account a message is from (its From address), to file it into a node.
+    pub fn sender_account(&self, raw: &[u8]) -> Option<String> {
+        let p = crate::mime::parse(raw);
+        let from = p.header(raw, "From").and_then(|f| crate::mime::addresses(&f).into_iter().next()).map(|(_, m, h)| format!("{m}@{h}"))?;
+        self.accounts().into_iter().find(|a| a.sends_as(&from)).map(|a| a.id)
+    }
+
+    /// The account folder for a special use (`\Trash`…): the one the provider
+    /// flags, else the one the tree's node of that use gathers.
+    pub fn special_folder(&self, account: &str, special: &str) -> Option<i64> {
+        let boxes = self.mailboxes();
+        let flagged = boxes.iter().find(|b| b.account.as_deref() == Some(account) && b.special.eq_ignore_ascii_case(special));
+        if let Some(b) = flagged {
+            return Some(b.id);
+        }
+        let node = boxes.iter().find(|b| b.is_node() && b.special.eq_ignore_ascii_case(special))?;
+        self.member_of(node.id, account)
     }
 
     /// STORE: returns each message's new flags.
@@ -591,20 +676,24 @@ impl MailStore {
 
     /// COPY or MOVE to `target`; the new rows are placeholders until the sync
     /// fetches them. Returns (source uid, new uid) pairs for COPYUID.
+    /// Into a node, each message goes to the node's folder in its own account.
     pub fn copy(&self, ids: &[i64], target: i64, moving: bool) -> Result<Vec<(u32, u32)>> {
-        let (t_account, t_remote) = self.remote_of(target).context("can't copy into INBOX: pick an account's folder")?;
         let mut pairs = Vec::new();
         for &id in ids {
             let Some(m) = self.message(id) else { continue };
             let src = self.source(m.clone());
+            let remote = self.remote_of(src.mailbox);
+            let (folder, t_account, t_remote) = self.landing(target, remote.as_ref().map(|r| r.0.as_str()))?;
+            if moving && folder == src.mailbox {
+                pairs.push((m.uid, self.uid_in(target, src.id)));
+                continue;
+            }
             let new_id = {
                 let c = self.db();
                 let mid: String = c.query_row("SELECT message_id FROM messages WHERE id = ?1", [src.id], |r| r.get(0))?;
-                Self::insert_row(&c, target, &src.blob, &join_flags(&src.flags), src.date, src.size as usize, &mid, None, None)?
+                Self::insert_row(&c, folder, &src.blob, &join_flags(&src.flags), src.date, src.size as usize, &mid, None, None)?
             };
-            let new_uid = self.message(new_id).map(|n| n.uid).unwrap_or(0);
-            pairs.push((m.uid, new_uid));
-            let remote = self.remote_of(src.mailbox);
+            pairs.push((m.uid, self.uid_in(target, new_id)));
             match (src.remote_uid, remote) {
                 (Some(uid), Some((account, remote))) if account == t_account => {
                     let op = if moving {
@@ -629,20 +718,25 @@ impl MailStore {
         Ok(pairs)
     }
 
-    /// APPEND: returns the new UID.
+    /// APPEND: returns the new UID (in `target`).
     pub fn append(&self, target: i64, raw: &[u8], flags: &[String], date: i64) -> Result<u32> {
         let id = self.append_row(target, raw, flags, date)?;
-        Ok(self.message(id).map(|m| m.uid).unwrap_or(0))
+        Ok(self.uid_in(target, id))
     }
 
-    /// Like [`append`](Self::append), returning the new row's id.
+    /// Like [`append`](Self::append), returning the new (real) row's id. Into
+    /// a node, the message goes to the node's folder in the account it is from.
     pub fn append_row(&self, target: i64, raw: &[u8], flags: &[String], date: i64) -> Result<i64> {
-        let (account, remote) = self.remote_of(target).context("can't append to INBOX: pick an account's folder")?;
+        let from = match self.mailbox(target) {
+            Some(b) if b.is_node() => Some(self.sender_account(raw).context("no account sends as this message's From address")?),
+            _ => None,
+        };
+        let (folder, account, remote) = self.landing(target, from.as_deref())?;
         let id = {
             let c = self.db();
             let blob = Self::put_blob(&c, raw)?;
             let mid = message_id(raw);
-            let id = Self::insert_row(&c, target, &blob, &join_flags(flags), date, raw.len(), &mid, None, None)?;
+            let id = Self::insert_row(&c, folder, &blob, &join_flags(flags), date, raw.len(), &mid, None, None)?;
             drop(c);
             self.enqueue(&account, &Op::Append { to: remote, blob, flags: flags.to_vec() })?;
             id
@@ -862,6 +956,8 @@ mod tests {
         s.copy(&[aid], gmail, true).unwrap();
         assert!(matches!(&s.ops("g")[0].1, Op::Append { to, .. } if to == "Keep"));
         assert!(matches!(s.ops("work").last().unwrap().1, Op::Expunge { uid: 30, .. }));
-        assert!(s.copy(&[aid], s.all_inboxes(), false).is_err());
+        let kept = s.messages(gmail)[0].id;
+        let empty = s.create_node(None, "Empty").unwrap();
+        assert!(s.copy(&[kept], empty, false).is_err(), "no folder of that account in it");
     }
 }

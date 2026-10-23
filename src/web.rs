@@ -53,6 +53,11 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/folders/{account}", get(webmail::folders_page).post(webmail::create_folder))
         .route("/folders/{account}/{id}/rename", post(webmail::rename_folder))
         .route("/folders/{account}/{id}/delete", post(webmail::delete_folder))
+        .route("/tree", get(webmail::tree_page).post(webmail::create_node))
+        .route("/tree/layout", post(webmail::tree_layout))
+        .route("/tree/reset", post(webmail::reset_tree))
+        .route("/tree/add/{folder}", post(webmail::add_to_tree))
+        .route("/tree/{id}", post(webmail::node_action))
 }
 
 const COOKIE: &str = "valet_session";
@@ -799,7 +804,8 @@ async fn connect_page(State(app): St, headers: HeaderMap) -> Response {
         p { "User name " code { (user) } ", valet's password (normal password authentication)." }
         p { "Then add one " b { "identity" } " (Thunderbird: account settings → Manage identities; Apple Mail: the account's Email Addresses field, comma-separated) per address, so replies go out from the address they were sent to:" }
         ul { @for a in &app.accounts() { li { code { (a.address) } " (" (a.name) ")" @for al in &a.aliases { ", " code { (al) } } } } }
-        p.muted.small { "INBOX holds every account's inbox; each account's folders are under its name. "
+        p.muted.small { "Your folders come first (INBOX, Sent, Spam…, each gathering the accounts' folders: arrange them on the webmail's Edit folders page); "
+            "each account's own folders are under Accounts. "
             "Running valet without façade in front (on your own machine): IMAP on port 1143 and SMTP on 1587, with no encryption." }
     })
 }

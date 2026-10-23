@@ -7,9 +7,9 @@ the native apps of every device.
   GNOME/Evolution. Every event gets the alerts you chose, stored in the event
   itself, so they ring natively everywhere, even offline.
 - **Mail** (IMAP + SMTP): valet logs in to each of your mailboxes (Gmail,
-  IONOS, Microsoft 365…), keeps a copy, and serves them all as one account:
-  `INBOX` gathers every inbox, `<Account>/<folder>` holds each account's
-  folders. What you do in your mail app (read, flag, move, delete, file)
+  IONOS, Microsoft 365…), keeps a copy, and serves them all as one account,
+  with one tree of folders you shape yourself (see [Folders](#folders)).
+  What you do in your mail app (read, flag, move, delete, file)
   reaches the provider; what happens at the provider reaches your apps, at
   once for inboxes (IDLE). Mail you send goes out through the account it is
   from, chosen by its From address.
@@ -17,8 +17,8 @@ the native apps of every device.
   calendar until answered), and can be answered from valet's Mail page: the
   organizer gets the reply from the account the invitation came to.
 
-- **Webmail** on valet's own site, from any browser: every folder of every
-  account (and all inboxes together), search, reading, and writing with
+- **Webmail** on valet's own site, from any browser: your tree of folders
+  (and every account's own folders), search, reading, and writing with
   formatting (reply, reply all, forward, attachments). What you write is saved
   as a draft in the account's Drafts folder every few seconds, so it carries on
   from another device or app. Folders can be created, renamed and deleted, here
@@ -26,6 +26,38 @@ the native apps of every device.
   apps, so read, flagged, moved and deleted messages match everywhere. HTML
   mail is shown in a frame where nothing runs, and remote images (which tell
   senders you opened a message) stay blocked until asked for.
+
+## Folders
+
+Mail apps and the webmail show one tree of folders, the same everywhere. Each
+folder of it gathers real folders of any of the accounts: one *Spam* shows the
+spam of all of them, one *Sent* everything sent, and *Work → Clients → Acme*
+can gather a folder of two accounts. The first time an account syncs, its
+folders go in the tree:
+
+1. `INBOX`: every account's inbox;
+2. *Drafts*, *Sent*, *Archive*, *Spam*, *Trash*: the folders the provider
+   flags for that use (or, if it flags none, named like it: `Junk`, `Sent
+   Items`, `Corbeille`…). Mail apps see these as their special folders;
+3. the other folders, nested as they are; folders with the same path in
+   several accounts together.
+
+The webmail's *Edit folders* page changes it: create, rename, nest (drag and
+drop, or arrows), delete, and choose what each folder gathers and its special
+use; *Reset to the default tree* builds it again. Folders made later at the
+provider wait there, under *Folders not in your tree*. Mail apps can create,
+rename, move and delete tree folders too; that's valet's own, nothing changes
+at the providers.
+
+Mail filed into a tree folder (moved, or saved by an app, like sent mail
+into *Sent*) goes to the real folder it gathers **in the message's own account**
+(for saved mail, the account its From address is); a message never changes
+account. If the folder has none in that account yet, valet makes one at the
+provider, named after it. Deleting moves to the Trash of the message's account.
+
+Each account's real folders stay reachable under `Accounts/<Account>/…`
+(collapsed under *Accounts* in the webmail); there, folders are made, renamed
+and deleted at the provider.
 
 ## Alert patterns
 
@@ -142,3 +174,14 @@ VALET_PASSWORD='a long test password' cargo run   # http://localhost:8080
 Locally, mail apps connect to `localhost` on 1143 (IMAP) and 1587 (SMTP)
 without encryption. For a test provider without encryption (a local
 GreenMail, say), import an account with `"tls": false` through `VALET_ACCOUNTS`.
+
+End-to-end tests run valet against GreenMail, in a scratch directory holding
+`gm/greenmail-standalone-2.1.14.jar` (from Maven Central), with Java and
+Python with `requests` (`PYTHON=…` picks the interpreter):
+
+```sh
+cargo build
+e2e/run_mail_e2e.sh <dir>   # IMAP; leaves <dir>/mdata for run_ui.sh
+e2e/run_ui.sh <dir>         # the tree editor's routes
+e2e/run_webmail.sh <dir>
+```
