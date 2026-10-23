@@ -127,6 +127,22 @@ fn indent(depth: usize) -> String {
 
 /// Folders start closed, but for the way to the one shown; what is opened
 /// stays open from page to page until the browser is closed.
+const REFRESH_SCRIPT: &str = r#"
+{
+  const b = document.querySelector('button.refresh');
+  b.addEventListener('click', async () => {
+    if (!navigator.onLine) { alert("You're offline: new mail can be checked once you're back online."); return; }
+    b.disabled = true;
+    b.textContent = '↻ Checking…';
+    try {
+      const r = await fetch('/mail/refresh', { method: 'POST' });
+      if (r.status === 401) { location = '/login'; return; }
+    } catch (_) {}
+    location.reload();
+  });
+}
+"#;
+
 const SIDEBAR_SCRIPT: &str = r#"
 (() => {
   const nav = document.querySelector('nav.folders');
@@ -257,6 +273,8 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .toolbar a.button, .toolbar button { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; }
 .toolbar a.button:hover, .toolbar button:hover { background:var(--line); text-decoration:none; }
 .toolbar button.danger { color:var(--bad); }
+.toolbar button.refresh { white-space:nowrap; }
+.toolbar button.refresh:disabled { opacity:.7; cursor:progress; }
 .headers { margin-bottom:12px; } .headers h1 { margin:0 0 8px; }
 .headers .meta { color:var(--muted); font-size:13px; }
 .reader iframe { width:100%; border:0; background:#fff; border-radius:6px; min-height:200px; display:block; }
@@ -356,9 +374,11 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     mail_page(&title, id, &app, html! {
         (flash_of(&q))
         form.toolbar method="get" action={"/box/" (id)} {
+            button.refresh type="button" title="Check every account for new mail now" { "↻ Refresh" }
             input type="search" name="q" value=(q.q) placeholder={"Search " (title)};
             @if !q.q.is_empty() { a.button href={"/box/" (id)} { "Clear" } }
         }
+        script { (PreEscaped(REFRESH_SCRIPT)) }
         @if shown.is_empty() {
             p.muted { @if q.q.is_empty() { "Nothing here." } @else { "No message matches." } }
         } @else {
@@ -1439,6 +1459,31 @@ fn forget_draft(app: &App, id: i64) -> anyhow::Result<()> {
         app.mail.expunge(&[row.id])?;
     }
     Ok(())
+}
+
+/// Checks every account for new mail now: wakes their syncs and answers
+/// once each has been through its folders (or after 30 seconds).
+pub async fn refresh(State(app): St, headers: HeaderMap) -> Response {
+    if !authed(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "logged out" }))).into_response();
+    }
+    let start = crate::mailstore::now();
+    // A pass started after this finishes once more passes have finished
+    // than had started now; an account failing says so in its status.
+    let accounts: Vec<(String, u64)> = app.accounts().into_iter().map(|a| { let started = app.mail.passes(&a.id).0; (a.id, started) }).collect();
+    for (id, _) in &accounts {
+        app.mail.waker(id).notify_one();
+    }
+    let done = |app: &App| {
+        accounts.iter().all(|(id, started)| {
+            app.mail.passes(id).1 > *started || app.mail.status(id).is_some_and(|(ok, _, at)| !ok && at >= start)
+        })
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !done(&app) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    axum::Json(serde_json::json!({ "done": done(&app) })).into_response()
 }
 
 /// Saves the form as a draft in the From account's Drafts folder, replacing
