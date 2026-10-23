@@ -461,8 +461,10 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                                 @let subject = parsed.as_ref().and_then(|p| p.subject().map(str::to_string)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "(no subject)".into());
                                 @let from = parsed.as_ref().map(|p| if mbox.special.eq_ignore_ascii_case("\\Sent") { format!("To: {}", who(p.to())) } else { who(p.from()) }).unwrap_or_default();
                                 @let preview: String = parsed.as_ref().and_then(|p| p.body_text(0).map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(140).collect())).unwrap_or_default();
-                                @let href = if drafts { format!("/compose?draft={}", m.id) } else { format!("{}&open={}", link(q.page), m.id) };
-                                div.row.unread[!has_flag(m, "\\Seen")].open[reading.as_ref().is_some_and(|(o, _)| *o == m.id)] {
+                                @let is_open = reading.as_ref().is_some_and(|(o, _)| *o == m.id);
+                                // The open one's row closes it.
+                                @let href = if drafts { format!("/compose?draft={}", m.id) } else if is_open { link(q.page) } else { format!("{}&open={}", link(q.page), m.id) };
+                                div.row.unread[!has_flag(m, "\\Seen")].open[is_open] {
                                     label.pick { input type="checkbox" name="id" value=(m.id) aria-label="Select"; }
                                     a.link href=(href) title={(from) " — " (subject)} {
                                         span.star { @if has_flag(m, "\\Flagged") { "★" } }
