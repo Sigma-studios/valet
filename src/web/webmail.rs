@@ -285,6 +285,18 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .pager { display:flex; justify-content:space-between; margin-top:10px; }
 form.write { display:flex; flex-direction:column; gap:10px; }
 form.write textarea { min-height:320px; font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); resize:vertical; }
+/* Wider than a phone: the window is the app; the bar and the folders stay,
+   the list (or message) scrolls under its pinned toolbar. */
+@media (min-width: 721px) {
+  html, body { height:100%; }
+  body { display:flex; flex-direction:column; overflow:hidden; }
+  body > header { flex:none; }
+  body > main { flex:1; min-height:0; width:100%; box-sizing:border-box; display:flex; flex-direction:column; padding-bottom:0; }
+  .mail { flex:1; min-height:0; align-items:stretch; }
+  .mail > nav.folders { position:static; max-height:none; min-height:0; padding-bottom:16px; }
+  .mail > .pane { min-width:0; min-height:0; overflow-y:auto; padding-bottom:16px; scrollbar-width:thin; }
+  .pane > .toolbar { position:sticky; top:0; z-index:2; background:var(--bg); padding-bottom:10px; margin-bottom:2px; }
+}
 @media (max-width: 720px) {
   .mail { display:block; } nav.folders { display:none; } .folders-menu { display:block; }
   .list a.row { grid-template-columns: 1fr auto; } .list .star { display:none; }
@@ -300,7 +312,7 @@ fn mail_page(title: &str, current: i64, app: &App, body: Markup) -> Response {
             style { (PreEscaped(MAIL_CSS)) }
             div.mail {
                 (sidebar(app, current))
-                div { (body) }
+                div.pane { (body) }
             }
             script { (PreEscaped(TIME_SCRIPT)) }
         },

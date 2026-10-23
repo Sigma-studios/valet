@@ -129,6 +129,8 @@ def online():
         b.settle(1)
     node = lambda name: f"[...document.querySelectorAll('.folders .node')].find(n => n.querySelector('.name').textContent === {name!r})"
     check(b.js(f"!{node('Work')}.hidden && {node('Clients')}.hidden && {node('Acme')}.hidden"), "folders inside others start hidden")
+    check(b.js("getComputedStyle(document.body).overflow === 'hidden' && getComputedStyle(document.querySelector('.pane')).overflowY === 'auto' && getComputedStyle(document.querySelector('.pane > .toolbar')).position === 'sticky'"),
+          "the mail column scrolls, under its pinned toolbar, not the page")
     check(b.js("getComputedStyle(document.querySelector('.folders a.folder')).textAlign") == "left", "folder names are aligned left")
     b.js(f"{node('Work')}.querySelector('button.twisty').click()")
     check(b.js(f"!{node('Clients')}.hidden && {node('Acme')}.hidden"), "opening Work shows Clients only")
