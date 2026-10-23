@@ -104,7 +104,8 @@ def main():
         check(r.ok and r.content[:4] == b"\x89PNG" and "immutable" in r.headers["cache-control"], f"icon {icon['sizes']} {icon['purpose']}")
     sw = s.get(f"{WEB}/sw.js")
     check(sw.ok and "__VERSION__" not in sw.text and "/offline" in sw.text and sw.headers["cache-control"] == "no-cache", "service worker, versioned")
-    check("You're offline" in s.get(f"{WEB}/offline").text, "offline page")
+    off = s.get(f"{WEB}/offline")
+    check("You're offline" in off.text and '<link rel="manifest"' in off.text and off.headers["content-type"].startswith("text/html"), "offline page, with the manifest")
     check(requests.get(f"{WEB}/calendar/month/{month}").status_code == 401, "the feed needs logging in")
 
 

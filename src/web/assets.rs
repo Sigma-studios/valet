@@ -23,7 +23,8 @@ const FILES: &[(&str, &str, &[u8])] = &[
 
 const SERVICE_WORKER: &str = include_str!("assets/sw.js");
 
-/// Changes whenever a file (or the service worker, or the calendar's look) does.
+/// Changes whenever a file (or the service worker, the calendar's look or
+/// the offline page) does.
 fn version() -> &'static str {
     static V: OnceLock<String> = OnceLock::new();
     V.get_or_init(|| {
@@ -34,6 +35,7 @@ fn version() -> &'static str {
         }
         h.update(SERVICE_WORKER.as_bytes());
         h.update(include_bytes!("assets/calendar.css"));
+        h.update(offline_page().as_bytes());
         hex::encode(h.finalize())[..12].to_string()
     })
 }
@@ -86,13 +88,18 @@ pub async fn manifest() -> Response {
 
 /// What the service worker shows for a page never opened before, offline.
 pub async fn offline() -> Response {
-    let body = maud::html! {
+    ([(header::CACHE_CONTROL, "no-cache")], axum::response::Html(offline_page())).into_response()
+}
+
+fn offline_page() -> String {
+    maud::html! {
         (maud::DOCTYPE)
         html lang="en" {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { "Offline · valet" }
+                link rel="manifest" href="/manifest.webmanifest";
                 style { "body{font:15px/1.5 system-ui,sans-serif;max-width:420px;margin:15vh auto;padding:0 16px;color:#1c1917;background:#fafaf9}a{color:#2563eb}@media (prefers-color-scheme:dark){body{color:#f5f5f4;background:#1c1917}a{color:#60a5fa}}" }
             }
             body {
@@ -101,8 +108,8 @@ pub async fn offline() -> Response {
                 p { a href="/calendar" { "Calendar" } " · " a href="/inbox" { "Inbox" } " · " a href="javascript:location.reload()" { "Try again" } }
             }
         }
-    };
-    ([(header::CACHE_CONTROL, "no-cache")], body).into_response()
+    }
+    .into_string()
 }
 
 /// The head lines making valet installable, and the scripts every page runs
