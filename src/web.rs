@@ -1113,7 +1113,11 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
                     b { (i.summary) }
                     div.small.muted { (starts(&i.ics)) " · from " (i.organizer) }
                 }
-                @if let Some(r) = &i.response { span.small.ok { "answered: " (r.to_lowercase()) } }
+                @match i.response.as_deref() {
+                    Some("IGNORED") => span.small.muted { "ignored" },
+                    Some(r) => span.small.ok { "answered: " (r.to_lowercase()) },
+                    None => {},
+                }
             }
             form.row method="post" action={"/invites/" (i.id)} style="margin-top:10px" {
                 label { "Put it in" select name="calendar" {
@@ -1123,6 +1127,7 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
                 button type="submit" name="answer" value="ACCEPTED" { "Accept" }
                 button type="submit" name="answer" value="TENTATIVE" { "Maybe" }
                 button.plain type="submit" name="answer" value="DECLINED" { "Decline" }
+                button.plain type="submit" name="answer" value="IGNORED" title="Dismiss it without answering: the organizer isn't told" { "Ignore" }
             }
         }
     };
@@ -1133,7 +1138,8 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
             p.muted { "Nothing waiting: invitations arriving in your inboxes show here until you answer them." }
         } @else {
             @for i in &waiting { (card(i)) }
-            p.muted.small { "Answering emails the organizer from the account the invitation came to, and puts the event in the calendar you pick. Accepting from a mail app works too." }
+            p.muted.small { "Answering emails the organizer from the account the invitation came to, and puts the event in the calendar you pick. Accepting from a mail app works too. "
+                "Ignore dismisses it without telling the organizer." }
         }
         @if !others.is_empty() {
             details style="margin-top:20px" {
@@ -1434,6 +1440,12 @@ struct AnswerForm {
 
 async fn answer_invite(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Form(f): Form<AnswerForm>) -> Response {
     guard!(app, headers);
+    if f.answer == "IGNORED" {
+        return match crate::invites::ignore(&app, id) {
+            Ok(()) => back("/invitations", Some("Ignored: the organizer isn't told."), None),
+            Err(e) => back("/invitations", None, Some(&format!("{e:#}"))),
+        };
+    }
     if !matches!(f.answer.as_str(), "ACCEPTED" | "TENTATIVE" | "DECLINED") {
         return back("/invitations", None, Some("Unknown answer."));
     }

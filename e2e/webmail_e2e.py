@@ -1,6 +1,7 @@
 """The webmail with the tree, against GreenMail."""
 
 import re
+import time
 
 from common import (WEB, check, flash, gm_folders, gm_imap, gm_subjects, members_on_page, message, node_id, q, rows,
                     subjects, valet_imap, wait)
@@ -109,6 +110,32 @@ def main():
     check(flash(bulk("delete", b2))[0] == "Moved 1 message to the Trash.", "delete one")
     wait(lambda: "bulk-2" in gm_subjects("test", "Trash"), "it is in Test's Trash at GreenMail")
     check(flash(bulk("archive"))[1] == "No message selected.", "nothing ticked: said so")
+    page = s.get(f"{WEB}{listed}&open={in_box['wake-up']}").text
+    check(re.search(rf'<div class="row open">.*?<a class="link" href="{re.escape(listed)}"', page.replace("&amp;", "&"), re.S), "the open message's row closes it")
+
+    # An invitation ignored: no answer sent, off the calendar, not waiting.
+    invite = (
+        "From: Org <org@local.test>\r\nTo: test@local.test\r\nSubject: Invitation: Planning\r\nMIME-Version: 1.0\r\n"
+        "Content-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n"
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:ignore-me@e2e\r\nDTSTART:20991105T100000Z\r\n"
+        "DTEND:20991105T110000Z\r\nSUMMARY:Planning\r\nORGANIZER:mailto:org@local.test\r\n"
+        "ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:test@local.test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    ).encode()
+    g = gm_imap("test")
+    g.append("INBOX", None, None, invite)
+    g.logout()
+    wait(lambda: "Planning" in s.get(f"{WEB}/invitations").text, "the invitation is waiting")
+    planning = lambda: [e for e in s.get(f"{WEB}/calendar/month/2099-11").json()["events"] if e["title"] == "Planning"]
+    check(planning() and planning()[0]["calendar"] == "invitations", "in the Invitations calendar meanwhile")
+    inv = re.search(r'action="/invites/(\d+)"', s.get(f"{WEB}/invitations").text).group(1)
+    sent_before = len(gm_subjects("org", "INBOX"))
+    r = s.post(f"{WEB}/invites/{inv}", data={"answer": "IGNORED", "calendar": ""})
+    check(flash(r)[0] == "Ignored: the organizer isn't told.", "Ignore")
+    page = s.get(f"{WEB}/invitations").text
+    check("Nothing waiting" in page and ">ignored<" in page, "no longer waiting; listed as ignored")
+    check(not planning(), "off the Invitations calendar")
+    time.sleep(2)
+    check(len(gm_subjects("org", "INBOX")) == sent_before, "no answer reached the organizer")
     m.logout()
 
 

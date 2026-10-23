@@ -202,6 +202,17 @@ pub async fn respond(app: &App, id: i64, partstat: &str, calendar: Option<&str>)
     Ok(())
 }
 
+/// Leaves the invitation unanswered for good: the organizer isn't told, and
+/// the event leaves the Invitations calendar (not one it was put in). It
+/// can still be answered later.
+pub fn ignore(app: &App, id: i64) -> Result<()> {
+    let inv = app.mail.invite(id).context("no such invitation")?;
+    if let Some(o) = app.store.find_uid(&inv.uid).filter(|o| o.calendar == CALENDAR) {
+        app.store.delete_object(&o.calendar, &o.name)?;
+    }
+    app.mail.set_invite_response(id, "IGNORED")
+}
+
 /// `20261022T140300Z`.
 pub fn stamp(unix: i64) -> String {
     let (y, m, d) = crate::util::civil(unix.div_euclid(86400));
