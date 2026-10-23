@@ -19,6 +19,8 @@ pub struct Pattern {
     pub tag: String,
     /// Minutes relative to the event's start; negative is before.
     pub offsets: Vec<i64>,
+    /// Its alerts ring like an alarm on valet's Android app.
+    pub ring: bool,
 }
 
 pub struct Rules<'a> {
@@ -251,10 +253,10 @@ mod tests {
 
     fn patterns() -> Vec<Pattern> {
         vec![
-            Pattern { id: 1, name: "Meeting".into(), tag: "meeting".into(), offsets: vec![-12, -2] },
-            Pattern { id: 2, name: "Flight".into(), tag: "flight".into(), offsets: vec![-1440, -180] },
-            Pattern { id: 3, name: "Morning".into(), tag: "morning".into(), offsets: vec![540] },
-            Pattern { id: 4, name: "Silent".into(), tag: "silent".into(), offsets: vec![] },
+            Pattern { id: 1, name: "Meeting".into(), tag: "meeting".into(), offsets: vec![-12, -2], ring: false },
+            Pattern { id: 2, name: "Flight".into(), tag: "flight".into(), offsets: vec![-1440, -180], ring: true },
+            Pattern { id: 3, name: "Morning".into(), tag: "morning".into(), offsets: vec![540], ring: false },
+            Pattern { id: 4, name: "Silent".into(), tag: "silent".into(), offsets: vec![], ring: false },
         ]
     }
 

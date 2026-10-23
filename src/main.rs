@@ -1,5 +1,6 @@
 mod accounts;
 mod alarms;
+mod calendar;
 mod dav;
 mod folders;
 mod ical;
@@ -176,6 +177,7 @@ pub async fn fallback(State(app): State<Arc<App>>, req: Request) -> Response {
 }
 
 pub fn router(app: Arc<App>) -> axum::Router {
+    web::set_app(&app);
     web::routes()
         .fallback(any(fallback))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
@@ -192,6 +194,9 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let store = Store::open(&data_dir.join("valet.db"))?;
+    if let Some(tz) = store.setting("tz").and_then(|z| calendar::zone(&z)) {
+        calendar::set_default_zone(tz);
+    }
     let mail = MailStore::open(&data_dir.join("mail.db"))?;
     if mail.accounts().is_empty() {
         let from_env = accounts::from_env()?;

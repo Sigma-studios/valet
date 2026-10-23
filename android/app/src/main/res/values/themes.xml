@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="valet_blue">#2563EB</color>
+    <style name="Theme.Valet" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#FFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">#FAFAF9</item>
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+    <style name="Theme.Valet.Ring" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/valet_blue</item>
+        <item name="android:statusBarColor">@color/valet_blue</item>
+    </style>
+</resources>

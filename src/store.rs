@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS patterns (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, tag TEXT NOT NULL UNIQUE, offsets TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS choices (
     calendar TEXT NOT NULL, uid TEXT NOT NULL, pattern INTEGER NOT NULL, PRIMARY KEY (calendar, uid));
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
 const CAL_COLS: &str = "id, name, color, description, ord, default_timed, default_allday, rev";
@@ -154,14 +155,24 @@ impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
-        conn.execute_batch(SCHEMA)?;
+        Self::schema(&conn)?;
         Ok(Store { conn: Mutex::new(conn) })
     }
 
     pub fn memory() -> Store {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+        Self::schema(&conn).unwrap();
         Store { conn: Mutex::new(conn) }
+    }
+
+    fn schema(c: &Connection) -> rusqlite::Result<()> {
+        c.execute_batch(SCHEMA)?;
+        // Added later: patterns whose alerts ring (Android app).
+        let has_ring: bool = c.query_row("SELECT COUNT(*) FROM pragma_table_info('patterns') WHERE name = 'ring'", [], |r| r.get(0))?;
+        if !has_ring {
+            c.execute_batch("ALTER TABLE patterns ADD COLUMN ring INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        Ok(())
     }
 
     fn db(&self) -> MutexGuard<'_, Connection> {
@@ -183,6 +194,19 @@ impl Store {
         Ok(rev)
     }
 
+    // Settings
+
+    pub fn setting(&self, key: &str) -> Option<String> {
+        let c = self.db();
+        c.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional().unwrap()
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let c = self.db();
+        c.execute("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = ?2", [key, value])?;
+        Ok(())
+    }
+
     // Calendars
 
     pub fn calendars(&self) -> Vec<Calendar> {
@@ -198,11 +222,15 @@ impl Store {
 
     /// False if the id is taken.
     pub fn create_calendar(&self, id: &str, name: &str, color: Option<&str>) -> Result<bool> {
+        // Without a colour, the next of a few that tell calendars apart.
+        const COLORS: &[&str] = &["#3b82f6", "#16a34a", "#e11d48", "#f59e0b", "#8b5cf6", "#0891b2", "#db2777", "#65a30d"];
         let c = self.db();
+        let count: i64 = c.query_row("SELECT COUNT(*) FROM calendars", [], |r| r.get(0))?;
+        let color = color.unwrap_or(COLORS[count as usize % COLORS.len()]);
         let rev = Self::next_rev(&c)?;
         let n = c.execute(
             "INSERT OR IGNORE INTO calendars (id, name, color, ord, rev)
-             VALUES (?1, ?2, COALESCE(?3, '#3b82f6'), (SELECT COUNT(*) FROM calendars), ?4)",
+             VALUES (?1, ?2, ?3, (SELECT COUNT(*) FROM calendars), ?4)",
             params![id, name, color, rev],
         )?;
         Ok(n == 1)
@@ -416,10 +444,10 @@ impl Store {
 
     pub fn patterns(&self) -> Vec<Pattern> {
         let c = self.db();
-        let mut st = c.prepare("SELECT id, name, tag, offsets FROM patterns ORDER BY name").unwrap();
+        let mut st = c.prepare("SELECT id, name, tag, offsets, ring FROM patterns ORDER BY name").unwrap();
         st.query_map([], |r| {
             let offsets: String = r.get(3)?;
-            Ok(Pattern { id: r.get(0)?, name: r.get(1)?, tag: r.get(2)?, offsets: serde_json::from_str(&offsets).unwrap_or_default() })
+            Ok(Pattern { id: r.get(0)?, name: r.get(1)?, tag: r.get(2)?, offsets: serde_json::from_str(&offsets).unwrap_or_default(), ring: r.get(4)? })
         })
         .unwrap()
         .filter_map(Result::ok)
@@ -447,6 +475,12 @@ impl Store {
             Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Whether the pattern's alerts ring like an alarm (on valet's Android app).
+    pub fn set_ring(&self, id: i64, ring: bool) -> Result<()> {
+        self.db().execute("UPDATE patterns SET ring = ?2 WHERE id = ?1", params![id, ring])?;
+        Ok(())
     }
 
     pub fn delete_pattern(&self, id: i64) -> Result<()> {
