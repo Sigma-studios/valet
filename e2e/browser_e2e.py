@@ -151,6 +151,14 @@ def online():
     b.js("document.querySelector('main').append(Object.assign(document.createElement('div'), { style: 'height:3000px' }))")
     check(b.js("(m => m.scrollHeight > m.clientHeight && getComputedStyle(m).overflowY === 'auto')(document.querySelector('main')) && document.scrollingElement.scrollHeight <= innerHeight"),
           "a long page scrolls under the bar, not the window")
+    # Large screens: the mail uses the room, nothing squeezed or scrolling sideways.
+    for w, h in [(2560, 1440), (3840, 2160)]:
+        b.call("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=1, mobile=False)
+        b.go(f"{WEB}/inbox", 1.5)
+        size = b.js("[document.querySelector('.mail').getBoundingClientRect().width, document.querySelector('.pane').getBoundingClientRect().width]")
+        check(size[0] > 1900 and size[1] > 1600 and not b.js("(p => p.scrollWidth > p.clientWidth)(document.querySelector('.pane'))"),
+              f"on a {w}px-wide screen the mail spreads out (mail, list widths: {size})")
+    b.call("Emulation.clearDeviceMetricsOverride")
 
     # The pattern editor: rows, not a typed list.
     b.go(f"{WEB}/patterns")
