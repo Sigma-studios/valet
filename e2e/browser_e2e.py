@@ -140,6 +140,13 @@ def online():
     check(b.js(f"!{node('Acme')}.hidden && {node('Acme')}.querySelector('a.folder.on') !== null"), "in Acme, the way to it is open")
     b.shot(f"{shots}/sidebar.png")
 
+    # The bar's links sit at the same place on every page.
+    spots = {}
+    for page in ["/inbox", "/calendar", "/invitations", "/settings", "/patterns"]:
+        b.go(WEB + page, 1.5)
+        spots[page] = b.js("[...document.querySelectorAll('header nav > a, header nav > form')].map(e => Math.round(e.getBoundingClientRect().left) + ':' + Math.round(e.getBoundingClientRect().top)).join(' ')")
+    check(len(set(spots.values())) == 1, f"the bar doesn't move from page to page: {spots}")
+
     # The pattern editor: rows, not a typed list.
     b.go(f"{WEB}/patterns")
     href = b.js("document.querySelector('td a[href^=\"/patterns/\"]').getAttribute('href')")
