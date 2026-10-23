@@ -122,16 +122,16 @@ const SETTINGS: &[(&str, &str)] = &[
 ];
 
 const CSS: &str = r#"
-:root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --card:#fff; --accent:#2563eb; --bad:#b91c1c; --good:#15803d; }
+:root { color-scheme:light dark; --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --card:#fff; --accent:#2563eb; --bad:#b91c1c; --good:#15803d; }
 @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --card:#292524; --accent:#60a5fa; --bad:#f87171; --good:#4ade80; } }
 * { box-sizing: border-box; } [hidden] { display:none !important; }
 body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
 header { border-bottom:1px solid var(--line); background:var(--card); }
-nav { max-width:960px; margin:0 auto; padding:10px 16px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+header nav { max-width:960px; margin:0 auto; padding:10px 16px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
 a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
-nav a { color:var(--fg); } nav a.on { color:var(--accent); font-weight:600; }
-nav .brand { font-weight:700; margin-right:8px; } nav form { margin-left:auto; }
-main { max-width:960px; margin:0 auto; padding:16px; } body.wide main, body.wide nav { max-width:1400px; }
+header nav a { color:var(--fg); } header nav a.on { color:var(--accent); font-weight:600; }
+header nav .brand { font-weight:700; margin-right:8px; } header nav form { margin-left:auto; }
+main { max-width:960px; margin:0 auto; padding:16px; } body.wide main, body.wide header nav { max-width:1400px; }
 h1 { font-size:22px; margin:8px 0 16px; } h2 { font-size:17px; margin:24px 0 8px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin:12px 0; }
 .muted { color:var(--muted); } .small { font-size:13px; }
@@ -148,7 +148,7 @@ code { background:var(--line); padding:1px 5px; border-radius:4px; word-break:br
 .menu > div a, .menu > div button { display:block; width:100%; text-align:left; padding:7px 10px; border:none; border-radius:6px; background:none; color:var(--fg); }
 .menu > div a:hover, .menu > div button:hover { background:var(--line); text-decoration:none; }
 .menu > div button.danger { color:var(--bad); }
-nav .count { background:var(--bad); color:#fff; border-radius:9px; font-size:11px; font-weight:700; padding:0 6px; margin-left:4px; vertical-align:2px; }
+header nav .count { background:var(--bad); color:#fff; border-radius:9px; font-size:11px; font-weight:700; padding:0 6px; margin-left:4px; vertical-align:2px; }
 .subnav { border-bottom:1px solid var(--line); background:var(--bg); }
 .subnav div { max-width:960px; margin:0 auto; padding:6px 16px; display:flex; gap:14px; flex-wrap:wrap; font-size:14px; }
 .subnav a { color:var(--muted); } .subnav a.on { color:var(--fg); font-weight:600; }

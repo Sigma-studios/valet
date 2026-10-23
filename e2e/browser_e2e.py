@@ -121,6 +121,23 @@ def online():
         b.go(WEB + page)
     wait(b, "caches.open('valet-pages').then(c => c.keys()).then(k => k.length >= 3)", "visited pages kept")
 
+    # The mail sidebar: folders start closed, but for the way to the one shown.
+    b.go(f"{WEB}/inbox", 1)
+    for name, parent in [("Work", None), ("Clients", "Work"), ("Acme", "Clients")]:
+        pid = b.js(f"[...document.querySelectorAll('.folders .node')].find(n => n.querySelector('.name').textContent === {parent!r})?.dataset.id || ''") if parent else ""
+        b.js(f"fetch('/tree', {{ method: 'POST', body: new URLSearchParams({{ name: {name!r}, parent: {pid!r} }}) }}).then(() => location.reload())")
+        b.settle(1)
+    node = lambda name: f"[...document.querySelectorAll('.folders .node')].find(n => n.querySelector('.name').textContent === {name!r})"
+    check(b.js(f"!{node('Work')}.hidden && {node('Clients')}.hidden && {node('Acme')}.hidden"), "folders inside others start hidden")
+    check(b.js("getComputedStyle(document.querySelector('.folders a.folder')).textAlign") == "left", "folder names are aligned left")
+    b.js(f"{node('Work')}.querySelector('button.twisty').click()")
+    check(b.js(f"!{node('Clients')}.hidden && {node('Acme')}.hidden"), "opening Work shows Clients only")
+    acme = b.js(f"{node('Acme')}.querySelector('a').getAttribute('href')")
+    b.js("sessionStorage.clear()")
+    b.go(WEB + acme, 1)
+    check(b.js(f"!{node('Acme')}.hidden && {node('Acme')}.querySelector('a.folder.on') !== null"), "in Acme, the way to it is open")
+    b.shot(f"{shots}/sidebar.png")
+
     # The pattern editor: rows, not a typed list.
     b.go(f"{WEB}/patterns")
     href = b.js("document.querySelector('td a[href^=\"/patterns/\"]').getAttribute('href')")
