@@ -56,6 +56,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/invites/{id}", post(answer_invite))
         .route("/inbox", get(webmail::inbox))
         .route("/box/{id}", get(webmail::list))
+        .route("/box/{id}/bulk", post(webmail::bulk))
         .route("/msg/{id}", get(webmail::view).post(webmail::action))
         .route("/msg/{id}/html", get(webmail::html_body))
         .route("/msg/{id}/att/{n}", get(webmail::attachment))

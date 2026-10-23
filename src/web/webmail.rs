@@ -258,15 +258,20 @@ a.compose { display:block; text-align:center; background:var(--accent); color:#f
 a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .folders-menu { display:none; width:100%; margin-bottom:10px; }
 .list { background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-.list a.row { display:grid; grid-template-columns: 14px minmax(110px, 200px) 1fr auto; gap:10px; align-items:baseline; padding:8px 12px; border-bottom:1px solid var(--line); color:var(--fg); }
-.list a.row:last-child { border-bottom:none; }
 /* Two greys tell them apart, with the bold: unread rows lighter, read darker. */
 :root { --row-unread:#ffffff; --row-read:#ecebe9; --row-hover:#e2e0dd; }
 @media (prefers-color-scheme: dark) { :root { --row-unread:#34302d; --row-read:#1f1c1a; --row-hover:#3d3936; } }
-.list a.row { background:var(--row-read); }
-.list a.row.unread { background:var(--row-unread); }
-.list a.row:hover { background:var(--row-hover); text-decoration:none; }
-.list a.row.unread .from, .list a.row.unread .subject { font-weight:700; }
+.list .row { display:flex; align-items:stretch; border-bottom:1px solid var(--line); background:var(--row-read); }
+.list .row:last-child { border-bottom:none; }
+.list .row.unread { background:var(--row-unread); }
+.list .row:hover { background:var(--row-hover); }
+.list .row.picked { background:color-mix(in srgb, var(--accent) 18%, var(--row-unread)); }
+.list .row.open { background:color-mix(in srgb, var(--accent) 12%, var(--row-unread)); box-shadow:inset 3px 0 0 var(--accent); }
+.list label.pick { flex:none; display:flex; flex-direction:row; align-items:center; margin:0; padding:0 2px 0 12px; cursor:pointer; }
+.list label.pick input { margin:0; cursor:pointer; }
+.list a.link { flex:1; min-width:0; display:grid; grid-template-columns: 14px minmax(110px, 200px) 1fr auto; gap:10px; align-items:baseline; padding:8px 12px 8px 8px; color:var(--fg); }
+.list a.link:hover { text-decoration:none; }
+.list .row.unread .from, .list .row.unread .subject { font-weight:700; }
 .list .from, .list .line { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .list .preview { color:var(--muted); }
 .list .when { color:var(--muted); font-size:13px; white-space:nowrap; }
@@ -279,6 +284,26 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .toolbar a.button:hover, .toolbar button:hover { background:var(--line); text-decoration:none; }
 .toolbar button.danger { color:var(--bad); }
 .toolbar button.refresh { white-space:nowrap; }
+/* The toolbar: refresh and search, or, while messages are ticked, what to do with them. */
+.toolbar .normal, .toolbar .bulk-actions { flex:1; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.toolbar .bulk-actions { display:none; }
+.pane:has(#bulk input[name=id]:checked) .toolbar .normal { display:none; }
+.pane:has(#bulk input[name=id]:checked) .toolbar .bulk-actions { display:flex; }
+.toolbar .bulk-actions .count { font-size:14px; font-weight:600; margin-right:4px; }
+.toolbar label.pickall { display:flex; flex-direction:row; align-items:center; margin:0 4px 0 12px; }
+/* A message opened from the list: beside it when there's room (the list
+   then shows subjects only), instead of it otherwise. */
+@media (min-width: 1100px) {
+  .pane:has(> .split.reading) { overflow:hidden; display:flex; flex-direction:column; padding-bottom:0; }
+  .split.reading { flex:1; min-height:0; display:grid; grid-template-columns:minmax(240px, 30%) 1fr; gap:16px; }
+  .split.reading > .listcol, .split.reading > .readcol { min-height:0; overflow-y:auto; padding-bottom:16px; scrollbar-width:thin; }
+  .split.reading .list a.link { display:block; padding:9px 10px 9px 8px; }
+  .split.reading .list .star, .split.reading .list .from, .split.reading .list .tag, .split.reading .list .preview, .split.reading .list .when { display:none; }
+  .split.reading .list .line { display:block; }
+  .split.reading .readcol > .toolbar { position:sticky; top:0; z-index:2; background:var(--bg); padding-bottom:10px; margin-bottom:2px; gap:6px; }
+  .split.reading .readcol > .toolbar :is(a.button, button, select) { padding:4px 8px; font-size:14px; }
+}
+@media (max-width: 1099px) { .split.reading > .listcol { display:none; } }
 .toolbar button.refresh:disabled { opacity:.7; cursor:progress; }
 .headers { margin-bottom:12px; } .headers h1 { margin:0 0 8px; }
 .headers .meta { color:var(--muted); font-size:13px; }
@@ -301,7 +326,7 @@ form.write textarea { min-height:320px; font:inherit; padding:8px; border:1px so
 }
 @media (max-width: 720px) {
   .mail { display:block; } nav.folders { display:none; } .folders-menu { display:block; }
-  .list a.row { grid-template-columns: 1fr auto; } .list .star { display:none; }
+  .list a.link { grid-template-columns: 1fr auto; } .list .star { display:none; }
   .list .line { grid-column: 1 / -1; }
 }
 "#;
@@ -337,6 +362,8 @@ pub struct ListQuery {
     ok: Option<String>,
     err: Option<String>,
     images: Option<String>,
+    /// The message read beside the list.
+    open: Option<i64>,
 }
 
 fn flash_of(q: &ListQuery) -> Markup {
@@ -361,6 +388,23 @@ fn matches(raw: &[u8], words: &[String]) -> bool {
 pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query(q): Query<ListQuery>) -> Response {
     guard!(app, headers);
     let Some(mbox) = app.mail.mailbox(id) else { return StatusCode::NOT_FOUND.into_response() };
+    let link = |page: usize| {
+        let mut l = format!("/box/{id}?page={page}");
+        if !q.q.is_empty() {
+            l.push_str("&q=");
+            l.push_str(&percent_encoding::utf8_percent_encode(&q.q, percent_encoding::NON_ALPHANUMERIC).to_string());
+        }
+        l
+    };
+    // The message shown beside the list (or, on narrow screens, instead of
+    // it): first, so the list shows it read.
+    let reading = match q.open {
+        Some(open) => match reader(&app, open, &q, Some((id, link(q.page)))) {
+            Some(r) => Some((open, r)),
+            None => return back(&link(q.page), None, Some("That message is gone.")),
+        },
+        None => None,
+    };
     let mut msgs = app.mail.messages(id);
     msgs.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
     let words: Vec<String> = q.q.split_whitespace().map(str::to_lowercase).collect();
@@ -377,52 +421,105 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     };
     let title = if mbox.is_node() { short_name(&mbox) } else { place_name(&mbox) };
     let drafts = mbox.special.eq_ignore_ascii_case("\\Drafts");
-    let link = |page: usize| {
-        let mut l = format!("/box/{id}?page={page}");
-        if !q.q.is_empty() {
-            l.push_str("&q=");
-            l.push_str(&percent_encoding::utf8_percent_encode(&q.q, percent_encoding::NON_ALPHANUMERIC).to_string());
-        }
-        l
-    };
-    mail_page(&title, id, &app, html! {
+    let page_title = reading.as_ref().map(|(_, (subject, _))| subject.clone()).unwrap_or_else(|| title.clone());
+    mail_page(&page_title, id, &app, html! {
         (flash_of(&q))
         form.toolbar method="get" action={"/box/" (id)} {
-            button.refresh type="button" title="Check every account for new mail now" { "↻ Refresh" }
-            input type="search" name="q" value=(q.q) placeholder={"Search " (title)};
-            @if !q.q.is_empty() { a.button href={"/box/" (id)} { "Clear" } }
+            span.normal {
+                button.refresh type="button" title="Check every account for new mail now" { "↻ Refresh" }
+                input type="search" name="q" value=(q.q) placeholder={"Search " (title)};
+                @if !q.q.is_empty() { a.button href={"/box/" (id)} { "Clear" } }
+            }
+            // Shown while messages are ticked; they act on the list's form.
+            span.bulk-actions {
+                label.pickall title="Select every message on this page" { input type="checkbox" #pickall; }
+                span.count {}
+                button form="bulk" name="action" value="archive" { "Archive" }
+                button form="bulk" name="action" value="seen" { "Mark read" }
+                button form="bulk" name="action" value="unseen" { "Mark unread" }
+                button.danger form="bulk" name="action" value="delete" { "Delete" }
+                button.plain type="button" #pick-none { "Cancel" }
+            }
         }
         script { (PreEscaped(REFRESH_SCRIPT)) }
-        @if shown.is_empty() {
-            p.muted { @if q.q.is_empty() { "Nothing here." } @else { "No message matches." } }
-        } @else {
-            div.list {
-                @for m in shown {
-                    @let raw = app.mail.blob(&m.blob).unwrap_or_default();
-                    @let parsed = parse(&raw);
-                    @let subject = parsed.as_ref().and_then(|p| p.subject().map(str::to_string)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "(no subject)".into());
-                    @let from = parsed.as_ref().map(|p| if mbox.special.eq_ignore_ascii_case("\\Sent") { format!("To: {}", who(p.to())) } else { who(p.from()) }).unwrap_or_default();
-                    @let preview: String = parsed.as_ref().and_then(|p| p.body_text(0).map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(140).collect())).unwrap_or_default();
-                    a.row.unread[!has_flag(m, "\\Seen")] href=(if drafts { format!("/compose?draft={}", m.id) } else { format!("/msg/{}", m.id) }) {
-                        span.star { @if has_flag(m, "\\Flagged") { "★" } }
-                        span.from { (from) }
-                        span.line {
-                            @if mbox.is_node() { @if let Some(a) = account_of(m) { span.tag { (a) } } }
-                            span.subject { (subject) }
-                            @if !preview.is_empty() { span.preview { " — " (preview) } }
+        div.split.reading[reading.is_some()] {
+            div.listcol {
+                @if shown.is_empty() {
+                    p.muted { @if q.q.is_empty() { "Nothing here." } @else { "No message matches." } }
+                } @else {
+                    form #bulk method="post" action={"/box/" (id) "/bulk"} {
+                        input type="hidden" name="back" value=(link(q.page));
+                        div.list {
+                            @for m in shown {
+                                @let raw = app.mail.blob(&m.blob).unwrap_or_default();
+                                @let parsed = parse(&raw);
+                                @let subject = parsed.as_ref().and_then(|p| p.subject().map(str::to_string)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "(no subject)".into());
+                                @let from = parsed.as_ref().map(|p| if mbox.special.eq_ignore_ascii_case("\\Sent") { format!("To: {}", who(p.to())) } else { who(p.from()) }).unwrap_or_default();
+                                @let preview: String = parsed.as_ref().and_then(|p| p.body_text(0).map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(140).collect())).unwrap_or_default();
+                                @let href = if drafts { format!("/compose?draft={}", m.id) } else { format!("{}&open={}", link(q.page), m.id) };
+                                div.row.unread[!has_flag(m, "\\Seen")].open[reading.as_ref().is_some_and(|(o, _)| *o == m.id)] {
+                                    label.pick { input type="checkbox" name="id" value=(m.id) aria-label="Select"; }
+                                    a.link href=(href) title={(from) " — " (subject)} {
+                                        span.star { @if has_flag(m, "\\Flagged") { "★" } }
+                                        span.from { (from) }
+                                        span.line {
+                                            @if mbox.is_node() { @if let Some(a) = account_of(m) { span.tag { (a) } } }
+                                            span.subject { (subject) }
+                                            @if !preview.is_empty() { span.preview { " — " (preview) } }
+                                        }
+                                        span.when { (time(m.date, false)) }
+                                    }
+                                }
+                            }
                         }
-                        span.when { (time(m.date, false)) }
+                    }
+                    div.pager.small.muted {
+                        span { @if q.page > 0 { a href=(link(q.page - 1)) { "← Newer" } } }
+                        span { (start + 1) "–" (start + shown.len()) " of " (total) }
+                        span { @if start + PAGE < total { a href=(link(q.page + 1)) { "Older →" } } }
                     }
                 }
             }
-            div.pager.small.muted {
-                span { @if q.page > 0 { a href=(link(q.page - 1)) { "← Newer" } } }
-                span { (start + 1) "–" (start + shown.len()) " of " (total) }
-                span { @if start + PAGE < total { a href=(link(q.page + 1)) { "Older →" } } }
-            }
+            @if let Some((_, (_, body))) = &reading { div.readcol { (body) } }
         }
+        script { (PreEscaped(BULK_SCRIPT)) }
     })
 }
+
+/// Ticking messages: the count, all of the page, a range with Shift.
+const BULK_SCRIPT: &str = r#"
+{
+  const boxes = [...document.querySelectorAll('#bulk input[name=id]')], all = document.getElementById('pickall');
+  const count = document.querySelector('.bulk-actions .count');
+  const sync = () => {
+    const n = boxes.filter((b) => b.checked).length;
+    count.textContent = `${n} selected`;
+    all.checked = n > 0 && n === boxes.length;
+    all.indeterminate = n > 0 && n < boxes.length;
+    for (const b of boxes) b.closest('.row').classList.toggle('picked', b.checked);
+  };
+  let last = null;
+  for (const b of boxes) {
+    b.addEventListener('click', (e) => {
+      if (e.shiftKey && last) {
+        const [i, j] = [boxes.indexOf(last), boxes.indexOf(b)].sort((x, y) => x - y);
+        for (const x of boxes.slice(i, j + 1)) x.checked = b.checked;
+      }
+      last = b;
+      sync();
+    });
+  }
+  all?.addEventListener('change', () => { for (const b of boxes) b.checked = all.checked; sync(); });
+  document.getElementById('pick-none')?.addEventListener('click', () => { for (const b of boxes) b.checked = false; sync(); });
+  document.querySelector('button[value=delete][form=bulk]')?.addEventListener('click', (e) => {
+    const n = boxes.filter((b) => b.checked).length;
+    if (!confirm(`Delete ${n} message${n > 1 ? 's' : ''}? They go to the Trash (from the Trash itself, for good).`)) e.preventDefault();
+  });
+  sync();
+  // The message read stays in sight in the list.
+  document.querySelector('.list .row.open')?.scrollIntoView({ block: 'nearest' });
+}
+"#;
 
 /// The message row as listed, its source row (an account folder's), and that folder.
 fn locate(app: &App, id: i64) -> Option<(Msg, Msg, Mailbox)> {
@@ -432,21 +529,28 @@ fn locate(app: &App, id: i64) -> Option<(Msg, Msg, Mailbox)> {
     Some((row, src, folder))
 }
 
-pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query(q): Query<ListQuery>) -> Response {
-    guard!(app, headers);
-    let Some((row, src, folder)) = locate(&app, id) else { return StatusCode::NOT_FOUND.into_response() };
+/// A message as read: its actions, headers and body. Marks it read.
+/// `pane`: shown beside the list `(list id, list address)`, which actions
+/// come back to; else on its own page. Returns its subject too.
+fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Option<(String, Markup)> {
+    let (row, src, folder) = locate(app, id)?;
     if !has_flag(&src, "\\Seen") {
         let _ = app.mail.store(&[src.id], &StoreMode::Add, &["\\Seen".to_string()]);
     }
     let raw = app.mail.blob(&src.blob).unwrap_or_default();
-    let Some(m) = parse(&raw) else { return (StatusCode::INTERNAL_SERVER_ERROR, "This message can't be read.").into_response() };
+    let m = parse(&raw)?;
     let subject = m.subject().filter(|s| !s.trim().is_empty()).unwrap_or("(no subject)").to_string();
     // mail-parser turns a text-only message into HTML too: only real HTML goes in the frame.
     let html_body = m.html_body.first().and_then(|&i| m.part(i)).is_some_and(|p| p.is_text_html());
     let remote = html_body && m.body_html(0).is_some_and(|h| has_remote(&h));
     let images = q.images.is_some();
-    let back = row.mailbox;
-    let (tree, _) = folders(&app);
+    let back = pane.as_ref().map(|(b, _)| *b).unwrap_or(row.mailbox);
+    let close = pane.as_ref().map(|(_, l)| l.clone()).unwrap_or_else(|| format!("/box/{back}"));
+    let with_images = match &pane {
+        Some((_, l)) => format!("{l}&open={id}&images=1"),
+        None => format!("/msg/{id}?images=1"),
+    };
+    let (tree, _) = folders(app);
     let account_folders: Vec<Mailbox> = app.mail.mailboxes().into_iter().filter(|b| b.account == folder.account && b.id != folder.id).collect();
     let attachments: Vec<(usize, String, usize)> = m
         .attachments()
@@ -458,20 +562,27 @@ pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         })
         .collect();
     let flagged = has_flag(&src, "\\Flagged");
-    mail_page(&subject, back, &app, html! {
-        (flash_of(&q))
+    // What each action form carries: where to come back to.
+    let hidden = html! {
+        input type="hidden" name="back" value=(back);
+        @if let Some((_, l)) = &pane { input type="hidden" name="list" value=(l); }
+    };
+    let body = html! {
         div.toolbar {
-            a.button href={"/box/" (back)} { "← Back" }
+            @if pane.is_some() { a.button href=(close) title="Close this message" { "✕ Close" } }
+            @else { a.button href=(close) { "← Back" } }
             @if is_draft(&src, &folder) { a.button href={"/compose?draft=" (id)} { "Continue writing" } }
             a.button href={"/compose?reply=" (id)} { "Reply" }
             a.button href={"/compose?all=" (id)} { "Reply all" }
             a.button href={"/compose?forward=" (id)} { "Forward" }
-            form method="post" action={"/msg/" (id)} { input type="hidden" name="back" value=(back);
+            form method="post" action={"/msg/" (id)} { (hidden)
+                button name="action" value="archive" { "Archive" } }
+            form method="post" action={"/msg/" (id)} { (hidden)
                 button name="action" value=(if flagged { "unflag" } else { "flag" }) { @if flagged { "★ Unflag" } @else { "☆ Flag" } } }
-            form method="post" action={"/msg/" (id)} { input type="hidden" name="back" value=(back);
+            form method="post" action={"/msg/" (id)} { (hidden)
                 button name="action" value="unseen" { "Mark unread" } }
             form method="post" action={"/msg/" (id)} {
-                input type="hidden" name="back" value=(back);
+                (hidden)
                 input type="hidden" name="action" value="move";
                 select name="to" onchange="this.form.submit()" {
                     option value="" { "Move to…" }
@@ -485,7 +596,7 @@ pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                     }
                 }
             }
-            form method="post" action={"/msg/" (id)} { input type="hidden" name="back" value=(back);
+            form method="post" action={"/msg/" (id)} { (hidden)
                 button.danger name="action" value="delete" { "Delete" } }
         }
         div.card.reader {
@@ -499,7 +610,7 @@ pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
             @if html_body {
                 @if remote && !images {
                     div.notice { "Remote images are blocked, so the sender can't see you opened this. "
-                        a href={"/msg/" (id) "?images=1"} { "Show them" } }
+                        a href=(with_images) { "Show them" } }
                 }
                 iframe src=(format!("/msg/{id}/html{}", if images { "?images=1" } else { "" }))
                     sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
@@ -516,7 +627,17 @@ pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                 }
             }
         }
-    })
+    };
+    Some((subject, body))
+}
+
+pub async fn view(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query(q): Query<ListQuery>) -> Response {
+    guard!(app, headers);
+    let Some((row, _, _)) = locate(&app, id) else { return StatusCode::NOT_FOUND.into_response() };
+    let Some((subject, body)) = reader(&app, id, &q, None) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "This message can't be read.").into_response();
+    };
+    mail_page(&subject, row.mailbox, &app, html! { (flash_of(&q)) (body) })
 }
 
 fn human_size(n: usize) -> String {
@@ -637,15 +758,115 @@ pub struct ActionForm {
     action: String,
     #[serde(default)]
     back: Option<i64>,
+    /// The list the message was read beside (`/box/…`), to come back to.
+    #[serde(default)]
+    list: Option<String>,
     #[serde(default)]
     to: Option<String>,
+}
+
+/// To each account's Trash, like mail apps do; from the Trash itself, for
+/// good. Returns how many went to a Trash.
+fn delete(app: &App, msgs: &[(i64, Mailbox)]) -> anyhow::Result<usize> {
+    let mut to_trash: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
+    let mut gone = Vec::new();
+    for (src, folder) in msgs {
+        match folder.account.as_deref().and_then(|a| app.mail.special_folder(a, "\\Trash")) {
+            Some(t) if t != folder.id => to_trash.entry(t).or_default().push(*src),
+            _ => gone.push(*src),
+        }
+    }
+    let moved = to_trash.values().map(Vec::len).sum();
+    for (trash, ids) in to_trash {
+        app.mail.copy(&ids, trash, true)?;
+    }
+    if !gone.is_empty() {
+        app.mail.expunge(&gone)?;
+    }
+    Ok(moved)
+}
+
+/// The account's Archive: the folder the provider flags so, else the
+/// tree's Archive folder there, made at the provider if need be (with an
+/// Archive folder in the tree first, if there's none: for Gmail, a label).
+async fn archive_folder(app: &Arc<App>, account: &str) -> anyhow::Result<i64> {
+    if let Some(f) = app.mail.special_folder(account, "\\Archive") {
+        return Ok(f);
+    }
+    let boxes = app.mail.mailboxes();
+    let node = boxes.iter().find(|b| b.is_node() && b.special.eq_ignore_ascii_case("\\Archive")).map(|b| b.id);
+    let node = match node {
+        Some(n) => n,
+        None => {
+            let named = boxes.iter().find(|b| b.is_node() && b.name.eq_ignore_ascii_case("Archive")).map(|b| b.id);
+            let n = match named {
+                Some(n) => n,
+                None => app.mail.create_node(None, "Archive")?,
+            };
+            app.mail.set_special(n, "\\Archive")?;
+            n
+        }
+    };
+    crate::folders::member_in(app, node, account).await
+}
+
+/// Into each account's Archive; returns how many moved.
+async fn archive(app: &Arc<App>, msgs: &[(i64, Mailbox)]) -> anyhow::Result<usize> {
+    let mut by_target: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
+    for (src, folder) in msgs {
+        let Some(acc) = folder.account.as_deref() else { continue };
+        let target = archive_folder(app, acc).await?;
+        if target != folder.id {
+            by_target.entry(target).or_default().push(*src);
+        }
+    }
+    let moved = by_target.values().map(Vec::len).sum();
+    for (target, ids) in by_target {
+        app.mail.copy(&ids, target, true)?;
+    }
+    Ok(moved)
+}
+
+/// The list's ticked messages: archived, deleted, marked read or unread.
+pub async fn bulk(State(app): St, headers: HeaderMap, Path(id): Path<i64>, body: String) -> Response {
+    guard!(app, headers);
+    let pairs = super::form_urlencoded_pairs(&body);
+    let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+    let list = Some(get("back")).filter(|l| l.starts_with("/box/") && !l.contains("//")).unwrap_or_else(|| format!("/box/{id}"));
+    let msgs: Vec<(i64, Mailbox)> =
+        pairs.iter().filter(|(n, _)| n == "id").filter_map(|(_, v)| v.parse().ok()).filter_map(|m| locate(&app, m)).map(|(_, src, f)| (src.id, f)).collect();
+    if msgs.is_empty() {
+        return back(&list, None, Some("No message selected."));
+    }
+    let n = msgs.len();
+    let plural = |n: usize| if n == 1 { "1 message".to_string() } else { format!("{n} messages") };
+    let ids: Vec<i64> = msgs.iter().map(|(m, _)| *m).collect();
+    let done: anyhow::Result<String> = match get("action").as_str() {
+        "seen" => app.mail.store(&ids, &StoreMode::Add, &["\\Seen".into()]).map(|_| format!("Marked {} read.", plural(n))),
+        "unseen" => app.mail.store(&ids, &StoreMode::Remove, &["\\Seen".into()]).map(|_| format!("Marked {} unread.", plural(n))),
+        "delete" => delete(&app, &msgs).map(|moved| if moved == n { format!("Moved {} to the Trash.", plural(n)) } else { format!("Deleted {}.", plural(n)) }),
+        "archive" => archive(&app, &msgs).await.map(|_| format!("Archived {}.", plural(n))),
+        _ => return back(&list, None, Some("Unknown action.")),
+    };
+    let accounts: std::collections::BTreeSet<String> = msgs.iter().filter_map(|(_, f)| f.account.clone()).collect();
+    for a in accounts {
+        app.mail.waker(&a).notify_one();
+    }
+    match done {
+        Ok(msg) => back(&list, Some(&msg), None),
+        Err(e) => back(&list, None, Some(&format!("{e:#}"))),
+    }
 }
 
 pub async fn action(State(app): St, headers: HeaderMap, Path(id): Path<i64>, axum::extract::Form(f): axum::extract::Form<ActionForm>) -> Response {
     guard!(app, headers);
     let Some((row, src, folder)) = locate(&app, id) else { return StatusCode::NOT_FOUND.into_response() };
-    let list = format!("/box/{}", f.back.unwrap_or(row.mailbox));
-    let here = format!("/msg/{id}");
+    let pane = f.list.filter(|l| l.starts_with("/box/") && !l.contains("//"));
+    let list = pane.clone().unwrap_or_else(|| format!("/box/{}", f.back.unwrap_or(row.mailbox)));
+    let here = match &pane {
+        Some(l) => format!("{l}&open={id}"),
+        None => format!("/msg/{id}"),
+    };
     let flag = |mode: StoreMode, f: &str| app.mail.store(&[src.id], &mode, &[f.to_string()]).map(|_| ());
     let done = match f.action.as_str() {
         "seen" => flag(StoreMode::Add, "\\Seen").map(|_| (here.clone(), None)),
@@ -666,14 +887,15 @@ pub async fn action(State(app): St, headers: HeaderMap, Path(id): Path<i64>, axu
                 _ => return back(&here, None, Some("Pick one of your folders, or a folder of the same account.")),
             }
         }
-        "delete" => {
-            // To the account's Trash, like mail apps do; from the Trash itself, for good.
-            let trash = folder.account.as_deref().and_then(|a| app.mail.special_folder(a, "\\Trash"));
-            match trash {
-                Some(t) if t != folder.id => app.mail.copy(&[src.id], t, true).map(|_| (list.clone(), Some("Moved to the Trash."))),
-                _ => app.mail.expunge(&[src.id]).map(|_| (list.clone(), Some("Deleted."))),
-            }
-        }
+        "delete" => match delete(&app, &[(src.id, folder.clone())]) {
+            Ok(0) => Ok((list.clone(), Some("Deleted."))),
+            Ok(_) => Ok((list.clone(), Some("Moved to the Trash."))),
+            Err(e) => Err(e),
+        },
+        "archive" => match archive(&app, &[(src.id, folder.clone())]).await {
+            Ok(_) => Ok((list.clone(), Some("Archived."))),
+            Err(e) => Err(e),
+        },
         _ => return back(&here, None, Some("Unknown action.")),
     };
     if let Some(acc) = &folder.account {
