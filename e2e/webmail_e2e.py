@@ -110,6 +110,17 @@ def main():
     check(flash(bulk("delete", b2))[0] == "Moved 1 message to the Trash.", "delete one")
     wait(lambda: "bulk-2" in gm_subjects("test", "Trash"), "it is in Test's Trash at GreenMail")
     check(flash(bulk("archive"))[1] == "No message selected.", "nothing ticked: said so")
+    # Fetched ahead by the list's script: the message's part only, not marked read; then marked read.
+    g = gm_imap("test")
+    g.append("INBOX", None, None, message("ahead"))
+    g.logout()
+    s.post(f"{WEB}/mail/refresh")
+    ahead = rows(s, inbox)["ahead"]
+    unread = lambda: bool(re.search(rf'<div class="row unread">\s*<label class="pick"><input type="checkbox" name="id" value="{ahead}"', s.get(f"{WEB}{listed}").text))
+    part = s.get(f"{WEB}{listed}&open={ahead}&fragment=1").text
+    check(part.startswith('<div class="readcol" data-subject="ahead">') and "<h1>ahead</h1>" in part and 'class="folders"' not in part, "a message's part alone, for the list's script")
+    check(unread(), "fetching it ahead doesn't mark it read")
+    check(s.post(f"{WEB}/msg/{ahead}/seen").status_code == 204 and not unread(), "opening it does")
     page = s.get(f"{WEB}{listed}&open={in_box['wake-up']}").text
     check(re.search(rf'<div class="row open">.*?<a class="link" href="{re.escape(listed)}"', page.replace("&amp;", "&"), re.S), "the open message's row closes it")
 

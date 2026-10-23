@@ -64,9 +64,10 @@ fn time(t: i64, long: bool) -> Markup {
 }
 
 const TIME_SCRIPT: &str = r#"
-{
+// Also for parts of the page put in later (a message opened from the list).
+window.valetTimes = (root) => {
   const { opts } = window.valetTime, day = (d) => d.toLocaleDateString('en-CA', opts());
-  for (const el of document.querySelectorAll('time[data-t]')) {
+  for (const el of root.querySelectorAll('time[data-t]')) {
     const d = new Date(el.dataset.t * 1000), now = new Date();
     el.textContent = el.dataset.long
       ? d.toLocaleString([], opts({ dateStyle: 'full', timeStyle: 'short' }))
@@ -74,7 +75,8 @@ const TIME_SCRIPT: &str = r#"
       : day(d).slice(0, 4) === day(now).slice(0, 4) ? d.toLocaleDateString([], opts({ day: 'numeric', month: 'short' }))
       : d.toLocaleDateString([], opts());
   }
-}
+};
+valetTimes(document);
 "#;
 
 type Folders = (Vec<(Node, Mailbox)>, Vec<(Account, Vec<Mailbox>)>);
@@ -369,6 +371,9 @@ pub struct ListQuery {
     images: Option<String>,
     /// The message read beside the list.
     open: Option<i64>,
+    /// Only that message's part of the page, not marked read (the list's
+    /// script fetches it ahead, then shows it).
+    fragment: Option<String>,
 }
 
 fn flash_of(q: &ListQuery) -> Markup {
@@ -401,6 +406,12 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         }
         l
     };
+    if let (Some(open), Some(_)) = (q.open, &q.fragment) {
+        return match reader(&app, open, &q, Some((id, link(q.page)))) {
+            Some((subject, body)) => maud::html! { div.readcol data-subject=(subject) { (body) } }.into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        };
+    }
     // The message shown beside the list (or, on narrow screens, instead of
     // it): first, so the list shows it read.
     let reading = match q.open {
@@ -447,7 +458,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
             }
         }
         script { (PreEscaped(REFRESH_SCRIPT)) }
-        div.split.reading[reading.is_some()] {
+        div.split.reading[reading.is_some()] data-list=(link(q.page)) data-title=(title) {
             div.listcol {
                 @if shown.is_empty() {
                     p.muted { @if q.q.is_empty() { "Nothing here." } @else { "No message matches." } }
@@ -466,7 +477,8 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                                 @let href = if drafts { format!("/compose?draft={}", m.id) } else if is_open { link(q.page) } else { format!("{}&open={}", link(q.page), m.id) };
                                 div.row.unread[!has_flag(m, "\\Seen")].open[is_open] {
                                     label.pick { input type="checkbox" name="id" value=(m.id) aria-label="Select"; }
-                                    a.link href=(href) title={(from) " — " (subject)} {
+                                    a.link href=(href) title={(from) " — " (subject)} data-id=(m.id)
+                                        data-open=[(!drafts).then(|| format!("{}&open={}", link(q.page), m.id))] {
                                         span.star { @if has_flag(m, "\\Flagged") { "★" } }
                                         span.from { (from) }
                                         span.line {
@@ -490,7 +502,96 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
             @if let Some((_, (_, body))) = &reading { div.readcol { (body) } }
         }
         script { (PreEscaped(BULK_SCRIPT)) }
+        script { (PreEscaped(PANE_SCRIPT)) }
     })
+}
+
+/// Opening a message without reloading the page: its part is fetched ahead
+/// (when the pointer rests on its row, not marking it read), swapped in on
+/// click, and marked read then; its body frame is fetched ahead too.
+const PANE_SCRIPT: &str = r#"
+{
+  const split = document.querySelector('.split');
+  const cache = new Map();
+  const get = (url) => {
+    if (!cache.has(url)) {
+      const p = fetch(url + '&fragment=1', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); });
+      p.catch(() => cache.delete(url));
+      cache.set(url, p);
+    }
+    return cache.get(url);
+  };
+  const warm = (a) => {
+    if (!a?.dataset.open || a.closest('.row.open')) return;
+    get(a.dataset.open).catch(() => {});
+    fetch(`/msg/${a.dataset.id}/html`).catch(() => {});
+  };
+  let resting = null;
+  split.addEventListener('pointerover', (e) => {
+    const a = e.target.closest('a.link');
+    clearTimeout(resting);
+    if (a) resting = setTimeout(() => warm(a), 70);
+  });
+  split.addEventListener('pointerdown', (e) => warm(e.target.closest('a.link')));
+  const openRow = () => split.querySelector('.row.open');
+  const unmark = () => { const r = openRow(); if (r) { r.classList.remove('open'); const a = r.querySelector('a.link'); a.href = a.dataset.open; } };
+  const close = () => {
+    unmark();
+    split.querySelector('.readcol')?.remove();
+    split.classList.remove('reading');
+    history.pushState(null, '', split.dataset.list);
+    document.title = `${split.dataset.title} · valet`;
+  };
+  const show = (a, html) => {
+    const row = a.closest('.row');
+    unmark();
+    row.classList.add('open');
+    a.href = split.dataset.list;
+    if (row.classList.contains('unread')) {
+      row.classList.remove('unread');
+      fetch(`/msg/${a.dataset.id}/seen`, { method: 'POST' }).catch(() => {});
+      const badge = document.querySelector('.folders a.folder.on .badge');
+      if (badge) { const n = Number(badge.textContent) - 1; n > 0 ? (badge.textContent = n) : badge.remove(); }
+    }
+    const t = document.createElement('template');
+    t.innerHTML = html;
+    const col = t.content.firstElementChild;
+    valetTimes(col);
+    const old = split.querySelector('.readcol');
+    old ? old.replaceWith(col) : split.append(col);
+    split.classList.add('reading');
+    history.pushState(null, '', a.dataset.open);
+    document.title = `${col.dataset.subject} · valet`;
+    row.scrollIntoView({ block: 'nearest' });
+  };
+  split.addEventListener('click', async (e) => {
+    const a = e.target.closest('a.link, a.close');
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (a.matches('a.link') && !a.dataset.open) return;
+    e.preventDefault();
+    if (a.matches('a.close') || a.closest('.row.open')) return close();
+    try { show(a, await get(a.dataset.open)); } catch (_) { location = a.dataset.open; }
+  });
+  // Back and forward: the page as its address says.
+  addEventListener('popstate', () => location.reload());
+}
+"#;
+
+/// Marks a message read (the list's script, opening it in place).
+pub async fn mark_seen(State(app): St, headers: HeaderMap, Path(id): Path<i64>) -> Response {
+    if !authed(&app, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some((_, src, folder)) = locate(&app, id) else { return StatusCode::NOT_FOUND.into_response() };
+    if !has_flag(&src, "\\Seen") {
+        if let Err(e) = app.mail.store(&[src.id], &StoreMode::Add, &["\\Seen".to_string()]) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+        if let Some(acc) = &folder.account {
+            app.mail.waker(acc).notify_one();
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Ticking messages: the count, all of the page, a range with Shift.
@@ -541,7 +642,7 @@ fn locate(app: &App, id: i64) -> Option<(Msg, Msg, Mailbox)> {
 /// come back to; else on its own page. Returns its subject too.
 fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Option<(String, Markup)> {
     let (row, src, folder) = locate(app, id)?;
-    if !has_flag(&src, "\\Seen") {
+    if q.fragment.is_none() && !has_flag(&src, "\\Seen") {
         let _ = app.mail.store(&[src.id], &StoreMode::Add, &["\\Seen".to_string()]);
     }
     let raw = app.mail.blob(&src.blob).unwrap_or_default();
@@ -576,7 +677,7 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
     };
     let body = html! {
         div.toolbar.msg-actions {
-            @if pane.is_some() { a.button href=(close) title="Close this message" { "✕ Close" } }
+            @if pane.is_some() { a.button.close href=(close) title="Close this message" { "✕ Close" } }
             @else { a.button href=(close) { "← Back" } }
             @if is_draft(&src, &folder) { a.button href={"/compose?draft=" (id)} { "Continue writing" } }
             a.button href={"/compose?reply=" (id)} { "Reply" }
