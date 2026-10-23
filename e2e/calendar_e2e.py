@@ -13,6 +13,15 @@ from common import WEB, check, flash, web
 
 def main():
     s = web()
+    # No calendar yet: the first event makes one, rather than failing.
+    first = {"title": "First", "start_date": "2026-11-02", "start_time": "10:00", "end_date": "2026-11-02", "end_time": "11:00", "tz": "Europe/Paris", "repeat": "none"}
+    r = s.post(f"{WEB}/calendar/event", data={**first, "calendar": ""})
+    check(r.ok and r.json()["calendar"] == "calendar", f"with no calendar, the first event makes one: {r.text}")
+    check(s.post(f"{WEB}/calendar/event/delete", data={"calendar": "calendar", "name": r.json()["name"]}).ok, "and it can go")
+    r = s.post(f"{WEB}/calendar/event", data={**first, "calendar": ""})
+    check(r.status_code == 422 and r.json()["error"] == "pick a calendar", "with one already, no calendar picked is refused")
+    r = s.post(f"{WEB}/calendar/event", data={"title": "Broken"})
+    check(r.status_code == 422 and "start_date" in r.json()["error"], f"a broken form says why, as JSON: {r.text}")
     for name in ["Personal", "Work"]:
         s.post(f"{WEB}/calendars", data={"name": name})
     page = s.get(f"{WEB}/calendars").text

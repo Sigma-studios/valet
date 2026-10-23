@@ -297,9 +297,12 @@
 
   async function post(url, data) {
     const r = await fetch(url, { method: 'POST', body: new URLSearchParams(data) });
-    const j = await r.json().catch(() => ({}));
+    const text = await r.text();
+    let j = {};
+    try { j = JSON.parse(text); } catch (_) {}
     if (r.status === 401) { location = '/login'; throw new Error('logged out'); }
-    if (!r.ok) throw new Error(j.error || 'not saved');
+    // Whatever valet (or what stands before it) said, rather than nothing.
+    if (!r.ok) throw new Error(j.error || `not saved: ${text.trim().slice(0, 200) || r.statusText || 'error ' + r.status}`);
     return j;
   }
 
@@ -343,8 +346,11 @@
     const field = (label, input) => el('label', {}, label, input);
     const input = (name, value, attrs = {}) => el('input', { name, value: value ?? '', ...attrs });
     const err = el('p', { class: 'err' });
-    const cal = el('select', { name: 'calendar' }, calendars.filter((c) => c.id !== 'invitations' || (ev && ev.calendar === 'invitations'))
-      .map((c) => el('option', { value: c.id, selected: ev ? c.id === ev.calendar : c.id === localStorage.getItem('valet.cal.last') }, c.name)));
+    const choices = calendars.filter((c) => c.id !== 'invitations' || (ev && ev.calendar === 'invitations'));
+    // None of the user's own yet: saving makes one.
+    const cal = el('select', { name: 'calendar' }, choices.length
+      ? choices.map((c) => el('option', { value: c.id, selected: ev ? c.id === ev.calendar : c.id === localStorage.getItem('valet.cal.last') }, c.name))
+      : el('option', { value: '' }, 'Calendar (new)'));
     const repeat = el('select', { name: 'repeat' },
       [['none', 'Never'], ['daily', 'Every day'], ['weekly', 'Every week'], ['monthly', 'Every month'], ['yearly', 'Every year']]
         .concat(ev && ev.repeat === 'custom' ? [['custom', 'As it is (set in another app)']] : [])
@@ -386,8 +392,8 @@
       data.set('tz', zone);
       if (ev) { data.set('from_calendar', ev.calendar); data.set('name', ev.name); }
       try {
-        await post('/calendar/event', data);
-        localStorage.setItem('valet.cal.last', data.get('calendar'));
+        const saved = await post('/calendar/event', data);
+        localStorage.setItem('valet.cal.last', saved.calendar);
         await changed();
       } catch (e2) { err.textContent = e2.message; }
     });
