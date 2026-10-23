@@ -3,6 +3,7 @@
 //! series of one event for the form, saving and deleting, and the alarms
 //! valet's Android app rings.
 
+use axum::extract::rejection::FormRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -86,6 +87,8 @@ pub struct EventForm {
     from_calendar: String,
     #[serde(default)]
     name: String,
+    /// Empty when there is no calendar to pick yet: one is made.
+    #[serde(default)]
     calendar: String,
     #[serde(default)]
     title: String,
@@ -127,11 +130,31 @@ fn put_error(e: PutError) -> anyhow::Error {
     }
 }
 
+/// The calendar new events go to when there is none of the user's own yet
+/// (Invitations is valet's): one is made, as apps would.
+fn first_calendar(app: &App) -> anyhow::Result<String> {
+    if app.store.calendars().iter().any(|c| c.id != crate::invites::CALENDAR) {
+        anyhow::bail!("pick a calendar");
+    }
+    app.store.create_calendar("calendar", "Calendar", None)?;
+    Ok("calendar".into())
+}
+
 /// Saves the form: a new event, or the series of an existing one (which may
 /// move to another calendar). Apps get it at their next sync.
-pub async fn save(State(app): St, headers: HeaderMap, axum::extract::Form(f): axum::extract::Form<EventForm>) -> Response {
+pub async fn save(State(app): St, headers: HeaderMap, form: Result<axum::extract::Form<EventForm>, FormRejection>) -> Response {
     if !authed(&app, &headers) {
         return unauthorized();
+    }
+    let mut f = match form {
+        Ok(axum::extract::Form(f)) => f,
+        Err(e) => return refused(format!("not saved: {}", e.body_text())),
+    };
+    if f.calendar.is_empty() {
+        match first_calendar(&app) {
+            Ok(id) => f.calendar = id,
+            Err(e) => return refused(e),
+        }
     }
     let saved = (|| -> anyhow::Result<(String, String)> {
         let all_day = f.all_day.is_some();
@@ -167,10 +190,11 @@ pub async fn save(State(app): St, headers: HeaderMap, axum::extract::Form(f): ax
     }
 }
 
-pub async fn delete(State(app): St, headers: HeaderMap, axum::extract::Form(r): axum::extract::Form<EventRef>) -> Response {
+pub async fn delete(State(app): St, headers: HeaderMap, form: Result<axum::extract::Form<EventRef>, FormRejection>) -> Response {
     if !authed(&app, &headers) {
         return unauthorized();
     }
+    let Ok(axum::extract::Form(r)) = form else { return refused("not deleted: that event can't be found") };
     match app.store.delete_object(&r.calendar, &r.name) {
         Ok(true) => axum::Json(json!({ "ok": true })).into_response(),
         Ok(false) => refused("that event is gone"),
