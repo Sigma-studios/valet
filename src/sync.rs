@@ -12,7 +12,7 @@ use futures::TryStreamExt;
 
 use crate::App;
 use crate::accounts::{self, Account, Imap};
-use crate::mailstore::{Op, now};
+use crate::mailstore::{Op, account_path, now};
 use crate::{invites, mutf7, util};
 
 pub fn start(app: Arc<App>) {
@@ -126,9 +126,11 @@ async fn session(app: &App, acc: &Account) -> Result<()> {
     }
 }
 
-/// Lists the provider's folders and makes sure each has a local mailbox.
+/// Lists the provider's folders and makes sure each has a local mailbox. A
+/// new account's folders go in the tree as the default tree has them.
 async fn folders(app: &App, acc: &Account, s: &mut Imap) -> Result<Vec<Folder>> {
     let names: Vec<_> = s.list(Some(""), Some("*")).await?.try_collect().await?;
+    let fresh = !app.mail.mailboxes().iter().any(|m| m.account.as_deref() == Some(acc.id.as_str()));
     let mut out = Vec::new();
     let mut keep = Vec::new();
     for n in &names {
@@ -163,11 +165,14 @@ async fn folders(app: &App, acc: &Account, s: &mut Imap) -> Result<Vec<Folder>> 
         .find(|(a, _)| has(a))
         .map(|(_, s)| *s)
         .unwrap_or("");
-        let mailbox = app.mail.remote_mailbox(&acc.id, &remote, &format!("{}/{shown}", acc.name), special)?;
+        let mailbox = app.mail.remote_mailbox(&acc.id, &remote, &account_path(&acc.name, &shown), special)?;
         keep.push(remote.clone());
         out.push(Folder { remote, mailbox });
     }
     app.mail.prune_mailboxes(&acc.id, &keep)?;
+    if fresh {
+        app.mail.place_account(&acc.id)?;
+    }
     // The inbox first: new mail shows up before the rest catches up.
     out.sort_by_key(|f| f.remote != "INBOX");
     Ok(out)

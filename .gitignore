@@ -2,3 +2,4 @@
 /data
 /local.env
 /local-data
+__pycache__/

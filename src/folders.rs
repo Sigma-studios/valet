@@ -1,6 +1,7 @@
 //! Creating, renaming and deleting an account's folders: done at the
 //! provider first (so its refusals reach whoever asked), then mirrored here.
-//! Used by the webmail and by mail apps (IMAP CREATE, RENAME, DELETE).
+//! Used by the webmail and by mail apps (IMAP CREATE, RENAME, DELETE), and
+//! when mail is filed into a tree node with no folder in its account yet.
 
 use std::sync::Arc;
 
@@ -8,12 +9,13 @@ use anyhow::{Context, Result, bail};
 use futures::TryStreamExt;
 
 use crate::accounts::{self, Account, Imap};
-use crate::mailstore::Mailbox;
+use crate::mailstore::{Mailbox, account_path};
 use crate::{App, mutf7};
 
 /// The provider's hierarchy delimiter.
 async fn delimiter(s: &mut Imap) -> Result<String> {
-    let names: Vec<_> = s.list(Some(""), Some("")).await?.try_collect().await?;
+    // No pattern is sent as "" (Some("") would go unquoted).
+    let names: Vec<_> = s.list(Some(""), None).await?.try_collect().await?;
     Ok(names.first().and_then(|n| n.delimiter()).unwrap_or("/").to_string())
 }
 
@@ -35,7 +37,7 @@ fn check_name(name: &str, delim: &str) -> Result<()> {
 fn own(b: &Mailbox) -> Result<&str> {
     let remote = b.remote.as_deref().context("that's not an account's folder")?;
     if remote.eq_ignore_ascii_case("INBOX") || !b.special.is_empty() {
-        bail!("{} is one of the provider's own folders", b.name.split_once('/').map(|(_, r)| r).unwrap_or(&b.name));
+        bail!("{} is one of the provider's own folders", b.path());
     }
     Ok(remote)
 }
@@ -63,7 +65,7 @@ pub async fn create(app: &Arc<App>, account: &str, parent: Option<i64>, name: &s
     check_name(name, &delim)?;
     let (remote, local) = match &parent {
         Some(p) => (format!("{}{delim}{}", p.remote.as_deref().unwrap_or(""), mutf7::encode(name)), format!("{}/{name}", p.name)),
-        None => (mutf7::encode(name), format!("{}/{name}", acc.name)),
+        None => (mutf7::encode(name), account_path(&acc.name, name)),
     };
     s.create(&remote).await.with_context(|| format!("the provider refused to create {name}"))?;
     let _ = s.subscribe(&remote).await;
@@ -119,4 +121,45 @@ pub async fn delete(app: &Arc<App>, id: i64) -> Result<()> {
     )?;
     done(app, &account);
     Ok(())
+}
+
+/// The folder of `account` that a tree node gathers. If it has none, one is
+/// made at the provider and joins the node: inside the folder its parent
+/// node gathers in that account, else named after the node's path (parents
+/// made first, and joining their nodes if those have none either).
+pub async fn member_in(app: &Arc<App>, node: i64, account: &str) -> Result<i64> {
+    if let Some(m) = app.mail.member_of(node, account) {
+        return Ok(m);
+    }
+    let acc = app.account(account).context("no such account")?;
+    let tree = app.mail.tree();
+    let mut chain = Vec::new();
+    let mut at = Some(node);
+    while let Some(id) = at {
+        let n = tree.iter().find(|n| n.id == id).context("that's not a folder of your tree")?;
+        chain.push(n.clone());
+        at = n.parent;
+    }
+    chain.reverse();
+    let mut parent: Option<Mailbox> = None;
+    for n in &chain {
+        let folder = match app.mail.member_of(n.id, account) {
+            Some(m) => m,
+            None => {
+                let local = match &parent {
+                    Some(p) => format!("{}/{}", p.name, n.label),
+                    None => account_path(&acc.name, &n.label),
+                };
+                let existing = app.mail.mailboxes().into_iter().find(|b| b.account.as_deref() == Some(account) && b.name == local);
+                let id = match existing {
+                    Some(b) => b.id,
+                    None => create(app, account, parent.as_ref().map(|p| p.id), &n.label).await?,
+                };
+                app.mail.add_member(n.id, id)?;
+                id
+            }
+        };
+        parent = Some(app.mail.mailbox(folder).context("no such folder")?);
+    }
+    parent.map(|p| p.id).context("no such folder")
 }
