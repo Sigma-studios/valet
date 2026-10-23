@@ -260,8 +260,13 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .list { background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
 .list a.row { display:grid; grid-template-columns: 14px minmax(110px, 200px) 1fr auto; gap:10px; align-items:baseline; padding:8px 12px; border-bottom:1px solid var(--line); color:var(--fg); }
 .list a.row:last-child { border-bottom:none; }
-.list a.row:hover { background:var(--bg); text-decoration:none; }
-.list a.row.unread .from, .list a.row.unread .subject { font-weight:650; }
+/* Two greys tell them apart, with the bold: unread rows lighter, read darker. */
+:root { --row-unread:#ffffff; --row-read:#ecebe9; --row-hover:#e2e0dd; }
+@media (prefers-color-scheme: dark) { :root { --row-unread:#34302d; --row-read:#1f1c1a; --row-hover:#3d3936; } }
+.list a.row { background:var(--row-read); }
+.list a.row.unread { background:var(--row-unread); }
+.list a.row:hover { background:var(--row-hover); text-decoration:none; }
+.list a.row.unread .from, .list a.row.unread .subject { font-weight:700; }
 .list .from, .list .line { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .list .preview { color:var(--muted); }
 .list .when { color:var(--muted); font-size:13px; white-space:nowrap; }
