@@ -145,7 +145,12 @@ def online():
     for page in ["/inbox", "/calendar", "/invitations", "/settings", "/patterns"]:
         b.go(WEB + page, 1.5)
         spots[page] = b.js("[...document.querySelectorAll('header nav > a, header nav > form')].map(e => Math.round(e.getBoundingClientRect().left) + ':' + Math.round(e.getBoundingClientRect().top)).join(' ')")
+        check(b.js("document.querySelector('header').getBoundingClientRect().right === innerWidth && document.scrollingElement.scrollHeight <= innerHeight"),
+              f"{page}: the bar spans the window, which doesn't scroll itself (no strip on the side)")
     check(len(set(spots.values())) == 1, f"the bar doesn't move from page to page: {spots}")
+    b.js("document.querySelector('main').append(Object.assign(document.createElement('div'), { style: 'height:3000px' }))")
+    check(b.js("(m => m.scrollHeight > m.clientHeight && getComputedStyle(m).overflowY === 'auto')(document.querySelector('main')) && document.scrollingElement.scrollHeight <= innerHeight"),
+          "a long page scrolls under the bar, not the window")
 
     # The pattern editor: rows, not a typed list.
     b.go(f"{WEB}/patterns")

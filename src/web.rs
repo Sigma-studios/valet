@@ -128,14 +128,23 @@ const CSS: &str = r#"
 * { box-sizing: border-box; } [hidden] { display:none !important; }
 body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
 header { border-bottom:1px solid var(--line); background:var(--card); }
-/* The bar is the same on every page, so its links never move (a scrollbar
-   or not included). */
-html { scrollbar-gutter:stable; }
+/* The bar is the same on every page, so its links never move. */
 header nav { max-width:1400px; margin:0 auto; padding:10px 16px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
 a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
 header nav a { color:var(--fg); } header nav a.on { color:var(--accent); text-decoration:underline 2px; text-underline-offset:6px; }
 header nav .brand { font-weight:700; margin-right:8px; } header nav form { margin-left:auto; }
 main { max-width:960px; margin:0 auto; padding:16px; } body.wide main { max-width:1400px; }
+/* Wider than a phone, the window is the app: under the bar, the page's
+   own part scrolls (its scrollbar at the window's edge), never the window,
+   so the bar stays whole and in place whether a page is long or not. */
+@media (min-width: 721px) {
+  html, body { height:100%; }
+  body:has(> header) { display:flex; flex-direction:column; overflow:hidden; }
+  body > header, body > .subnav { flex:none; }
+  body:has(> header) > main { flex:1; min-height:0; width:100%; max-width:none; overflow-y:auto;
+    padding-inline:max(16px, calc((100% - 960px) / 2 + 16px)); scrollbar-width:thin; }
+  body.wide:has(> header) > main { padding-inline:max(16px, calc((100% - 1400px) / 2 + 16px)); }
+}
 h1 { font-size:22px; margin:8px 0 16px; } h2 { font-size:17px; margin:24px 0 8px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin:12px 0; }
 .muted { color:var(--muted); } .small { font-size:13px; }
