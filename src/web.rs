@@ -130,11 +130,11 @@ const CSS: &str = r#"
 body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
 header { border-bottom:1px solid var(--line); background:var(--card); }
 /* The bar is the same on every page, so its links never move. */
-header nav { max-width:1400px; margin:0 auto; padding:10px 16px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+header nav { max-width:2000px; margin:0 auto; padding:10px 16px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
 a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
 header nav a { color:var(--fg); } header nav a.on { color:var(--accent); text-decoration:underline 2px; text-underline-offset:6px; }
 header nav .brand { font-weight:700; margin-right:8px; } header nav form { margin-left:auto; }
-main { max-width:960px; margin:0 auto; padding:16px; } body.wide main { max-width:1400px; }
+main { max-width:960px; margin:0 auto; padding:16px; } body.wide main { max-width:2000px; }
 /* Wider than a phone, the window is the app: under the bar, the page's
    own part scrolls (its scrollbar at the window's edge), never the window,
    so the bar stays whole and in place whether a page is long or not. */
@@ -142,9 +142,12 @@ main { max-width:960px; margin:0 auto; padding:16px; } body.wide main { max-widt
   html, body { height:100%; }
   body:has(> header) { display:flex; flex-direction:column; overflow:hidden; }
   body > header, body > .subnav { flex:none; }
-  body:has(> header) > main { flex:1; min-height:0; width:100%; max-width:none; overflow-y:auto;
+  /* .wide too: the plain max-width (body.wide main) would otherwise win and,
+     with this padding, leave the content almost no room on large screens. */
+  body:has(> header) > main, body.wide:has(> header) > main { max-width:none; }
+  body:has(> header) > main { flex:1; min-height:0; width:100%; overflow-y:auto;
     padding-inline:max(16px, calc((100% - 960px) / 2 + 16px)); scrollbar-width:thin; }
-  body.wide:has(> header) > main { padding-inline:max(16px, calc((100% - 1400px) / 2 + 16px)); }
+  body.wide:has(> header) > main { padding-inline:max(16px, calc((100% - 2000px) / 2 + 16px)); }
 }
 h1 { font-size:22px; margin:8px 0 16px; } h2 { font-size:17px; margin:24px 0 8px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin:12px 0; }
@@ -164,7 +167,7 @@ code { background:var(--line); padding:1px 5px; border-radius:4px; word-break:br
 .menu > div button.danger { color:var(--bad); }
 header nav .count { background:var(--bad); color:#fff; border-radius:9px; font-size:11px; font-weight:700; padding:0 6px; margin-left:4px; vertical-align:2px; }
 .subnav { border-bottom:1px solid var(--line); background:var(--bg); }
-.subnav div { max-width:1400px; margin:0 auto; padding:6px 16px; display:flex; gap:14px; flex-wrap:wrap; font-size:14px; }
+.subnav div { max-width:2000px; margin:0 auto; padding:6px 16px; display:flex; gap:14px; flex-wrap:wrap; font-size:14px; }
 .subnav a { color:var(--muted); } .subnav a.on { color:var(--fg); text-decoration:underline 2px; text-underline-offset:5px; }
 .subnav form { display:none; margin-left:auto; }
 @media (max-width: 720px) { header nav { gap:14px; } header nav form { display:none; } .subnav form { display:block; } }
