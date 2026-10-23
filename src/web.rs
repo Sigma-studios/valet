@@ -20,7 +20,19 @@ type St = State<Arc<App>>;
 
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
-        .route("/", get(home).fallback(crate::fallback))
+        .route("/", get(root).fallback(crate::fallback))
+        .route("/settings", get(home))
+        .route("/settings/zone", post(save_zone))
+        .route("/invitations", get(invitations_page))
+        .route("/calendar", get(calendar::page))
+        .route("/calendar/month/{key}", get(calendar::month))
+        .route("/calendar/event", get(calendar::event).post(calendar::save))
+        .route("/calendar/event/delete", post(calendar::delete))
+        .route("/calendar/alarms.json", get(calendar::alarms))
+        .route("/assets/{name}", get(assets::file))
+        .route("/sw.js", get(assets::service_worker))
+        .route("/manifest.webmanifest", get(assets::manifest))
+        .route("/offline", get(assets::offline))
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
         .route("/patterns", get(patterns_page).post(create_pattern))
@@ -81,12 +93,38 @@ macro_rules! guard {
     };
 }
 
+mod assets;
+mod calendar;
 mod webmail;
+
+/// The app, for what every page shows (the count of invitations waiting).
+static APP: std::sync::OnceLock<std::sync::Weak<App>> = std::sync::OnceLock::new();
+
+pub fn set_app(app: &Arc<App>) {
+    let _ = APP.set(Arc::downgrade(app));
+}
+
+/// Invitations not answered yet, for events still to come.
+fn waiting(app: &App) -> Vec<crate::mailstore::Invite> {
+    let today = crate::util::today();
+    app.mail.invites().into_iter().filter(|i| i.response.is_none() && i.dtstart.get(..8).is_some_and(|d| d >= today.as_str())).collect()
+}
+
+/// Where settings live; the rest of the bar is for every day.
+const SETTINGS: &[(&str, &str)] = &[
+    ("/settings", "Overview"),
+    ("/mail", "Mail accounts"),
+    ("/calendars", "Calendars"),
+    ("/patterns", "Alert patterns"),
+    ("/events", "Event alerts"),
+    ("/import", "Import"),
+    ("/connect", "Connect apps"),
+];
 
 const CSS: &str = r#"
 :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --card:#fff; --accent:#2563eb; --bad:#b91c1c; --good:#15803d; }
 @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --card:#292524; --accent:#60a5fa; --bad:#f87171; --good:#4ade80; } }
-* { box-sizing: border-box; }
+* { box-sizing: border-box; } [hidden] { display:none !important; }
 body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
 header { border-bottom:1px solid var(--line); background:var(--card); }
 nav { max-width:960px; margin:0 auto; padding:10px 16px; display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
@@ -110,6 +148,18 @@ code { background:var(--line); padding:1px 5px; border-radius:4px; word-break:br
 .menu > div a, .menu > div button { display:block; width:100%; text-align:left; padding:7px 10px; border:none; border-radius:6px; background:none; color:var(--fg); }
 .menu > div a:hover, .menu > div button:hover { background:var(--line); text-decoration:none; }
 .menu > div button.danger { color:var(--bad); }
+nav .count { background:var(--bad); color:#fff; border-radius:9px; font-size:11px; font-weight:700; padding:0 6px; margin-left:4px; vertical-align:2px; }
+.subnav { border-bottom:1px solid var(--line); background:var(--bg); }
+.subnav div { max-width:960px; margin:0 auto; padding:6px 16px; display:flex; gap:14px; flex-wrap:wrap; font-size:14px; }
+.subnav a { color:var(--muted); } .subnav a.on { color:var(--fg); font-weight:600; }
+.subnav form { display:none; margin-left:auto; }
+@media (max-width: 720px) { header nav { gap:14px; } header nav form { display:none; } .subnav form { display:block; } }
+.offline-banner { background:var(--card); border:1px solid var(--line); border-left:3px solid var(--bad); border-radius:6px; padding:6px 10px; font-size:13px; margin-bottom:10px; }
+.alert-rows { display:flex; flex-direction:column; gap:6px; }
+.alert-row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; font-size:14px; }
+.alert-add { display:flex; gap:6px; flex-wrap:wrap; }
+.alerts-box { display:flex; flex-direction:column; gap:6px; flex-basis:100%; }
+time[title], [data-zone] { cursor:help; }
 "#;
 
 fn page(title: &str, on: &str, body: Markup) -> Response {
@@ -122,9 +172,11 @@ fn page_wide(title: &str, on: &str, body: Markup) -> Response {
 }
 
 fn page_with(title: &str, on: &str, wide: bool, body: Markup) -> Response {
-    let link = |href: &str, label: &str| {
-        html! { a href=(href) class=[(on == href).then_some("on")] { (label) } }
+    let in_settings = SETTINGS.iter().any(|(h, _)| *h == on);
+    let link = |href: &str, label: &str, here: bool| {
+        html! { a href=(href) class=[here.then_some("on")] { (label) } }
     };
+    let waiting = APP.get().and_then(std::sync::Weak::upgrade).map(|a| waiting(&a).len()).unwrap_or(0);
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -133,19 +185,35 @@ fn page_with(title: &str, on: &str, wide: bool, body: Markup) -> Response {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) " · valet" }
                 style { (PreEscaped(CSS)) }
+                (assets::head())
             }
             body.wide[wide] {
                 header { nav {
                     span.brand { "valet" }
-                    (link("/inbox", "Mail")) (link("/", "Overview")) (link("/mail", "Accounts")) (link("/events", "Events")) (link("/patterns", "Patterns"))
-                    (link("/calendars", "Calendars")) (link("/import", "Import")) (link("/connect", "Connect apps"))
+                    (link("/inbox", "Mail", on == "/inbox")) (link("/calendar", "Calendar", on == "/calendar"))
+                    a href="/invitations" class=[(on == "/invitations").then_some("on")] {
+                        "Invitations" @if waiting > 0 { span.count title="Waiting for an answer" { (waiting) } }
+                    }
+                    (link("/settings", "Settings", in_settings))
                     form method="post" action="/logout" { button.plain type="submit" { "Log out" } }
                 } }
+                @if in_settings {
+                    div.subnav { div {
+                        @for (href, label) in SETTINGS { (link(href, label, on == *href)) }
+                        form method="post" action="/logout" { button.plain type="submit" { "Log out" } }
+                    } }
+                }
                 main { (body) }
             }
         }
     }
     .into_response()
+}
+
+/// The everyday page first: mail.
+async fn root(State(app): St, headers: HeaderMap) -> Response {
+    guard!(app, headers);
+    Redirect::to("/inbox").into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -212,6 +280,7 @@ async fn login_page(Query(m): Query<Msg>) -> Response {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { "Log in · valet" }
                 style { (PreEscaped(CSS)) }
+                (assets::head())
             }
             body { main style="max-width:360px; margin-top:12vh" {
                 h1 { "valet" }
@@ -242,13 +311,31 @@ async fn logout() -> Response {
 
 // Overview
 
-async fn home(State(app): St, headers: HeaderMap) -> Response {
+async fn home(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> Response {
     guard!(app, headers);
     let patterns = app.store.patterns();
     let name = |id: Option<i64>| id.and_then(|id| patterns.iter().find(|p| p.id == id)).map(|p| p.name.clone());
     let calendars = app.store.calendars();
-    page("Overview", "/", html! {
+    let zone = crate::calendar::default_zone();
+    page("Overview", "/settings", html! {
         h1 { "Overview" }
+        (flash(&m))
+        h2 { "Time zone" }
+        form.card.row method="post" action="/settings/zone" {
+            label { "Times are shown in" input #zone name="zone" list="zones" required value=(zone.name()) size="24" autocomplete="off"; }
+            datalist #zones { @for z in crate::calendar::zone_names() { option value=(z) {} } }
+            button type="submit" { "Save" }
+            button.plain type="button" #zone-here hidden { "Use this device's" }
+            p.muted.small style="flex-basis:100%; margin:0" {
+                "Every page shows times in it: hover a time to see its zone. "
+                "It's also the zone of the rare event times written without one."
+            }
+        }
+        script { (PreEscaped(r#"{
+  const here = Intl.DateTimeFormat().resolvedOptions().timeZone, b = document.getElementById('zone-here'), z = document.getElementById('zone');
+  if (here && here !== z.value) { b.hidden = false; b.textContent = `Use this device's (${here})`; b.onclick = () => { z.value = here; z.form.requestSubmit(); }; }
+}"#)) }
+        h2 { "Alerts" }
         div.card {
             p { "How valet picks an event's alerts — the first that applies wins:" }
             ol {
@@ -281,6 +368,23 @@ async fn home(State(app): St, headers: HeaderMap) -> Response {
     })
 }
 
+#[derive(Deserialize)]
+struct ZoneForm {
+    zone: String,
+}
+
+async fn save_zone(State(app): St, headers: HeaderMap, Form(f): Form<ZoneForm>) -> Response {
+    guard!(app, headers);
+    let Some(tz) = f.zone.trim().parse::<chrono_tz::Tz>().ok() else {
+        return back("/settings", None, Some(&format!("{} is not a time zone: pick one in the list (like Europe/Paris).", f.zone.trim())));
+    };
+    if let Err(e) = app.store.set_setting("tz", tz.name()) {
+        return back("/settings", None, Some(&format!("Not saved: {e}")));
+    }
+    crate::calendar::set_default_zone(tz);
+    back("/settings", Some(&format!("Times are shown in {} now.", crate::calendar::zone_label(tz))), None)
+}
+
 // Patterns
 
 #[derive(Deserialize)]
@@ -288,6 +392,8 @@ struct PatternForm {
     name: String,
     tag: String,
     alerts: String,
+    #[serde(default)]
+    ring: Option<String>,
 }
 
 fn spec_of(p: &Pattern) -> String {
@@ -321,13 +427,18 @@ fn pattern_fields(p: Option<&Pattern>) -> Markup {
     html! {
         label { "Name" input name="name" required value=[p.map(|p| &p.name)] placeholder="Meeting"; }
         label { "Tag (for titles)" input name="tag" required value=[p.map(|p| &p.tag)] placeholder="meeting" pattern="[A-Za-z0-9_\\-]+"; }
-        label { "Alerts" input name="alerts" value=[p.map(spec_of)] placeholder="12m, 2m" size="24"; }
+        div.alerts-box data-alerts=(serde_json::to_string(&p.map(|p| p.offsets.clone()).unwrap_or_else(|| vec![-10])).unwrap_or_default()) {
+            label { "Alerts" input name="alerts" value=[p.map(spec_of)] placeholder="12m, 2m" size="24"; }
+        }
+        label style="flex-direction:row; align-items:center; gap:6px" {
+            input type="checkbox" name="ring" value="1" checked[p.is_some_and(|p| p.ring)];
+            "Ring like an alarm (valet's Android app)"
+        }
     }
 }
 
-const SPEC_HELP: &str = "Alerts, separated by commas: 12m, 2h, 1d, 1w or combinations like 1d 3h are before the start; \
-    +30m is after it. For all-day events (which start at midnight) use a clock time: 9:00 is 9 am that day, 1d 18:00 is 6 pm the day before. \
-    Leave empty for a pattern with no alerts (e.g. #silent).";
+const SPEC_HELP: &str = "Alerts before or after the start are for events at a time; alerts at a time of day are for all-day events \
+    (which start at midnight: 9:00 the same day, 18:00 the day before). A pattern with no alert keeps events silent (#silent).";
 
 fn check_pattern(f: &PatternForm) -> Result<(String, String, Vec<i64>), String> {
     let name = f.name.trim().to_string();
@@ -354,7 +465,7 @@ async fn patterns_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>)
                     tr {
                         td { a href={"/patterns/" (p.id)} { (p.name) } }
                         td { code { "#" (p.tag) } }
-                        td { (pattern_alerts(p)) }
+                        td { (pattern_alerts(p)) @if p.ring { br; span.small { "⏰ rings on the Android app" } } }
                         td.muted.small { @for (i, m) in p.offsets.iter().enumerate() { @if i > 0 { ", " } (describe_all_day(*m)) } }
                         td { form method="post" action={"/patterns/" (p.id) "/delete"} onsubmit="return confirm('Delete this pattern?')" {
                             button.plain type="submit" { "Delete" }
@@ -369,6 +480,7 @@ async fn patterns_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>)
             button type="submit" { "Create" }
         }
         p.muted.small { (SPEC_HELP) }
+        script src=(assets::url("patterns.js")) {}
     })
 }
 
@@ -379,7 +491,12 @@ async fn create_pattern(State(app): St, headers: HeaderMap, Form(f): Form<Patter
         Err(e) => return back("/patterns", None, Some(&e)),
     };
     match app.store.save_pattern(None, &name, &tag, &offsets) {
-        Ok(true) => back("/patterns", Some(&format!("Created {name}.")), None),
+        Ok(true) => {
+            if let Some(p) = app.store.patterns().into_iter().find(|p| p.tag == tag) {
+                let _ = app.store.set_ring(p.id, f.ring.is_some());
+            }
+            back("/patterns", Some(&format!("Created {name}.")), None)
+        }
         Ok(false) => back("/patterns", None, Some(&format!("Another pattern already uses #{tag}."))),
         Err(e) => back("/patterns", None, Some(&e.to_string())),
     }
@@ -397,6 +514,7 @@ async fn edit_pattern_page(State(app): St, headers: HeaderMap, Path(id): Path<i6
             button type="submit" { "Save" }
         }
         p.muted.small { (SPEC_HELP) " Saving updates the alerts of every event using this pattern, on all your devices." }
+        script src=(assets::url("patterns.js")) {}
     })
 }
 
@@ -408,7 +526,10 @@ async fn save_pattern(State(app): St, headers: HeaderMap, Path(id): Path<i64>, F
         Err(e) => return back(&here, None, Some(&e)),
     };
     match app.store.save_pattern(Some(id), &name, &tag, &offsets) {
-        Ok(true) => back("/patterns", Some(&format!("Saved {name}.")), None),
+        Ok(true) => {
+            let _ = app.store.set_ring(id, f.ring.is_some());
+            back("/patterns", Some(&format!("Saved {name}.")), None)
+        }
         Ok(false) => back(&here, None, Some(&format!("Another pattern already uses #{tag}."))),
         Err(e) => back(&here, None, Some(&e.to_string())),
     }
@@ -559,18 +680,20 @@ fn today() -> String {
     crate::util::today()
 }
 
-/// `2026-10-23 10:00` (or `2026-10-23, all day`) from a DTSTART value.
-fn when(dtstart: &str) -> String {
-    let b = dtstart.as_bytes();
-    if b.len() < 8 || !b[..8].iter().all(u8::is_ascii_digit) {
-        return dtstart.to_string();
-    }
-    let date = format!("{}-{}-{}", &dtstart[..4], &dtstart[4..6], &dtstart[6..8]);
-    if dtstart.len() >= 13 && b[8] == b'T' {
-        let utc = if dtstart.ends_with('Z') { " UTC" } else { "" };
-        format!("{date} {}:{}{utc}", &dtstart[9..11], &dtstart[11..13])
-    } else {
-        format!("{date}, all day")
+/// A moment as every page shows it: in the settings' zone, said on hover
+/// (where the device is elsewhere, the page's script adds its own time).
+pub fn at(t: i64) -> Markup {
+    use chrono::TimeZone;
+    let Some(d) = crate::calendar::default_zone().timestamp_opt(t, 0).single() else { return html! {} };
+    html! { time datetime=(d.to_rfc3339()) title=(crate::calendar::zone_note(d)) { (d.format("%d/%m/%Y %H:%M")) } }
+}
+
+/// When an event starts (`23/10/2026 10:00`, or `23/10/2026, all day`).
+fn starts(ics: &str) -> Markup {
+    match crate::calendar::first_start(ics) {
+        Some(crate::calendar::When::At(t)) => at(t),
+        Some(crate::calendar::When::Day(d)) => html! { (d.format("%d/%m/%Y")) ", all day" },
+        None => html! { span.muted { "no date" } },
     }
 }
 
@@ -629,7 +752,20 @@ async fn events_page(State(app): St, headers: HeaderMap, Query(q): Query<EventsQ
                 tr { th { "When" } th { "Event" } th { "Alerts now" } th { "Pattern for this event" } }
                 @for o in &events {
                     tr {
-                        td.small { (when(&o.dtstart)) @if o.recurring { br; span.muted { "repeats" } } }
+                        td.small {
+                            @match crate::calendar::describe(o).filter(|_| o.recurring) {
+                                // A series keeps the hour of its own zone: said when it isn't the usual one.
+                                Some((rule, first, Some(t))) => {
+                                    span title=(crate::calendar::zone_note(t)) {
+                                        (rule)
+                                        @if t.timezone() != crate::calendar::default_zone() { " (" (crate::calendar::zone_label(t.timezone())) ")" }
+                                    }
+                                    br; span.muted title=(crate::calendar::zone_note(t)) { "first: " (first) }
+                                }
+                                Some((rule, first, None)) => { (rule) br; span.muted { "first: " (first) } }
+                                None => { (starts(&o.data)) }
+                            }
+                        }
                         td { (o.summary) br; span.muted.small { (cal_name(&o.calendar)) } }
                         td.small { (current_alerts(o)) br; span.muted { "from: " (app.store.source(o).describe()) } }
                         td {
@@ -757,7 +893,28 @@ async fn connect_page(State(app): St, headers: HeaderMap) -> Response {
     let base = format!("https://{host}");
     let user = &app.config.user;
     page("Connect apps", "/connect", html! {
-        h1 { "Connect your apps" }
+        h1 { "valet as an app" }
+        p { "This site installs like an app: its own window and icon, and pages and calendar months you've seen stay readable offline." }
+        div.card {
+            h2 { "Phone" }
+            ul {
+                li { b { "Android: " } "valet's Android app (from the " code { "android/" } " folder of valet's code) is this site plus alarms that ring, for the "
+                    a href="/patterns" { "patterns" } " marked so. At first launch, give it " code { (base) } ". "
+                    "Without it: Chrome → ⋮ → " i { "Add to home screen" } " → " i { "Install" } "." }
+                li { b { "iPhone: " } "Safari → Share → " i { "Add to Home Screen" } "." }
+            }
+            p #in-app hidden { "You're in valet's Android app. " button.plain type="button" onclick="ValetApp.changeServer()" style="color:var(--fg)" { "Change valet's address" } }
+            script { (PreEscaped("if (window.ValetApp) document.getElementById('in-app').hidden = false;")) }
+        }
+        div.card {
+            h2 { "Computer" }
+            ul {
+                li { b { "Chrome, Edge, Brave: " } "the install icon at the right of the address bar (or ⋮ → " i { "Install valet" } ")." }
+                li { b { "Safari on a Mac: " } "File → " i { "Add to Dock" } "." }
+            }
+        }
+
+        h1 { "Calendar apps" }
         p { "Every app uses user name " code { (user) } " and valet's password. After connecting, "
             b { "turn off the app's own default alerts" } ", so valet's patterns apply." }
         div.card {
@@ -823,8 +980,8 @@ fn account_status_inner(app: &App, a: &crate::accounts::Account, boxes: &[crate:
     let count: u32 = folders.iter().map(|b| app.mail.count(b.id).0).sum();
     html! {
         @match app.mail.status(&a.id) {
-            Some((true, msg, at)) => p.ok { "● " (msg) span.muted.small { " · " (when_unix(at)) } },
-            Some((false, msg, at)) => p.err { "● " (msg) span.muted.small { " · " (when_unix(at)) } },
+            Some((true, msg, t)) => p.ok { "● " (msg) span.muted.small { " · " (at(t)) } },
+            Some((false, msg, t)) => p.err { "● " (msg) span.muted.small { " · " (at(t)) } },
             None => p.muted { "Connecting…" },
         }
         p.small.muted { (folders.len()) " folders, " (count) " messages kept here"
@@ -849,15 +1006,9 @@ fn pastes(a: &crate::accounts::Account) -> bool {
     a.oauth.as_ref().is_some_and(|o| o.redirect_uri.is_some())
 }
 
-fn when_unix(t: i64) -> String {
-    crate::util::imap_datetime(t).trim_end_matches(" +0000").to_string() + " UTC"
-}
-
 async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> Response {
     guard!(app, headers);
     let boxes = app.mail.mailboxes();
-    let invites = app.mail.invites();
-    let calendars: Vec<Calendar> = app.store.calendars().into_iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
     let accounts = app.accounts();
     // The Microsoft login shows until the account is connected, or when asked for again.
     let login_shown = |a: &crate::accounts::Account| {
@@ -929,31 +1080,49 @@ setInterval(async () => {
   } catch (_) {}
 }, 3000);
 "#)) }
-        h1 { "Invitations" }
-        @if invites.is_empty() {
-            p.muted { "None yet: invitations arriving in your inboxes appear here and in the Invitations calendar." }
-        } @else {
-            @for i in &invites {
-                div.card {
-                    div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap" {
-                        div {
-                            b { (i.summary) }
-                            div.small.muted { (when(&i.dtstart)) " · from " (i.organizer) }
-                        }
-                        @if let Some(r) = &i.response { span.small.ok { "answered: " (r.to_lowercase()) } }
-                    }
-                    form.row method="post" action={"/invites/" (i.id)} style="margin-top:10px" {
-                        label { "Put it in" select name="calendar" {
-                            @for c in &calendars { option value=(c.id) { (c.name) } }
-                            option value="" { "Invitations" }
-                        } }
-                        button type="submit" name="answer" value="ACCEPTED" { "Accept" }
-                        button type="submit" name="answer" value="TENTATIVE" { "Maybe" }
-                        button.plain type="submit" name="answer" value="DECLINED" { "Decline" }
-                    }
+    })
+}
+
+/// Invitations: events not in a calendar yet, waiting for an answer.
+async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> Response {
+    guard!(app, headers);
+    let waiting = waiting(&app);
+    let others: Vec<crate::mailstore::Invite> = app.mail.invites().into_iter().filter(|i| !waiting.iter().any(|w| w.id == i.id)).collect();
+    let calendars: Vec<Calendar> = app.store.calendars().into_iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
+    let card = |i: &crate::mailstore::Invite| html! {
+        div.card {
+            div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap" {
+                div {
+                    b { (i.summary) }
+                    div.small.muted { (starts(&i.ics)) " · from " (i.organizer) }
                 }
+                @if let Some(r) = &i.response { span.small.ok { "answered: " (r.to_lowercase()) } }
             }
-            p.muted.small { "Answering emails the organizer from the account the invitation came to. Accepting from a mail app works too: the event then moves to the calendar the app saves it in." }
+            form.row method="post" action={"/invites/" (i.id)} style="margin-top:10px" {
+                label { "Put it in" select name="calendar" {
+                    @for c in &calendars { option value=(c.id) { (c.name) } }
+                    option value="" { "Invitations" }
+                } }
+                button type="submit" name="answer" value="ACCEPTED" { "Accept" }
+                button type="submit" name="answer" value="TENTATIVE" { "Maybe" }
+                button.plain type="submit" name="answer" value="DECLINED" { "Decline" }
+            }
+        }
+    };
+    page("Invitations", "/invitations", html! {
+        h1 { "Invitations" }
+        (flash(&m))
+        @if waiting.is_empty() {
+            p.muted { "Nothing waiting: invitations arriving in your inboxes show here until you answer them." }
+        } @else {
+            @for i in &waiting { (card(i)) }
+            p.muted.small { "Answering emails the organizer from the account the invitation came to, and puts the event in the calendar you pick. Accepting from a mail app works too." }
+        }
+        @if !others.is_empty() {
+            details style="margin-top:20px" {
+                summary { "Answered or past (" (others.len()) ")" }
+                @for i in &others { (card(i)) }
+            }
         }
     })
 }
@@ -1249,12 +1418,12 @@ struct AnswerForm {
 async fn answer_invite(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Form(f): Form<AnswerForm>) -> Response {
     guard!(app, headers);
     if !matches!(f.answer.as_str(), "ACCEPTED" | "TENTATIVE" | "DECLINED") {
-        return back("/mail", None, Some("Unknown answer."));
+        return back("/invitations", None, Some("Unknown answer."));
     }
     let calendar = (!f.calendar.is_empty()).then_some(f.calendar.as_str());
     match crate::invites::respond(&app, id, &f.answer, calendar).await {
-        Ok(()) => back("/mail", Some("Answered: the organizer gets your reply by email."), None),
-        Err(e) => back("/mail", None, Some(&format!("{e:#}"))),
+        Ok(()) => back("/invitations", Some("Answered: the organizer gets your reply by email."), None),
+        Err(e) => back("/invitations", None, Some(&format!("{e:#}"))),
     }
 }
 
@@ -1266,11 +1435,15 @@ mod tests {
     fn helpers() {
         assert_eq!(slug("Work (IONOS)"), "work-ionos");
         assert_eq!(slug("!!"), "calendar");
-        assert_eq!(when("20261023T100000Z"), "2026-10-23 10:00 UTC");
-        assert_eq!(when("20261023T100000"), "2026-10-23 10:00");
-        assert_eq!(when("20261023"), "2026-10-23, all day");
+        let ics = |start: &str| format!("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u\r\nDTSTART{start}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+        assert_eq!(
+            starts(&ics(":20261023T100000Z")).into_string(),
+            r#"<time datetime="2026-10-23T12:00:00+02:00" title="Paris time (Europe/Paris, CEST, UTC+02:00)">23/10/2026 12:00</time>"#
+        );
+        assert!(starts(&ics(";TZID=America/New_York:20261023T100000")).into_string().contains("23/10/2026 16:00"));
+        assert_eq!(starts(&ics(";VALUE=DATE:20261023")).into_string(), "23/10/2026, all day");
         assert_eq!(today().len(), 8);
-        let p = Pattern { id: 1, name: "x".into(), tag: "x".into(), offsets: vec![-1620, -12, 540] };
+        let p = Pattern { id: 1, name: "x".into(), tag: "x".into(), offsets: vec![-1620, -12, 540], ring: false };
         assert_eq!(spec_of(&p), "1d 3h, 12m, 09:00");
         assert_eq!(alarms::parse_spec(&spec_of(&p)).unwrap(), vec![-1620, -12, 540]);
     }

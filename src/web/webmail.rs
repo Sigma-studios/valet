@@ -53,21 +53,27 @@ fn addresses_of(a: Option<&mail_parser::Address>) -> Vec<String> {
     a.map(|a| a.iter().filter_map(|x| x.address().map(str::to_string)).collect()).unwrap_or_default()
 }
 
-/// Seconds since 1970, shown in the reader's time zone by the page's script.
+/// Seconds since 1970, in the settings' zone; the page's script shortens it
+/// (today's mail: just the hour).
 fn time(t: i64, long: bool) -> Markup {
-    html! { time data-t=(t) data-long=[long.then_some("1")] { (crate::util::imap_datetime(t).trim_end_matches(" +0000")) " UTC" } }
+    use chrono::TimeZone;
+    let Some(d) = crate::calendar::default_zone().timestamp_opt(t, 0).single() else { return html! {} };
+    html! {
+        time datetime=(d.to_rfc3339()) title=(crate::calendar::zone_note(d)) data-t=(t) data-long=[long.then_some("1")] { (d.format("%d/%m/%Y %H:%M")) }
+    }
 }
 
 const TIME_SCRIPT: &str = r#"
-for (const el of document.querySelectorAll('time[data-t]')) {
-  const d = new Date(el.dataset.t * 1000), now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  el.textContent = el.dataset.long
-    ? d.toLocaleString([], { dateStyle: 'full', timeStyle: 'short' })
-    : sameDay ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : d.getFullYear() === now.getFullYear() ? d.toLocaleDateString([], { day: 'numeric', month: 'short' })
-    : d.toLocaleDateString();
-  el.title = d.toLocaleString();
+{
+  const { opts } = window.valetTime, day = (d) => d.toLocaleDateString('en-CA', opts());
+  for (const el of document.querySelectorAll('time[data-t]')) {
+    const d = new Date(el.dataset.t * 1000), now = new Date();
+    el.textContent = el.dataset.long
+      ? d.toLocaleString([], opts({ dateStyle: 'full', timeStyle: 'short' }))
+      : day(d) === day(now) ? d.toLocaleTimeString([], opts({ hour: '2-digit', minute: '2-digit' }))
+      : day(d).slice(0, 4) === day(now).slice(0, 4) ? d.toLocaleDateString([], opts({ day: 'numeric', month: 'short' }))
+      : d.toLocaleDateString([], opts());
+  }
 }
 "#;
 
@@ -263,9 +269,11 @@ fn mail_page(title: &str, current: i64, app: &App, body: Markup) -> Response {
     )
 }
 
-pub async fn inbox(State(app): St, headers: HeaderMap) -> Response {
-    guard!(app, headers);
-    Redirect::to(&format!("/box/{}", app.mail.all_inboxes())).into_response()
+/// INBOX, shown at its own address (where the installed app starts, and
+/// what the service worker keeps for offline reading).
+pub async fn inbox(State(app): St, headers: HeaderMap, q: Query<ListQuery>) -> Response {
+    let id = app.mail.all_inboxes();
+    list(State(app), headers, Path(id), q).await
 }
 
 #[derive(Deserialize, Default)]
@@ -1237,7 +1245,8 @@ const EDITOR_SCRIPT: &str = r#"
         form.elements.carry.value = j.draft;
         if (hadFiles) form.elements.files.value = '';
         show(j.attachments);
-        status.textContent = 'Draft saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        status.textContent = 'Draft saved ' + new Date().toLocaleTimeString([], valetTime.opts({ hour: '2-digit', minute: '2-digit' }));
+        status.title = valetTime.note(Date.now());
       } catch (e) {
         dirty = true;
         status.textContent = 'Draft not saved: ' + e.message;

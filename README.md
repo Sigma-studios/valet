@@ -4,8 +4,9 @@ One server, one password, for all your mailboxes and your calendar, used from
 the native apps of every device.
 
 - **Calendar** (CalDAV): Apple Calendar, DAVx⁵ on Android, Thunderbird,
-  GNOME/Evolution. Every event gets the alerts you chose, stored in the event
-  itself, so they ring natively everywhere, even offline.
+  GNOME/Evolution, and valet's own calendar page. Every event gets the alerts
+  you chose, stored in the event itself, so they ring natively everywhere,
+  even offline; on valet's Android app, they can ring like an alarm.
 - **Mail** (IMAP + SMTP): valet logs in to each of your mailboxes (Gmail,
   IONOS, Microsoft 365…), keeps a copy, and serves them all as one account,
   with one tree of folders you shape yourself (see [Folders](#folders)).
@@ -81,10 +82,40 @@ that day, `1d 18:00` is 6 pm the day before.
 
 ## Web UI
 
-At the server's root, with the same password: patterns, calendars and their
-defaults, the list of events with the pattern applying to each (and a choice
-per event), `.ics` import (Google, Outlook, IONOS exports; importing again
-updates instead of duplicating), and per-app setup instructions.
+At the server's root, with the same password. The bar holds the everyday
+things: **Mail** (the webmail), **Calendar** (month, week and day views of
+every calendar, repeating events included; events are added, edited and
+deleted there, and reach every app at its next sync), and **Invitations**
+(events waiting for an answer). **Settings** holds the rest: the time zone
+every page shows times in (Paris unless changed; hovering a time names its
+zone, and the device's own time when it is set to another), mail accounts,
+calendars and their default patterns, alert patterns, the alerts of each
+event, `.ics` import (Google, Outlook, IONOS exports; importing again updates
+instead of duplicating), and how to connect each app.
+
+## The apps
+
+The site installs as an app (a PWA): Chrome, Edge or Brave offer to install
+it, Safari on a Mac has File → Add to Dock, and phones Add to Home Screen. Its
+service worker keeps the pages you open and the calendar from a month back to
+six months ahead, so they stay readable offline (marked so; changes wait for a
+connection). Logging out forgets them.
+
+**Android**: `android/` is valet's own app, the same site in a window plus
+what a site can't do: **alarms that ring** (full screen over the lock screen,
+until stopped or snoozed) for the alerts of patterns marked *Ring like an
+alarm*. The phone sets them a week ahead from valet's list, so they ring
+offline too, and looks again every few hours, after a restart, and when
+events or patterns change. It needs no Play Store and no developer account:
+
+```sh
+cd android
+./gradlew assembleDebug            # Android Studio's JDK: JAVA_HOME=…/Android Studio.app/Contents/jbr/Contents/Home
+adb install -r app/build/outputs/apk/debug/app-debug.apk   # or copy the .apk to the phone and open it
+```
+
+At first launch it asks for valet's address. Updates must be signed with the
+same key (the debug key in `~/.android/`), or the app has to be removed first.
 
 ## Configuration
 
@@ -177,11 +208,12 @@ GreenMail, say), import an account with `"tls": false` through `VALET_ACCOUNTS`.
 
 End-to-end tests run valet against GreenMail, in a scratch directory holding
 `gm/greenmail-standalone-2.1.14.jar` (from Maven Central), with Java and
-Python with `requests` (`PYTHON=…` picks the interpreter):
+Python with `requests` (and `websocket-client` for the browser checks; `PYTHON=…` picks the interpreter):
 
 ```sh
 cargo build
 e2e/run_mail_e2e.sh <dir>   # IMAP; leaves <dir>/mdata for run_ui.sh
 e2e/run_ui.sh <dir>         # the tree editor's routes
 e2e/run_webmail.sh <dir>
+e2e/run_calendar.sh <dir>   # the calendar page and the app; with Chrome, also in a headless Chrome, offline included
 ```
