@@ -316,14 +316,20 @@ fn expand(cal: &Component, from: i64, to: i64) -> Vec<(When, When, &Component, b
 
 /// The occurrences of an event that overlap [from, to) (Unix seconds).
 pub fn instances(o: &Object, from: i64, to: i64) -> Vec<Instance> {
+    instances_where(o, from, to, |_| true)
+}
+
+/// The occurrences that overlap [from, to) and whose VEVENT (with what it
+/// leaves to the series' own) passes `keep`.
+fn instances_where(o: &Object, from: i64, to: i64, keep: impl Fn(&dyn Fn(&str) -> Option<String>) -> bool) -> Vec<Instance> {
     let Ok(cals) = ical::parse(&o.data) else { return vec![] };
     let Some(cal) = cals.first() else { return vec![] };
     let (master, _) = events(cal);
-    let text = |e: &Component, name: &str| {
-        e.value(name).or_else(|| master.and_then(|m| m.value(name))).map(unescape).unwrap_or_default()
-    };
+    let value = |e: &Component, name: &str| e.value(name).or_else(|| master.and_then(|m| m.value(name))).map(unescape);
+    let text = |e: &Component, name: &str| value(e, name).unwrap_or_default();
     expand(cal, from, to)
         .into_iter()
+        .filter(|(_, _, e, _)| keep(&|name| value(e, name)))
         .map(|(start, end, e, repeats)| Instance {
             calendar: o.calendar.clone(),
             name: o.name.clone(),
@@ -336,6 +342,39 @@ pub fn instances(o: &Object, from: i64, to: i64) -> Vec<Instance> {
             repeats,
         })
         .collect()
+}
+
+/// The events of `objects` an invitation (`ics`) would clash with: timed
+/// ones that overlap its timed occurrences (the first two months of them when
+/// it repeats), busy, and not the invitation's own copy.
+pub fn conflicts(ics: &str, objects: &[Object], now: i64) -> Vec<Instance> {
+    let Ok(cals) = ical::parse(ics) else { return vec![] };
+    let Some(cal) = cals.first() else { return vec![] };
+    let uid = events(cal).0.and_then(|m| m.value("UID")).unwrap_or_default();
+    let from = first_start(ics).map_or(now, |w| w.secs().max(now));
+    let times: Vec<(i64, i64)> = expand(cal, from, from + 60 * 86400)
+        .into_iter()
+        .filter(|(_, _, e, _)| !e.value("STATUS").is_some_and(|s| s.eq_ignore_ascii_case("CANCELLED")))
+        .filter_map(|(a, b, ..)| match (a, b) {
+            (When::At(a), When::At(b)) => Some((a, b)),
+            _ => None,
+        })
+        .collect();
+    let (Some(lo), Some(hi)) = (times.iter().map(|t| t.0).min(), times.iter().map(|t| t.1).max()) else { return vec![] };
+    let busy = |v: &dyn Fn(&str) -> Option<String>| {
+        !v("STATUS").is_some_and(|s| s.eq_ignore_ascii_case("CANCELLED")) && !v("TRANSP").is_some_and(|s| s.eq_ignore_ascii_case("TRANSPARENT"))
+    };
+    let mut out: Vec<Instance> = objects
+        .iter()
+        .filter(|o| o.uid != uid)
+        .flat_map(|o| instances_where(o, lo, hi, busy))
+        .filter(|i| match (i.start, i.end) {
+            (When::At(a), When::At(b)) => times.iter().any(|&(s, f)| a < f && s < b),
+            _ => false,
+        })
+        .collect();
+    out.sort_by_key(|i| i.start.secs());
+    out
 }
 
 /// An alarm to ring (valet's Android app).
@@ -842,6 +881,31 @@ mod tests {
         assert_eq!(say("DTSTART:20261023T080000Z\nRRULE:FREQ=MONTHLY").0, "Every month on the 23rd at 10:00");
         assert_eq!(say("DTSTART;VALUE=DATE:19900412\nRRULE:FREQ=YEARLY"), ("Every year on 12 April".into(), "12/04/1990".into(), None));
         assert!(describe(&ev("DTSTART:20261020T080000Z")).is_none());
+    }
+
+    #[test]
+    fn invitations_clash_with_busy_timed_events() {
+        let now = at("2026-10-24T00:00:00Z");
+        let invite = |body: &str| format!("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:inv\r\nSUMMARY:Review\r\n{body}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+        let mut copy = ev("SUMMARY:Review\nDTSTART:20261027T100000Z\nDTEND:20261027T110000Z");
+        copy.uid = "inv".into();
+        let cal = [
+            copy,
+            ev("SUMMARY:Standup\nDTSTART:20261027T103000Z\nDTEND:20261027T104500Z"),
+            ev("SUMMARY:Before\nDTSTART:20261027T090000Z\nDTEND:20261027T100000Z"),
+            ev("SUMMARY:Free\nTRANSP:TRANSPARENT\nDTSTART:20261027T100000Z\nDTEND:20261027T110000Z"),
+            ev("SUMMARY:Off\nSTATUS:CANCELLED\nDTSTART:20261027T100000Z\nDTEND:20261027T110000Z"),
+            ev("SUMMARY:Holiday\nDTSTART;VALUE=DATE:20261027"),
+            ev("SUMMARY:Gym\nDTSTART:20261020T100000Z\nDTEND:20261020T113000Z\nRRULE:FREQ=WEEKLY"),
+        ];
+        let titles = |ics: &str| conflicts(ics, &cal, now).into_iter().map(|i| i.title).collect::<Vec<_>>();
+        // Back to back isn't a clash; the invitation's own copy, free, cancelled and all-day events aren't either.
+        assert_eq!(titles(&invite("DTSTART:20261027T100000Z\nDTEND:20261027T110000Z")), ["Gym", "Standup"]);
+        assert!(titles(&invite("DTSTART:20261027T120000Z\nDURATION:PT1H")).is_empty());
+        assert!(titles(&invite("DTSTART;VALUE=DATE:20261027")).is_empty());
+        // Repeating: every clash of its first occurrences; a past start counts from now.
+        let weekly = titles(&invite("DTSTART:20261013T110000Z\nDTEND:20261013T120000Z\nRRULE:FREQ=WEEKLY;COUNT=4"));
+        assert_eq!(weekly, ["Gym", "Gym"], "the 27th and 3 November, not the 13th or 20th");
     }
 
     #[test]

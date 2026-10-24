@@ -125,6 +125,10 @@ def main():
     check(re.search(rf'<div class="row open">.*?<a class="link" href="{re.escape(listed)}"', page.replace("&amp;", "&"), re.S), "the open message's row closes it")
 
     # An invitation ignored: no answer sent, off the calendar, not waiting.
+    # Meanwhile, an event at the same time is named on it.
+    r = s.post(f"{WEB}/calendar/event", data={"calendar": "", "title": "Dentist", "start_date": "2099-11-05", "start_time": "11:30",
+                                              "end_date": "2099-11-05", "end_time": "12:30", "tz": "Europe/Paris", "repeat": "none"})
+    check(r.ok, f"an event at the invitation's time: {r.text}")
     invite = (
         "From: Org <org@local.test>\r\nTo: test@local.test\r\nSubject: Invitation: Planning\r\nMIME-Version: 1.0\r\n"
         "Content-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n"
@@ -138,6 +142,8 @@ def main():
     wait(lambda: "Planning" in s.get(f"{WEB}/invitations").text, "the invitation is waiting")
     planning = lambda: [e for e in s.get(f"{WEB}/calendar/month/2099-11").json()["events"] if e["title"] == "Planning"]
     check(planning() and planning()[0]["calendar"] == "invitations", "in the Invitations calendar meanwhile")
+    card = s.get(f"{WEB}/invitations").text
+    check(re.search(r"Overlaps <b>Dentist</b> <time[^>]*>05/11/2099 11:30</time>–12:30 \(Calendar\)", card), "it says what it overlaps, not itself")
     inv = re.search(r'action="/invites/(\d+)"', s.get(f"{WEB}/invitations").text).group(1)
     sent_before = len(gm_subjects("org", "INBOX"))
     r = s.post(f"{WEB}/invites/{inv}", data={"answer": "IGNORED", "calendar": ""})

@@ -706,6 +706,18 @@ pub fn at(t: i64) -> Markup {
     html! { time datetime=(d.to_rfc3339()) title=(crate::calendar::zone_note(d)) { (d.format("%d/%m/%Y %H:%M")) } }
 }
 
+/// From a start to an end: `23/10/2026 10:00–10:30`, the end in full when on another day.
+fn during(start: crate::calendar::When, end: crate::calendar::When) -> Markup {
+    use crate::calendar::When;
+    let (When::At(a), When::At(b)) = (start, end) else { return html! {} };
+    let tz = crate::calendar::default_zone();
+    let day = |t: i64| chrono::DateTime::from_timestamp(t, 0).map(|d| d.with_timezone(&tz));
+    match (day(a), day(b)) {
+        (Some(x), Some(y)) if x.date_naive() == y.date_naive() => html! { (at(a)) "–" (y.format("%H:%M")) },
+        _ => html! { (at(a)) " – " (at(b)) },
+    }
+}
+
 /// When an event starts (`23/10/2026 10:00`, or `23/10/2026, all day`).
 fn starts(ics: &str) -> Markup {
     match crate::calendar::first_start(ics) {
@@ -1106,13 +1118,31 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
     guard!(app, headers);
     let waiting = waiting(&app);
     let others: Vec<crate::mailstore::Invite> = app.mail.invites().into_iter().filter(|i| !waiting.iter().any(|w| w.id == i.id)).collect();
-    let calendars: Vec<Calendar> = app.store.calendars().into_iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
+    let all_calendars = app.store.calendars();
+    let calendars: Vec<&Calendar> = all_calendars.iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
+    let calendar_name = |id: &str| all_calendars.iter().find(|c| c.id == id).map_or(id.to_string(), |c| c.name.clone());
+    let objects = if waiting.is_empty() { vec![] } else { app.store.all_objects() };
+    let now = crate::mailstore::now();
     let card = |i: &crate::mailstore::Invite| html! {
         div.card {
             div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap" {
                 div {
                     b { (i.summary) }
                     div.small.muted { (starts(&i.ics)) " · from " (i.organizer) }
+                    // Before answering: what it would clash with.
+                    @if i.response.is_none() {
+                        @let clashes = crate::calendar::conflicts(&i.ics, &objects, now);
+                        @if !clashes.is_empty() {
+                            div.small.err {
+                                "Overlaps "
+                                @for (n, e) in clashes.iter().take(5).enumerate() {
+                                    @if n > 0 { ", " }
+                                    b { (e.title) } " " (during(e.start, e.end)) " (" (calendar_name(&e.calendar)) ")"
+                                }
+                                @if clashes.len() > 5 { " and " (clashes.len() - 5) " more" }
+                            }
+                        }
+                    }
                 }
                 @match i.response.as_deref() {
                     Some("IGNORED") => span.small.muted { "ignored" },
