@@ -15,8 +15,9 @@ the native apps of every device.
   once for inboxes (IDLE). Mail you send goes out through the account it is
   from, chosen by its From address.
 - **Invitations** arriving in an inbox land in the calendar (an "Invitations"
-  calendar until answered), and can be answered from valet's Mail page: the
-  organizer gets the reply from the account the invitation came to.
+  calendar until answered), and can be answered from valet's Invitations page,
+  which names the events each one would overlap: the organizer gets the reply
+  from the account the invitation came to.
 
 - **Webmail** on valet's own site, from any browser: your tree of folders
   (and every account's own folders), search, reading, and writing with
