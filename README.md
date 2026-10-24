@@ -27,7 +27,11 @@ the native apps of every device.
   or from a mail app, and the provider follows. It works on the same copy as the mail
   apps, so read, flagged, moved and deleted messages match everywhere. HTML
   mail is shown in a frame where nothing runs, and remote images (which tell
-  senders you opened a message) stay blocked until asked for.
+  senders you opened a message) stay blocked until asked for. An open list
+  follows the mail by itself: what comes in, or is read, flagged or deleted
+  from any app, shows without reloading. *Refresh* asks the providers now,
+  the folder shown first, for what they don't push (folders other than
+  inboxes), and says what came of it.
 
 ## Folders
 

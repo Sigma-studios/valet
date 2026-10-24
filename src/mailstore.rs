@@ -10,7 +10,7 @@
 //! it ("placeholder", no remote UID); when the sync later fetches it, it is
 //! matched to the placeholder instead of being added twice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, watch};
 
 mod tree;
 
@@ -97,8 +97,30 @@ pub struct MailStore {
     /// Something changed in some mailbox (sessions in IDLE re-check theirs).
     pub changed: broadcast::Sender<()>,
     wake: Mutex<HashMap<String, Arc<Notify>>>,
-    /// Per account: sync passes started, and finished.
-    passes: Mutex<HashMap<String, (u64, u64)>>,
+    /// Per account: how far its sync has got.
+    passes: Mutex<HashMap<String, Passes>>,
+    /// Bumped whenever `passes` changes.
+    passed: watch::Sender<()>,
+    /// Per account: provider folders its next pass syncs right after the inbox.
+    hurry: Mutex<HashMap<String, HashSet<String>>>,
+}
+
+/// Counts of an account's sync passes, for Refresh to know when it's done.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Passes {
+    pub started: u64,
+    /// Passes through the inbox and the folders asked for first.
+    pub ahead: u64,
+    pub finished: u64,
+    /// Sessions ended by an error.
+    pub failed: u64,
+}
+
+pub enum Pass {
+    Start,
+    Ahead,
+    Finish,
+    Fail,
 }
 
 const SCHEMA: &str = "
@@ -213,7 +235,7 @@ impl MailStore {
 
     fn with(conn: Connection) -> Result<MailStore> {
         conn.execute_batch(SCHEMA)?;
-        let store = MailStore { conn: Mutex::new(conn), changed: broadcast::channel(64).0, wake: Mutex::new(HashMap::new()), passes: Mutex::new(HashMap::new()) };
+        let store = MailStore { conn: Mutex::new(conn), changed: broadcast::channel(64).0, wake: Mutex::new(HashMap::new()), passes: Mutex::new(HashMap::new()), passed: watch::channel(()).0, hurry: Mutex::new(HashMap::new()) };
         {
             let c = store.db();
             c.execute(
@@ -247,16 +269,38 @@ impl MailStore {
         self.wake.lock().unwrap().entry(account.to_string()).or_default().clone()
     }
 
-    /// Counts a sync pass of the account: started (`done` false) or finished.
-    pub fn pass(&self, account: &str, done: bool) {
-        let mut p = self.passes.lock().unwrap();
-        let e = p.entry(account.to_string()).or_default();
-        if done { e.1 += 1 } else { e.0 += 1 }
+    /// Counts a step of the account's sync.
+    pub fn pass(&self, account: &str, step: Pass) {
+        {
+            let mut p = self.passes.lock().unwrap();
+            let e = p.entry(account.to_string()).or_default();
+            match step {
+                Pass::Start => e.started += 1,
+                Pass::Ahead => e.ahead += 1,
+                Pass::Finish => e.finished += 1,
+                Pass::Fail => e.failed += 1,
+            }
+        }
+        self.passed.send_replace(());
     }
 
-    /// (passes started, passes finished) of the account.
-    pub fn passes(&self, account: &str) -> (u64, u64) {
+    pub fn passes(&self, account: &str) -> Passes {
         self.passes.lock().unwrap().get(account).copied().unwrap_or_default()
+    }
+
+    /// Changes whenever a pass counter does.
+    pub fn passed(&self) -> watch::Receiver<()> {
+        self.passed.subscribe()
+    }
+
+    /// Asks the account's next pass to sync these provider folders first.
+    pub fn hurry(&self, account: &str, remotes: impl IntoIterator<Item = String>) {
+        self.hurry.lock().unwrap().entry(account.to_string()).or_default().extend(remotes);
+    }
+
+    /// The folders asked for first, forgotten here.
+    pub fn hurried(&self, account: &str) -> HashSet<String> {
+        self.hurry.lock().unwrap().remove(account).unwrap_or_default()
     }
 
     // Accounts

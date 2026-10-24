@@ -93,12 +93,14 @@ pub struct App {
     pub syncs: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     /// OAuth logins in progress: state → (account id, PKCE verifier, redirect URI).
     pub oauth_pending: Mutex<HashMap<String, (String, String, String)>>,
+    /// True once valet is shutting down: what streams to pages ends then.
+    pub stopping: tokio::sync::watch::Sender<bool>,
 }
 
 impl App {
     pub fn new(store: Store, config: Config, mail: MailStore) -> App {
         let accounts = RwLock::new(mail.accounts());
-        App { store, config, mail, accounts, syncs: Mutex::default(), oauth_pending: Mutex::default() }
+        App { store, config, mail, accounts, syncs: Mutex::default(), oauth_pending: Mutex::default(), stopping: tokio::sync::watch::channel(false).0 }
     }
 
     pub fn accounts(&self) -> Vec<Account> {
@@ -223,7 +225,13 @@ async fn main() -> Result<()> {
     tokio::spawn(smtpd::serve(app.clone(), smtp));
     sync::start(app.clone());
     tracing::info!("{} mail accounts", app.accounts().len());
-    axum::serve(http, router(app)).with_graceful_shutdown(shutdown()).await?;
+    let stopping = app.clone();
+    axum::serve(http, router(app))
+        .with_graceful_shutdown(async move {
+            shutdown().await;
+            stopping.stopping.send_replace(true);
+        })
+        .await?;
     Ok(())
 }
 

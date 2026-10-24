@@ -1,6 +1,8 @@
 //! One task per account: replays what mail apps changed here, mirrors each
 //! provider folder (new messages, flag changes, deletions), then waits in
-//! IDLE on the inbox until the provider or valet has something new.
+//! IDLE on the inbox until the provider or valet has something new. With
+//! CONDSTORE, a folder that hasn't changed since the last pass costs a SELECT,
+//! and one that has, only its changed flags.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +14,7 @@ use futures::TryStreamExt;
 
 use crate::App;
 use crate::accounts::{self, Account, Imap};
-use crate::mailstore::{Op, account_path, now};
+use crate::mailstore::{Op, Pass, account_path, now};
 use crate::{invites, mutf7, notify, util};
 
 pub fn start(app: Arc<App>) {
@@ -32,20 +34,23 @@ pub fn restart(app: &Arc<App>, id: &str) {
     let task = tokio::spawn(async move {
         let mut backoff = 15;
         loop {
-            match session(&app, &acc).await {
-                Ok(()) => backoff = 15,
-                Err(e) => {
-                    let msg = format!("{e:#}");
-                    tracing::warn!(account = %acc.id, "sync: {msg}");
-                    app.mail.set_status(&acc.id, false, &msg);
-                    let waker = app.mail.waker(&acc.id);
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
-                        _ = waker.notified() => {}
-                    }
-                    backoff = (backoff * 2).min(600);
-                }
+            // A session only ends in an error; one that got through a pass
+            // was a working connection, and the wait starts over.
+            let finished = app.mail.passes(&acc.id).finished;
+            let Err(e) = session(&app, &acc).await;
+            if app.mail.passes(&acc.id).finished > finished {
+                backoff = 15;
             }
+            let msg = format!("{e:#}");
+            tracing::warn!(account = %acc.id, "sync: {msg}");
+            app.mail.set_status(&acc.id, false, &msg);
+            app.mail.pass(&acc.id, Pass::Fail);
+            let waker = app.mail.waker(&acc.id);
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                _ = waker.notified() => {}
+            }
+            backoff = (backoff * 2).min(600);
         }
     });
     syncs.insert(id.to_string(), task.abort_handle());
@@ -54,6 +59,14 @@ pub fn restart(app: &Arc<App>, id: &str) {
 struct Folder {
     remote: String,
     mailbox: i64,
+}
+
+/// A folder as its SELECT showed it, at the end of a pass that synced it.
+#[derive(Clone, Copy, PartialEq)]
+struct Seen {
+    exists: u32,
+    uid_next: Option<u32>,
+    modseq: Option<u64>,
 }
 
 fn flag_text(f: &Flag) -> Option<String> {
@@ -74,29 +87,51 @@ fn flag_list(flags: &[String]) -> String {
     format!("({})", f.join(" "))
 }
 
-async fn session(app: &Arc<App>, acc: &Account) -> Result<()> {
+async fn session(app: &Arc<App>, acc: &Account) -> Result<std::convert::Infallible> {
     let mut s = accounts::imap(acc, &app.mail).await?;
     tracing::info!(account = %acc.id, "logged in");
     let caps = s.capabilities().await?;
     let has_move = caps.has_str("MOVE");
     let has_uidplus = caps.has_str("UIDPLUS");
     let has_idle = caps.has_str("IDLE");
+    let condstore = caps.has_str("CONDSTORE");
     let waker = app.mail.waker(&acc.id);
+    // Per provider folder, this session's last look at it: a session's first
+    // pass goes through every folder's flags.
+    let mut seen: HashMap<String, Seen> = HashMap::new();
+    // At most one extra pass in a row for the inbox before IDLE, whatever
+    // the provider says.
+    let mut again = false;
     loop {
-        app.mail.pass(&acc.id, false);
+        app.mail.pass(&acc.id, Pass::Start);
+        let hurry = app.mail.hurried(&acc.id);
         replay(app, acc, &mut s, has_move, has_uidplus).await?;
-        let folders = folders(app, acc, &mut s).await?;
+        let mut folders = folders(app, acc, &mut s).await?;
+        // The inbox, then the folders asked for (Refresh, on the folder shown).
+        folders.sort_by_key(|f| (f.remote != "INBOX", !hurry.contains(&f.remote)));
+        let ahead = folders.iter().take_while(|f| f.remote == "INBOX" || hurry.contains(&f.remote)).count();
         let mut fetched = 0;
         let first = app.mail.status(&acc.id).is_none_or(|(ok, _, _)| !ok);
         for (i, f) in folders.iter().enumerate() {
+            if i == ahead {
+                app.mail.pass(&acc.id, Pass::Ahead);
+            }
             if first {
                 let name = mutf7::decode(&f.remote);
                 app.mail.set_status(&acc.id, true, &format!("connected, fetching mail: folder {} of {} ({name}), {fetched} messages so far", i + 1, folders.len()));
             }
-            fetched += sync_folder(app, acc, &mut s, f).await?;
+            let before = seen.remove(&f.remote);
+            let (added, now) = sync_folder(app, acc, &mut s, f, condstore, before).await?;
+            fetched += added;
+            if let Some(now) = now {
+                seen.insert(f.remote.clone(), now);
+            }
+        }
+        if ahead == folders.len() {
+            app.mail.pass(&acc.id, Pass::Ahead);
         }
         app.mail.set_status(&acc.id, true, &format!("{} folders in sync{}", folders.len(), if fetched > 0 { format!(", {fetched} new") } else { String::new() }));
-        app.mail.pass(&acc.id, true);
+        app.mail.pass(&acc.id, Pass::Finish);
         // Ops queued while syncing go out before waiting.
         if !app.mail.ops(&acc.id).is_empty() {
             continue;
@@ -108,7 +143,14 @@ async fn session(app: &Arc<App>, acc: &Account) -> Result<()> {
             }
             continue;
         }
-        s.select("INBOX").await?;
+        // What came into the inbox since its turn in this pass (IDLE only
+        // tells of what comes after it starts) calls for another pass.
+        let inbox = select(&mut s, "INBOX", condstore).await?;
+        if !again && seen.get("INBOX").is_some_and(|f| *f != seen_of(&inbox)) {
+            again = true;
+            continue;
+        }
+        again = false;
         let mut idle = s.idle();
         idle.init().await?;
         {
@@ -180,12 +222,22 @@ async fn folders(app: &App, acc: &Account, s: &mut Imap) -> Result<Vec<Folder>> 
     Ok(out)
 }
 
-/// Brings one folder in line with the provider; returns how many new messages.
-async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder) -> Result<usize> {
-    let mb = match s.select(&f.remote).await {
+async fn select(s: &mut Imap, remote: &str, condstore: bool) -> async_imap::error::Result<async_imap::types::Mailbox> {
+    if condstore { s.select_condstore(remote).await } else { s.select(remote).await }
+}
+
+fn seen_of(mb: &async_imap::types::Mailbox) -> Seen {
+    Seen { exists: mb.exists, uid_next: mb.uid_next, modseq: mb.highest_modseq }
+}
+
+/// Brings one folder in line with the provider; returns how many new
+/// messages, and the folder as seen (when synced). `before`: as seen at the
+/// session's last pass.
+async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder, condstore: bool, mut before: Option<Seen>) -> Result<(usize, Option<Seen>)> {
+    let mb = match select(s, &f.remote, condstore).await {
         Ok(mb) => mb,
         // Deleted since it was listed: the next round forgets it.
-        Err(async_imap::error::Error::No(_)) => return Ok(0),
+        Err(async_imap::error::Error::No(_)) => return Ok((0, None)),
         Err(e) => return Err(e.into()),
     };
     let validity = mb.uid_validity.unwrap_or(0);
@@ -193,9 +245,11 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder) ->
     if known.is_some_and(|v| v != validity) {
         app.mail.reset_mailbox(f.mailbox)?;
         last = 0;
+        before = None;
     }
-    // A first fetch brings old mail: nothing to tell of.
-    let first = last == 0;
+    // A first fetch brings old mail: nothing to tell of. (A folder empty
+    // until now has `last` 0 too, but what comes into it is new.)
+    let first = known != Some(validity);
     let mut new_uids: Vec<u32> = if last == 0 {
         let since = util::imap_date(now() - acc.history_days as i64 * 86400);
         s.uid_search(format!("SINCE {since}")).await?.into_iter().collect()
@@ -233,9 +287,29 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder) ->
         app.mail.set_remote_state(f.mailbox, validity, last)?;
     }
 
-    // Flags and deletions on the provider's side.
+    // Flags and deletions on the provider's side. With CONDSTORE, when no
+    // message left (as many now as before, plus the new ones), only the
+    // flags changed since are fetched, if any.
     let rows = app.mail.remote_rows(f.mailbox);
-    if let Some(min) = rows.iter().map(|r| r.1).min() {
+    let now = seen_of(&mb);
+    let since = before.filter(|b| condstore && b.modseq.is_some() && now.exists as usize == b.exists as usize + new_uids.len()).and_then(|b| b.modseq);
+    if since.is_some() && since == now.modseq {
+        return Ok((added, Some(now)));
+    }
+    if let (Some(since), Some(min)) = (since, rows.iter().map(|r| r.1).min()) {
+        let fetches: Vec<_> = s.uid_fetch(format!("{min}:*"), format!("(UID FLAGS) (CHANGEDSINCE {since})")).await?.try_collect().await?;
+        let ids: HashMap<u32, (i64, &Vec<String>)> = rows.iter().map(|(id, uid, flags)| (*uid, (*id, flags))).collect();
+        for m in &fetches {
+            let Some((id, flags)) = m.uid.and_then(|u| ids.get(&u)) else { continue };
+            let mut a: Vec<String> = m.flags().filter_map(|f| flag_text(&f)).collect();
+            let mut b = (*flags).clone();
+            a.sort();
+            b.sort();
+            if a != b {
+                app.mail.sync_flags(*id, &a)?;
+            }
+        }
+    } else if let Some(min) = rows.iter().map(|r| r.1).min() {
         let fetches: Vec<_> = s.uid_fetch(format!("{min}:*"), "(UID FLAGS)").await?.try_collect().await?;
         let remote: HashMap<u32, Vec<String>> =
             fetches.iter().filter_map(|m| Some((m.uid?, m.flags().filter_map(|f| flag_text(&f)).collect()))).collect();
@@ -254,7 +328,7 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder) ->
             }
         }
     }
-    Ok(added)
+    Ok((added, Some(now)))
 }
 
 fn is_refusal(e: &async_imap::error::Error) -> bool {
