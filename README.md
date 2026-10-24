@@ -102,12 +102,25 @@ service worker keeps the pages you open and the calendar from a month back to
 six months ahead, so they stay readable offline (marked so; changes wait for a
 connection). Logging out forgets them.
 
+**Notifications of new mail**: turn them on per device in Settings →
+Overview → Notifications (on an iPhone or iPad, from valet added to the Home
+Screen). Each message come into an inbox, unread, shows at once: who it's
+from, the subject and its first words, with *Mark as read*; several at once
+make one notification. They come by Web Push, encrypted for the browser
+through its vendor's push service (valet makes its own VAPID key, kept in
+`valet.db`). The same page lists the devices where they're on; logging out
+on a device stops its notifications.
+
 **Android**: `android/` is valet's own app, the same site in a window plus
 what a site can't do: **alarms that ring** (full screen over the lock screen,
 until stopped or snoozed) for the alerts of patterns marked *Ring like an
 alarm*. The phone sets them a week ahead from valet's list, so they ring
 offline too, and looks again every few hours, after a restart, and when
-events or patterns change. It needs no Play Store and no developer account:
+events or patterns change. And **notifications of new mail**, as above: its
+window can't receive Web Push, so it asks valet about every quarter of an
+hour, which needs no Google account or Firebase (Android's settings for the
+app turn them off: Notifications → New mail). It needs no Play Store and no
+developer account:
 
 ```sh
 android/install.sh                 # builds, and installs on the phone if it doesn't have this build yet
@@ -224,4 +237,5 @@ e2e/run_mail_e2e.sh <dir>   # IMAP; leaves <dir>/mdata for run_ui.sh
 e2e/run_ui.sh <dir>         # the tree editor's routes
 e2e/run_webmail.sh <dir>
 e2e/run_calendar.sh <dir>   # the calendar page and the app; with Chrome, also in a headless Chrome, offline included
+e2e/run_notify.sh <dir>     # new mail told; CHROME_PUSH=1: real Web Push in a headless Chrome (needs the internet)
 ```

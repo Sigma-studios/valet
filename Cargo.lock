@@ -2428,6 +2428,7 @@ dependencies = [
  "ammonia",
  "anyhow",
  "async-imap",
+ "aws-lc-rs",
  "axum",
  "base64",
  "chrono",

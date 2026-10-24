@@ -1,5 +1,6 @@
 // valet's service worker: pages and calendar months seen online stay
 // readable offline (as they were then). Nothing is sent or changed offline.
+// Where notifications are on, it shows new mail valet pushes.
 const VERSION = '__VERSION__';
 const SHELL = `valet-shell-${VERSION}`;
 const PAGES = 'valet-pages';
@@ -20,6 +21,16 @@ self.addEventListener('activate', (e) => {
 });
 
 const forget = () => Promise.all([caches.delete(PAGES), caches.delete(DATA)]);
+
+const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+// Logged out: this device isn't told of new mail any more.
+async function unsubscribe() {
+  const sub = await self.registration.pushManager?.getSubscription();
+  if (!sub) return;
+  await post('/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {});
+  await sub.unsubscribe();
+}
 
 async function trim(cache, max) {
   const keys = await cache.keys();
@@ -68,7 +79,7 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return;
   if (req.method !== 'GET') {
     // Logging out forgets what this device kept.
-    if (url.pathname === '/logout') e.respondWith(forget().then(() => fetch(req)));
+    if (url.pathname === '/logout') e.respondWith(Promise.all([forget(), unsubscribe().catch(() => {})]).then(() => fetch(req)));
     return;
   }
   if (NEVER.some((r) => r.test(url.pathname))) return;
@@ -83,4 +94,48 @@ self.addEventListener('fetch', (e) => {
   if (req.mode === 'navigate' || /^\/msg\/\d+\/html$/.test(url.pathname)) {
     e.respondWith(networkFirst(req, PAGES, req.mode === 'navigate', 200));
   }
+});
+
+// New mail (see notify.rs): who it's from, the subject and first words.
+const ICON = PRECACHE.find((u) => u.includes('icon-192.png'));
+
+self.addEventListener('push', (e) => {
+  let n = {};
+  try { n = e.data ? e.data.json() : {}; } catch (_) {}
+  const opts = { body: n.body || '', tag: n.tag || 'mail', icon: ICON, timestamp: Date.now(), data: { url: n.url || '/inbox', message: n.message } };
+  if (n.message) opts.actions = [{ action: 'read', title: 'Mark as read' }];
+  e.waitUntil(self.registration.showNotification(n.account ? `${n.title || 'valet'} · ${n.account}` : n.title || 'valet', opts));
+});
+
+// Opens the message in valet's window if there is one, else in a new one.
+self.addEventListener('notificationclick', (e) => {
+  const n = e.notification, d = n.data || {};
+  n.close();
+  if (e.action === 'read') {
+    e.waitUntil(fetch(`/msg/${d.message}/seen`, { method: 'POST' }).catch(() => {}));
+    return;
+  }
+  e.waitUntil((async () => {
+    const url = new URL(d.url || '/inbox', self.location.origin).href;
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const w = wins.find((c) => new URL(c.url).origin === self.location.origin);
+    if (w) {
+      try {
+        await w.focus();
+        await w.navigate(url);
+        return;
+      } catch (_) {}
+    }
+    await self.clients.openWindow(url);
+  })());
+});
+
+// The browser renewed the subscription: valet learns the new one.
+self.addEventListener('pushsubscriptionchange', (e) => {
+  e.waitUntil((async () => {
+    const old = e.oldSubscription, key = old?.options?.applicationServerKey;
+    const sub = e.newSubscription || (key && await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+    if (old) await post('/push/unsubscribe', { endpoint: old.endpoint }).catch(() => {});
+    if (sub) await post('/push/subscribe', sub.toJSON());
+  })());
 });
