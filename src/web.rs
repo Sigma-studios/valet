@@ -47,6 +47,11 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/connect", get(connect_page))
         .route("/mail", get(mail_page))
         .route("/mail/status", get(mail_status))
+        .route("/mail/new.json", get(push::new_mail))
+        .route("/push/subscribe", post(push::subscribe))
+        .route("/push/unsubscribe", post(push::unsubscribe))
+        .route("/push/test", post(push::test))
+        .route("/push/remove", post(push::remove))
         .route("/mail/accounts/new", get(new_account_page).post(create_account))
         .route("/mail/accounts/{id}", get(edit_account_page).post(update_account))
         .route("/mail/accounts/{id}/delete", post(delete_account))
@@ -98,6 +103,7 @@ macro_rules! guard {
 
 mod assets;
 mod calendar;
+mod push;
 mod webmail;
 
 /// The app, for what every page shows (the count of invitations waiting).
@@ -364,6 +370,7 @@ async fn home(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> Respo
             }
             p.muted.small { "Turn off your apps' own default alerts, or valet will see them as alerts you set yourself." }
         }
+        (push::section(&app))
         h2 { "Calendars" }
         @if calendars.is_empty() {
             p.muted { "No calendar yet. " a href="/calendars" { "Create one" } " or " a href="/import" { "import" } " your existing ones." }

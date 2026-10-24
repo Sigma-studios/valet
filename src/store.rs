@@ -52,6 +52,17 @@ pub enum PutError {
     NoCalendar,
 }
 
+/// A browser's Web Push subscription (keys as it gives them, base64url).
+#[derive(Clone, Debug)]
+pub struct Push {
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    /// The browser's User-Agent, to tell devices apart.
+    pub agent: String,
+    pub created: i64,
+}
+
 pub struct Put {
     pub etag: String,
     pub created: bool,
@@ -77,6 +88,8 @@ CREATE TABLE IF NOT EXISTS patterns (
 CREATE TABLE IF NOT EXISTS choices (
     calendar TEXT NOT NULL, uid TEXT NOT NULL, pattern INTEGER NOT NULL, PRIMARY KEY (calendar, uid));
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS push (
+    endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, agent TEXT NOT NULL, created INTEGER NOT NULL);
 ";
 
 const CAL_COLS: &str = "id, name, color, description, ord, default_timed, default_allday, rev";
@@ -205,6 +218,33 @@ impl Store {
         let c = self.db();
         c.execute("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = ?2", [key, value])?;
         Ok(())
+    }
+
+    // Web Push subscriptions: a browser where new mail notifies
+
+    /// Adds the subscription, or renews it (same endpoint, new keys).
+    pub fn put_push(&self, p: &Push) -> Result<()> {
+        let c = self.db();
+        c.execute(
+            "INSERT INTO push (endpoint, p256dh, auth, agent, created) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (endpoint) DO UPDATE SET p256dh = ?2, auth = ?3, agent = ?4",
+            params![p.endpoint, p.p256dh, p.auth, p.agent, p.created],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_push(&self, endpoint: &str) -> Result<bool> {
+        let c = self.db();
+        Ok(c.execute("DELETE FROM push WHERE endpoint = ?1", [endpoint])? > 0)
+    }
+
+    pub fn pushes(&self) -> Vec<Push> {
+        let c = self.db();
+        let mut st = c.prepare("SELECT endpoint, p256dh, auth, agent, created FROM push ORDER BY created").unwrap();
+        st.query_map([], |r| Ok(Push { endpoint: r.get(0)?, p256dh: r.get(1)?, auth: r.get(2)?, agent: r.get(3)?, created: r.get(4)? }))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
     }
 
     // Calendars

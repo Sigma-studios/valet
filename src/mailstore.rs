@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS invites (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, uid TEXT NOT NULL, method TEXT NOT NULL, sequence INTEGER NOT NULL,
     summary TEXT NOT NULL, organizer TEXT NOT NULL, dtstart TEXT NOT NULL, ics TEXT NOT NULL,
     response TEXT, received INTEGER NOT NULL, UNIQUE (account, uid, method, sequence));
+CREATE TABLE IF NOT EXISTS arrivals (seq INTEGER PRIMARY KEY AUTOINCREMENT, message INTEGER NOT NULL, at INTEGER NOT NULL);
 ";
 
 /// Mailboxes, with a node's special use taken from the tree.
@@ -595,6 +596,38 @@ impl MailStore {
         };
         let (account, remote) = self.remote_of(folder).context("no such folder")?;
         Ok((folder, account, remote))
+    }
+
+    /// `row`'s row in `mailbox`, a node gathering its folder (itself if it is in `mailbox`).
+    pub fn row_in(&self, mailbox: i64, row: i64) -> Option<i64> {
+        let c = self.db();
+        c.query_row("SELECT id FROM messages WHERE mailbox = ?1 AND (id = ?2 OR link = ?2)", params![mailbox, row], |r| r.get(0)).optional().unwrap()
+    }
+
+    // Arrivals: messages just come in, to tell of (see `crate::notify`).
+
+    /// Notes messages (real rows) as just come in; forgets those of more than three days ago.
+    pub fn add_arrivals(&self, ids: &[i64]) -> Result<()> {
+        let c = self.db();
+        let t = now();
+        c.execute("DELETE FROM arrivals WHERE at < ?1", [t - 3 * 86400])?;
+        for id in ids {
+            c.execute("INSERT INTO arrivals (message, at) VALUES (?1, ?2)", params![id, t])?;
+        }
+        Ok(())
+    }
+
+    /// The last arrival's number (0 before the first); numbers only grow.
+    pub fn last_arrival(&self) -> i64 {
+        let c = self.db();
+        c.query_row("SELECT seq FROM sqlite_sequence WHERE name = 'arrivals'", [], |r| r.get(0)).optional().ok().flatten().unwrap_or(0)
+    }
+
+    /// The messages come in after arrival `seq`, in order.
+    pub fn arrivals_after(&self, seq: i64) -> Vec<i64> {
+        let c = self.db();
+        let mut st = c.prepare("SELECT message FROM arrivals WHERE seq > ?1 ORDER BY seq").unwrap();
+        st.query_map([seq], |r| r.get(0)).unwrap().filter_map(Result::ok).collect()
     }
 
     /// The UID `row` (a real row, or one linking to it) has in `mailbox`.

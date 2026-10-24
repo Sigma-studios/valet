@@ -10,6 +10,7 @@ mod invites;
 mod mailstore;
 mod mime;
 mod mutf7;
+mod notify;
 mod smtpd;
 mod store;
 mod sync;

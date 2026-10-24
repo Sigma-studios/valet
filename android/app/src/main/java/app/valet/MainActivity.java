@@ -33,11 +33,14 @@ import android.widget.Toast;
 /**
  * valet's own site, in a window of its own: mail, calendar, settings are the
  * web pages (and work offline as they do in a browser). The app adds alarms
- * that ring, for the alert patterns marked so (see {@link Alarms}).
+ * that ring, for the alert patterns marked so (see {@link Alarms}), and
+ * notifications of new mail (see {@link Mail}).
  */
 public class MainActivity extends Activity {
     static final String PREFS = "valet";
     private static final int FILES = 1;
+    /** The window is in front: new mail shows there, not as notifications. */
+    static volatile boolean shown;
 
     private WebView web;
     private ValueCallback<Uri[]> picking;
@@ -82,6 +85,19 @@ public class MainActivity extends Activity {
             web.loadUrl(start(getIntent()));
         }
         askPermissions();
+        if (server != null) Mail.start(this);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        shown = true;
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        shown = false;
     }
 
     /** The page to open: the one an alarm points to, or the mail. */
@@ -116,13 +132,14 @@ public class MainActivity extends Activity {
                 String url = input.getText().toString().trim().replaceAll("/+$", "");
                 if (!url.startsWith("http")) url = "https://" + url;
                 server = url;
-                prefs(this).edit().putString("server", url).apply();
+                prefs(this).edit().putString("server", url).remove("mail_after").apply();
                 web.loadUrl(server + "/inbox");
+                Mail.start(this);
             })
             .show();
     }
 
-    /** Notifications, exact alarms and full-screen alarms, once. */
+    /** Notifications (alarms, new mail), exact alarms and full-screen alarms, once. */
     private void askPermissions() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 2);
@@ -185,7 +202,10 @@ public class MainActivity extends Activity {
         public void onPageFinished(WebView view, String url) {
             CookieManager.getInstance().flush();
             // Logged in, and maybe changed patterns or events: alarms follow.
-            if (url != null && !url.contains("/login")) Alarms.refreshSoon(MainActivity.this, url.contains("/patterns") || url.contains("/calendar"));
+            if (url != null && !url.contains("/login")) {
+                Alarms.refreshSoon(MainActivity.this, url.contains("/patterns") || url.contains("/calendar"));
+                Mail.firstLook(MainActivity.this);
+            }
         }
     }
 

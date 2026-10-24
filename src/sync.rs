@@ -13,7 +13,7 @@ use futures::TryStreamExt;
 use crate::App;
 use crate::accounts::{self, Account, Imap};
 use crate::mailstore::{Op, account_path, now};
-use crate::{invites, mutf7, util};
+use crate::{invites, mutf7, notify, util};
 
 pub fn start(app: Arc<App>) {
     for acc in app.accounts() {
@@ -74,7 +74,7 @@ fn flag_list(flags: &[String]) -> String {
     format!("({})", f.join(" "))
 }
 
-async fn session(app: &App, acc: &Account) -> Result<()> {
+async fn session(app: &Arc<App>, acc: &Account) -> Result<()> {
     let mut s = accounts::imap(acc, &app.mail).await?;
     tracing::info!(account = %acc.id, "logged in");
     let caps = s.capabilities().await?;
@@ -181,7 +181,7 @@ async fn folders(app: &App, acc: &Account, s: &mut Imap) -> Result<Vec<Folder>> 
 }
 
 /// Brings one folder in line with the provider; returns how many new messages.
-async fn sync_folder(app: &App, acc: &Account, s: &mut Imap, f: &Folder) -> Result<usize> {
+async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder) -> Result<usize> {
     let mb = match s.select(&f.remote).await {
         Ok(mb) => mb,
         // Deleted since it was listed: the next round forgets it.
@@ -194,6 +194,8 @@ async fn sync_folder(app: &App, acc: &Account, s: &mut Imap, f: &Folder) -> Resu
         app.mail.reset_mailbox(f.mailbox)?;
         last = 0;
     }
+    // A first fetch brings old mail: nothing to tell of.
+    let first = last == 0;
     let mut new_uids: Vec<u32> = if last == 0 {
         let since = util::imap_date(now() - acc.history_days as i64 * 86400);
         s.uid_search(format!("SINCE {since}")).await?.into_iter().collect()
@@ -205,22 +207,27 @@ async fn sync_folder(app: &App, acc: &Account, s: &mut Imap, f: &Folder) -> Resu
     new_uids.sort_unstable();
     let mut added = 0;
     for chunk in new_uids.chunks(25) {
+        let mut arrived = Vec::new();
         let set: Vec<String> = chunk.iter().map(u32::to_string).collect();
         let fetches: Vec<_> = s.uid_fetch(set.join(","), "(UID FLAGS INTERNALDATE BODY.PEEK[])").await?.try_collect().await?;
         for m in &fetches {
             let (Some(uid), Some(body)) = (m.uid, m.body()) else { continue };
             let flags: Vec<String> = m.flags().filter_map(|f| flag_text(&f)).collect();
             let date = m.internal_date().map(|d| d.timestamp()).unwrap_or_else(now);
-            let (_, new) = app.mail.add_fetched(f.mailbox, body, &flags, date, uid)?;
+            let (id, new) = app.mail.add_fetched(f.mailbox, body, &flags, date, uid)?;
             if new {
                 added += 1;
                 if f.remote == "INBOX" {
                     invites::from_mail(app, acc, body);
+                    if !first && !flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")) {
+                        arrived.push(id);
+                    }
                 }
             }
             last = last.max(uid);
         }
         app.mail.set_remote_state(f.mailbox, validity, last)?;
+        notify::arrived(app, &arrived);
     }
     if new_uids.is_empty() {
         app.mail.set_remote_state(f.mailbox, validity, last)?;
