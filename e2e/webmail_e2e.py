@@ -3,6 +3,8 @@
 import re
 import time
 
+import requests
+
 from common import (WEB, check, flash, gm_folders, gm_imap, gm_subjects, members_on_page, message, node_id, q, rows,
                     subjects, valet_imap, wait)
 
@@ -30,6 +32,14 @@ def main():
     r = s.post(f"{WEB}/mail/refresh")
     check(r.ok and r.json()["done"], f"Refresh waits for every account's pass: {r.text}")
     check("fresh-one" in rows(s, node_id(s, "Projects")), "the new message is listed when it answers")
+    # From the folder shown: it is synced right after the inboxes, and told.
+    g = gm_imap("org")
+    g.append("Projects", None, None, message("fresh-two", to="org@local.test"))
+    g.logout()
+    r = s.post(f"{WEB}/mail/refresh", params={"folder": node_id(s, "Projects")})
+    check(r.ok and r.json() == {"done": True, "failed": [], "waiting": []}, f"Refresh of a folder answers: {r.text}")
+    check("fresh-two" in rows(s, node_id(s, "Projects")), "the folder shown is in sync when it answers")
+    check('data-folder="' in s.get(f"{WEB}/box/{inbox}").text, "the button names the folder shown")
     in_box = rows(s, inbox)
     view = s.get(f"{WEB}/msg/{in_box['hello-1']}").text
     check('<optgroup label="Your folders">' in view and '<optgroup label="Accounts › Test">' in view, "Move to… offers the tree, then the account's folders")
@@ -154,6 +164,17 @@ def main():
     time.sleep(2)
     check(len(gm_subjects("org", "INBOX")) == sent_before, "no answer reached the organizer")
     m.logout()
+
+    # Open pages are told of changes, to fetch their list again.
+    check(requests.get(f"{WEB}/mail/events", timeout=10).status_code == 401, "changes are told only when logged in")
+    ev = s.get(f"{WEB}/mail/events", stream=True, timeout=10)
+    check(ev.headers["content-type"].startswith("text/event-stream"), "as server-sent events")
+    g = gm_imap("test")
+    g.append("INBOX", None, None, message("told-live"))
+    g.logout()
+    told = next((l for l in ev.iter_lines(chunk_size=1, decode_unicode=True) if l == "event: changed"), None)
+    ev.close()
+    check(told, "mail come in is told")
 
 
 main()

@@ -127,24 +127,88 @@ fn indent(depth: usize) -> String {
     "\u{a0}\u{a0}\u{a0}".repeat(depth)
 }
 
-/// Folders start closed, but for the way to the one shown; what is opened
-/// stays open from page to page until the browser is closed.
+/// The list follows the mail: told by `/mail/events` that something
+/// changed, it fetches itself again and swaps in place (with the unread
+/// counts), so what is ticked, scrolled to and open stays. Refresh checks the
+/// accounts first (the folder shown right after the inboxes) and says what
+/// came of it beside the button.
 const REFRESH_SCRIPT: &str = r#"
 {
-  const b = document.querySelector('button.refresh');
+  const b = document.querySelector('button.refresh'), note = document.querySelector('.refresh-note');
+  const say = (text, bad) => { note.textContent = text; note.classList.toggle('err', !!bad); };
+  // Swaps the list in; answers how many rows are new, or where valet sent the page instead.
+  const swap = async () => {
+    const split = document.querySelector('.split');
+    const page = await fetch(split.dataset.list, { cache: 'no-store' });
+    if (page.redirected) return { gone: page.url };
+    if (!page.ok) throw new Error(page.status);
+    const doc = new DOMParser().parseFromString(await page.text(), 'text/html');
+    const col = split.querySelector('.listcol'), fresh = doc.querySelector('.listcol');
+    let added = 0;
+    if (col && fresh) {
+      const before = new Set([...col.querySelectorAll('a.link')].map((a) => a.dataset.id));
+      const ticked = new Set([...col.querySelectorAll('input[name=id]:checked')].map((i) => i.value));
+      const open = col.querySelector('.row.open a.link')?.dataset.id;
+      col.replaceChildren(...fresh.childNodes);
+      for (const i of col.querySelectorAll('input[name=id]')) i.checked = ticked.has(i.value);
+      const a = open && col.querySelector(`a.link[data-id="${open}"]`);
+      if (a) { a.closest('.row').classList.add('open'); a.href = split.dataset.list; }
+      valetTimes(col);
+      document.dispatchEvent(new Event('valet:list'));
+      added = [...col.querySelectorAll('a.link')].filter((a) => !before.has(a.dataset.id)).length;
+    }
+    for (const a of document.querySelectorAll('nav.folders a.folder')) {
+      const badge = doc.querySelector(`nav.folders a.folder[href="${a.getAttribute('href')}"] .badge`);
+      a.querySelector('.badge')?.remove();
+      if (badge) a.append(badge);
+    }
+    return { added };
+  };
+  // One swap at a time; changes told during one make one more after it.
+  let chain = Promise.resolve(), next = null;
+  const update = () => {
+    if (!next) next = chain = chain.catch(() => {}).then(() => { next = null; return swap(); });
+    return next;
+  };
   b.addEventListener('click', async () => {
-    if (!navigator.onLine) { alert("You're offline: new mail can be checked once you're back online."); return; }
+    if (!navigator.onLine) { say("You're offline: new mail can be checked once you're back online.", true); return; }
     b.disabled = true;
     b.textContent = '↻ Checking…';
+    say('');
     try {
-      const r = await fetch('/mail/refresh', { method: 'POST' });
+      const r = await fetch(`/mail/refresh?folder=${b.dataset.folder}`, { method: 'POST' });
       if (r.status === 401) { location = '/login'; return; }
-    } catch (_) {}
-    location.reload();
+      const res = await r.json();
+      const { added, gone } = await update();
+      if (gone) { location = gone; return; }
+      const told = res.failed.map((f) => `${f.account}: ${f.error}`);
+      if (res.waiting.length) told.push(`still checking ${res.waiting.join(', ')}`);
+      if (!told.length) told.push(added ? `${added} new` : 'Up to date');
+      say(told.join(' · '), res.failed.length > 0);
+    } catch (_) {
+      say("Couldn't check: valet didn't answer.", true);
+    } finally {
+      b.disabled = false;
+      b.textContent = '↻ Refresh';
+    }
   });
+  // Live: a hidden page catches up when shown again.
+  let behind = false;
+  const changed = () => {
+    if (document.hidden) { behind = true; return; }
+    update().then((r) => { if (r.gone) events.close(); }, () => {});
+  };
+  const events = new EventSource('/mail/events');
+  events.addEventListener('changed', changed);
+  // Back after a break (valet restarted, the network dropped): what changed meanwhile.
+  let connected = false;
+  events.addEventListener('open', () => { if (connected) changed(); connected = true; });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && behind) { behind = false; changed(); } });
 }
 "#;
 
+/// Folders start closed, but for the way to the one shown; what is opened
+/// stays open from page to page until the browser is closed.
 const SIDEBAR_SCRIPT: &str = r#"
 (() => {
   const nav = document.querySelector('nav.folders');
@@ -292,6 +356,7 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .toolbar.msg-actions { gap:5px; }
 .toolbar.msg-actions :is(a.button, button, select) { padding:4px 7px; font-size:14px; }
 .toolbar button.refresh { white-space:nowrap; }
+.toolbar .refresh-note:empty { display:none; }
 /* The toolbar: refresh and search, or, while messages are ticked, what to do with them. */
 .toolbar .normal, .toolbar .bulk-actions { flex:1; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
 .toolbar .bulk-actions { display:none; }
@@ -442,7 +507,8 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         (flash_of(&q))
         form.toolbar method="get" action={"/box/" (id)} {
             span.normal {
-                button.refresh type="button" title="Check every account for new mail now" { "↻ Refresh" }
+                button.refresh type="button" data-folder=(id) title="Check every account for new mail now, this folder first" { "↻ Refresh" }
+                span.refresh-note.small.muted role="status" {}
                 input type="search" name="q" value=(q.q) placeholder={"Search " (title)};
                 @if !q.q.is_empty() { a.button href={"/box/" (id)} { "Clear" } }
             }
@@ -597,30 +663,33 @@ pub async fn mark_seen(State(app): St, headers: HeaderMap, Path(id): Path<i64>) 
 /// Ticking messages: the count, all of the page, a range with Shift.
 const BULK_SCRIPT: &str = r#"
 {
-  const boxes = [...document.querySelectorAll('#bulk input[name=id]')], all = document.getElementById('pickall');
+  // The list's boxes, looked up each time: Refresh swaps the list in place.
+  const boxes = () => [...document.querySelectorAll('#bulk input[name=id]')], all = document.getElementById('pickall');
   const count = document.querySelector('.bulk-actions .count');
   const sync = () => {
-    const n = boxes.filter((b) => b.checked).length;
+    const bs = boxes(), n = bs.filter((b) => b.checked).length;
     count.textContent = `${n} selected`;
-    all.checked = n > 0 && n === boxes.length;
-    all.indeterminate = n > 0 && n < boxes.length;
-    for (const b of boxes) b.closest('.row').classList.toggle('picked', b.checked);
+    all.checked = n > 0 && n === bs.length;
+    all.indeterminate = n > 0 && n < bs.length;
+    for (const b of bs) b.closest('.row').classList.toggle('picked', b.checked);
   };
   let last = null;
-  for (const b of boxes) {
-    b.addEventListener('click', (e) => {
-      if (e.shiftKey && last) {
-        const [i, j] = [boxes.indexOf(last), boxes.indexOf(b)].sort((x, y) => x - y);
-        for (const x of boxes.slice(i, j + 1)) x.checked = b.checked;
-      }
-      last = b;
-      sync();
-    });
-  }
-  all?.addEventListener('change', () => { for (const b of boxes) b.checked = all.checked; sync(); });
-  document.getElementById('pick-none')?.addEventListener('click', () => { for (const b of boxes) b.checked = false; sync(); });
+  document.querySelector('.split').addEventListener('click', (e) => {
+    const b = e.target.closest('#bulk input[name=id]');
+    if (!b) return;
+    const bs = boxes();
+    if (e.shiftKey && last && bs.includes(last)) {
+      const [i, j] = [bs.indexOf(last), bs.indexOf(b)].sort((x, y) => x - y);
+      for (const x of bs.slice(i, j + 1)) x.checked = b.checked;
+    }
+    last = b;
+    sync();
+  });
+  document.addEventListener('valet:list', sync);
+  all?.addEventListener('change', () => { for (const b of boxes()) b.checked = all.checked; sync(); });
+  document.getElementById('pick-none')?.addEventListener('click', () => { for (const b of boxes()) b.checked = false; sync(); });
   document.querySelector('button[value=delete][form=bulk]')?.addEventListener('click', (e) => {
-    const n = boxes.filter((b) => b.checked).length;
+    const n = boxes().filter((b) => b.checked).length;
     if (!confirm(`Delete ${n} message${n > 1 ? 's' : ''}? They go to the Trash (from the Trash itself, for good).`)) e.preventDefault();
   });
   sync();
@@ -1805,29 +1874,83 @@ fn forget_draft(app: &App, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tells an open webmail page that some mail changed (it then fetches its
+/// list again), as server-sent events; ends when valet stops.
+pub async fn events(State(app): St, headers: HeaderMap) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    if !authed(&app, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let changes = app.mail.changed.subscribe();
+    let stopping = app.stopping.subscribe();
+    let stream = futures::stream::unfold((changes, stopping), |(mut changes, mut stopping)| async move {
+        if *stopping.borrow() {
+            return None;
+        }
+        tokio::select! {
+            r = changes.recv() => if let Err(RecvError::Closed) = r { return None },
+            _ = stopping.changed() => return None,
+        }
+        // Let a burst settle (a sync brings messages 25 at a time).
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        while !matches!(changes.try_recv(), Err(TryRecvError::Empty | TryRecvError::Closed)) {}
+        // (An event without data isn't dispatched.)
+        Some((Ok::<_, std::convert::Infallible>(Event::default().event("changed").data("1")), (changes, stopping)))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RefreshQuery {
+    /// The folder shown, synced right after the inboxes.
+    folder: Option<i64>,
+}
+
 /// Checks every account for new mail now: wakes their syncs and answers
-/// once each has been through its folders (or after 30 seconds).
-pub async fn refresh(State(app): St, headers: HeaderMap) -> Response {
+/// once each has been through its inbox and the real folders of `folder`
+/// (with none given, through all its folders), or has failed, or after 30
+/// seconds. Says which failed, and which it stopped waiting for.
+pub async fn refresh(State(app): St, headers: HeaderMap, Query(q): Query<RefreshQuery>) -> Response {
     if !authed(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "logged out" }))).into_response();
     }
-    let start = crate::mailstore::now();
-    // A pass started after this finishes once more passes have finished
-    // than had started now; an account failing says so in its status.
-    let accounts: Vec<(String, u64)> = app.accounts().into_iter().map(|a| { let started = app.mail.passes(&a.id).0; (a.id, started) }).collect();
-    for (id, _) in &accounts {
-        app.mail.waker(id).notify_one();
-    }
-    let done = |app: &App| {
-        accounts.iter().all(|(id, started)| {
-            app.mail.passes(id).1 > *started || app.mail.status(id).is_some_and(|(ok, _, at)| !ok && at >= start)
-        })
+    let shown: Vec<Mailbox> = match q.folder.and_then(|id| app.mail.mailbox(id)) {
+        Some(b) if b.is_node() => app.mail.node(b.id).map(|n| n.members).unwrap_or_default().into_iter().filter_map(|m| app.mail.mailbox(m)).collect(),
+        Some(b) => vec![b],
+        None => Vec::new(),
     };
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !done(&app) && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    for b in shown {
+        if let (Some(account), Some(remote)) = (b.account, b.remote) {
+            app.mail.hurry(&account, [remote]);
+        }
     }
-    axum::Json(serde_json::json!({ "done": done(&app) })).into_response()
+    let whole = q.folder.is_none();
+    let mut passed = app.mail.passed();
+    // A pass started after this is one that started later than any had
+    // started now (and took the folders asked for).
+    let accounts: Vec<(Account, crate::mailstore::Passes)> = app.accounts().into_iter().map(|a| { let then = app.mail.passes(&a.id); (a, then) }).collect();
+    for (a, _) in &accounts {
+        app.mail.waker(&a.id).notify_one();
+    }
+    let synced = |a: &Account, then: &crate::mailstore::Passes| {
+        let p = app.mail.passes(&a.id);
+        if whole { p.finished > then.started } else { p.ahead > then.started }
+    };
+    let failed = |a: &Account, then: &crate::mailstore::Passes| !synced(a, then) && app.mail.passes(&a.id).failed > then.failed;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !accounts.iter().all(|(a, then)| synced(a, then) || failed(a, then)) {
+        if !matches!(tokio::time::timeout_at(deadline, passed.changed()).await, Ok(Ok(()))) {
+            break;
+        }
+    }
+    let failures: Vec<_> = accounts
+        .iter()
+        .filter(|(a, then)| failed(a, then))
+        .map(|(a, _)| serde_json::json!({ "account": a.name, "error": app.mail.status(&a.id).map(|s| s.1).unwrap_or_default() }))
+        .collect();
+    let waiting: Vec<&str> = accounts.iter().filter(|(a, then)| !synced(a, then) && !failed(a, then)).map(|(a, _)| a.name.as_str()).collect();
+    axum::Json(serde_json::json!({ "done": waiting.is_empty(), "failed": failures, "waiting": waiting })).into_response()
 }
 
 /// Saves the form as a draft in the From account's Drafts folder, replacing
