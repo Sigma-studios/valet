@@ -110,13 +110,20 @@ offline too, and looks again every few hours, after a restart, and when
 events or patterns change. It needs no Play Store and no developer account:
 
 ```sh
-cd android
-./gradlew assembleDebug            # Android Studio's JDK: JAVA_HOME=…/Android Studio.app/Contents/jbr/Contents/Home
-adb install -r app/build/outputs/apk/debug/app-debug.apk   # or copy the .apk to the phone and open it
+android/install.sh                 # builds, and installs on the phone if it doesn't have this build yet
 ```
 
-At first launch it asks for valet's address. Updates must be signed with the
-same key (the debug key in `~/.android/`), or the app has to be removed first.
+It finds the phone plugged in (*USB debugging* on, in Developer options) or
+over Wi-Fi: turn on *Wireless debugging* there, and pair once with *Pair device
+with pairing code* and `adb pair <ip:port> <code>`; after that, with wireless
+debugging on and the phone on the same network, adb finds it alone. Or build
+with `./gradlew assembleDebug` (Android Studio's JDK) and copy
+`app/build/outputs/apk/debug/app-debug.apk` to the phone to open it.
+
+At first launch it asks for valet's address. The pages come from valet, so
+only changes to `android/` need installing again: each commit touching it is a
+new build number. Updates must be signed with the same key (the debug key in
+`~/.android/`), or the app has to be removed first.
 
 ## Configuration
 

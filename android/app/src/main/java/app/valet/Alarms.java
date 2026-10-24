@@ -5,6 +5,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
 import android.webkit.CookieManager;
@@ -88,22 +89,28 @@ final class Alarms {
     static synchronized void schedule(Context c, JSONArray list) throws JSONException {
         AlarmManager am = c.getSystemService(AlarmManager.class);
         SharedPreferences p = MainActivity.prefs(c);
-        for (int i = 0, n = p.getInt("scheduled", 0); i < n; i++) am.cancel(ring(c, i, "", 0));
+        for (int i = 0, n = p.getInt("scheduled", 0); i < n; i++) am.cancel(ring(c, i, new Bundle(), 0));
         long now = System.currentTimeMillis();
         int n = 0;
         for (int i = 0; i < list.length() && n < 100; i++) {
             JSONObject a = list.getJSONObject(i);
             long at = a.getLong("at") * 1000;
             if (at <= now) continue;
-            set(c, at, ring(c, n, a.optString("title"), at));
+            // The event, to say what the alarm is for: its start, an instant or (all day) a date.
+            Bundle about = new Bundle();
+            about.putString("title", a.optString("title"));
+            Object start = a.opt("start");
+            if (start instanceof Number) about.putLong("start", ((Number) start).longValue() * 1000);
+            if (start instanceof String) about.putString("day", (String) start);
+            set(c, at, ring(c, n, about, at));
             n++;
         }
         p.edit().putInt("scheduled", n).apply();
         Log.i(TAG, n + " alarms set");
     }
 
-    static PendingIntent ring(Context c, int code, String title, long at) {
-        Intent i = new Intent(c, AlarmReceiver.class).setAction(AlarmReceiver.RING).putExtra("title", title).putExtra("at", at);
+    static PendingIntent ring(Context c, int code, Bundle about, long at) {
+        Intent i = new Intent(c, AlarmReceiver.class).setAction(AlarmReceiver.RING).putExtras(about).putExtra("at", at);
         return PendingIntent.getBroadcast(c, code, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 

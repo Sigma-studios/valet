@@ -11,9 +11,6 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import java.text.DateFormat;
-import java.util.Date;
-
 /** An alarm, full screen (over the lock screen): Stop or Snooze. */
 public class RingActivity extends Activity {
     @Override
@@ -24,27 +21,30 @@ public class RingActivity extends Activity {
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         int id = getIntent().getIntExtra("id", 0);
-        String title = getIntent().getStringExtra("title");
+        Bundle about = AlarmReceiver.about(getIntent());
         long at = getIntent().getLongExtra("at", System.currentTimeMillis());
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER);
         box.setPadding(48, 48, 48, 48);
-        box.addView(text(DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(at)), 64));
-        box.addView(text(title == null || title.isEmpty() ? "Alarm" : title, 26));
+        // The event's start, what it is, and how far off: "14:30", "Standup", "In 12 minutes".
+        box.addView(text(AlarmReceiver.clock(this, about, at), 64));
+        box.addView(text(AlarmReceiver.title(about), 26));
+        String when = AlarmReceiver.when(about, System.currentTimeMillis());
+        if (!when.isEmpty()) box.addView(text(when, 20));
         Button stop = button("Stop");
         Button snooze = button("Snooze 10 min");
-        stop.setOnClickListener(v -> send(AlarmReceiver.STOP, id, title, at));
-        snooze.setOnClickListener(v -> send(AlarmReceiver.SNOOZE, id, title, at));
+        stop.setOnClickListener(v -> send(AlarmReceiver.STOP, id, about, at));
+        snooze.setOnClickListener(v -> send(AlarmReceiver.SNOOZE, id, about, at));
         box.addView(stop);
         box.addView(snooze);
         setContentView(box);
     }
 
-    private void send(String action, int id, String title, long at) {
+    private void send(String action, int id, Bundle about, long at) {
         try {
-            AlarmReceiver.action(this, action, id, title, at).send();
+            AlarmReceiver.action(this, action, id, about, at).send();
         } catch (Exception ignored) {
         }
         finish();
