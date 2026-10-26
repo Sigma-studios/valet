@@ -306,7 +306,15 @@
     const cal = el('select', { name: 'calendar' },
       mine.map((c) => el('option', { value: c.id, selected: c.id === e.calendar }, c.name)), el('option', { value: '' }, 'Invitations'));
     const err = el('p', { class: 'err small' });
-    const answer = async (a) => {
+    // Emailing the answer takes a few seconds: a spinner meanwhile.
+    const wait = (b, on) => {
+      row.classList.toggle('waiting', on);
+      b.classList.toggle('busy', on);
+      for (const x of row.querySelectorAll('button, select')) x.disabled = on;
+    };
+    const answer = async (a, b) => {
+      err.textContent = '';
+      wait(b, true);
       try {
         const r = await post('/calendar/invite', { invite: e.invite, answer: a, calendar: cal.value });
         // The bar's count of invitations waiting.
@@ -314,14 +322,14 @@
         if (count) r.waiting ? (count.textContent = r.waiting) : count.remove();
         await changed();
       }
-      catch (x) { err.textContent = x.message; }
+      catch (x) { err.textContent = x.message; wait(b, false); }
     };
-    const button = (a, label, attrs = {}) => el('button', { type: 'button', disabled: !online, onclick: () => answer(a), ...attrs }, label);
+    const button = (a, label, attrs = {}) => el('button', { type: 'button', disabled: !online, onclick: (ev) => answer(a, ev.currentTarget), ...attrs }, label);
+    const row = el('div', { class: 'row' }, el('label', {}, 'Put it in', cal),
+      button('ACCEPTED', 'Accept'), button('TENTATIVE', 'Maybe'), button('DECLINED', 'Decline', { class: 'plain' }));
     return el('div', { class: 'answer' },
       el('p', { class: 'small' }, 'Not answered yet: the organizer gets your answer by email.'),
-      el('div', { class: 'row' }, el('label', {}, 'Put it in', cal),
-        button('ACCEPTED', 'Accept'), button('TENTATIVE', 'Maybe'), button('DECLINED', 'Decline', { class: 'plain' })),
-      err);
+      row, err);
   }
 
   async function post(url, data) {

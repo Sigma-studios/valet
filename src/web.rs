@@ -190,6 +190,12 @@ header nav .count { background:var(--bad); color:#fff; border-radius:9px; font-s
 .alert-add { display:flex; gap:6px; flex-wrap:wrap; }
 .alerts-box { display:flex; flex-direction:column; gap:6px; flex-basis:100%; }
 time[title], [data-zone] { cursor:help; }
+/* Waiting on valet (an invitation's answer being emailed): a spinner in the
+   button pressed, the others dimmed until it's done. */
+.waiting button:not(.busy) { opacity:.5; } .waiting button.busy { cursor:progress; }
+button.busy::before { content:""; display:inline-block; width:.8em; height:.8em; margin-right:6px; vertical-align:-.1em;
+  border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
 "#;
 
 fn page(title: &str, on: &str, body: Markup) -> Response {
@@ -1181,7 +1187,7 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
                     None => {},
                 }
             }
-            form.row method="post" action={"/invites/" (i.id)} style="margin-top:10px" {
+            form.row method="post" action={"/invites/" (i.id)} data-busy style="margin-top:10px" {
                 label { "Put it in" select name="calendar" {
                     @for c in &calendars { option value=(c.id) { (c.name) } }
                     option value="" { "Invitations" }

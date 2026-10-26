@@ -41,4 +41,23 @@
     e.stopImmediatePropagation();
     alert("You're offline: this will work once you're back online.");
   }, true);
+  // Forms that take a while (an answer emailed): a spinner in the button
+  // pressed, and no second press meanwhile.
+  document.addEventListener('submit', (e) => {
+    const f = e.target;
+    if (!f.matches('form[data-busy]')) return;
+    if (f.classList.contains('waiting')) { e.preventDefault(); return; }
+    f.classList.add('waiting');
+    e.submitter?.classList.add('busy');
+    // Once the form's values are taken: a disabled button would leave its own out.
+    setTimeout(() => f.querySelectorAll('button, select').forEach((b) => { b.disabled = true; }));
+  });
+  // Back on the page from the browser's cache: usable again.
+  window.addEventListener('pageshow', (e) => {
+    if (!e.persisted) return;
+    document.querySelectorAll('form.waiting').forEach((f) => {
+      f.classList.remove('waiting');
+      f.querySelectorAll('button, select').forEach((b) => { b.disabled = false; b.classList.remove('busy'); });
+    });
+  });
 })();
