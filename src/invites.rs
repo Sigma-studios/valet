@@ -56,14 +56,15 @@ fn master(cal: &Component) -> Option<&Component> {
 
 /// Handles the invitations in a message that just arrived in `acc`'s inbox.
 pub fn from_mail(app: &App, acc: &Account, raw: &[u8]) {
+    let message = crate::mailstore::message_id(raw);
     for text in calendar_parts(raw) {
-        if let Err(e) = handle(app, acc, &text) {
+        if let Err(e) = handle(app, acc, &text, &message) {
             tracing::info!(account = %acc.id, "invitation not handled: {e:#}");
         }
     }
 }
 
-fn handle(app: &App, acc: &Account, text: &str) -> Result<()> {
+fn handle(app: &App, acc: &Account, text: &str, message: &str) -> Result<()> {
     let mut cals = ical::parse(text)?;
     let mut cal = cals.pop().context("no VCALENDAR")?;
     let method = cal.value("METHOD").unwrap_or("").to_ascii_uppercase();
@@ -80,7 +81,7 @@ fn handle(app: &App, acc: &Account, text: &str) -> Result<()> {
     }
     let summary = ev.value("SUMMARY").unwrap_or("").to_string();
     let organizer = ev.value("ORGANIZER").map(mailto).unwrap_or_default();
-    if !app.mail.add_invite(&acc.id, &uid, &method, sequence, &summary, &organizer, &dtstart, text)? {
+    if !app.mail.add_invite(&acc.id, &uid, &method, sequence, &summary, &organizer, &dtstart, text, message)? {
         return Ok(());
     }
     cal.props.retain(|p| p.name != "METHOD");
@@ -122,6 +123,30 @@ fn handle(app: &App, acc: &Account, text: &str) -> Result<()> {
     };
     store.put_object(&calendar, &name, &cal.to_ics(), false).map_err(|e| anyhow::anyhow!("{e:?}"))?;
     Ok(())
+}
+
+/// Once: finds the mail the invitations recorded before valet kept it came
+/// in, a stored message with a calendar part of the same event and version.
+pub fn find_mails(app: &App) {
+    if !app.mail.first_time("invite_mails") || !app.mail.invites_without_mail() {
+        return;
+    }
+    let mut found = 0;
+    for (account, message, blob) in app.mail.account_rows() {
+        let Some(raw) = app.mail.blob(&blob) else { continue };
+        if !raw.windows(8).any(|w| w.eq_ignore_ascii_case(b"calendar")) && !raw.windows(4).any(|w| w.eq_ignore_ascii_case(b"/ics")) {
+            continue;
+        }
+        for text in calendar_parts(&raw) {
+            let Some(cal) = ical::parse(&text).ok().and_then(|mut c| c.pop()) else { continue };
+            let method = cal.value("METHOD").unwrap_or("").to_ascii_uppercase();
+            let Some(ev) = master(&cal) else { continue };
+            let Some(uid) = ev.value("UID") else { continue };
+            let sequence: i64 = ev.value("SEQUENCE").and_then(|s| s.parse().ok()).unwrap_or(0);
+            found += app.mail.set_invite_mail(&account, uid, &method, sequence, &message).unwrap_or(0);
+        }
+    }
+    tracing::info!("found the mail of {found} past invitations");
 }
 
 fn is_me(app: &App, acc: &Account, value: &str) -> bool {

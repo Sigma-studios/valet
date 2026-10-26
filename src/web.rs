@@ -1156,7 +1156,10 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
             div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap" {
                 div {
                     b { (i.summary) }
-                    div.small.muted { (starts(&i.ics)) " · from " (i.organizer) }
+                    div.small.muted {
+                        (starts(&i.ics)) " · from " (i.organizer)
+                        @if let Some(m) = app.mail.message_with_id(&i.account, &i.message) { " · " a href={"/msg/" (m)} { "the mail" } }
+                    }
                     // Before answering: what it would clash with.
                     @if i.response.is_none() {
                         @let clashes = crate::calendar::conflicts(&i.ics, &objects, now);

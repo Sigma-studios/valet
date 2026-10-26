@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS messages (
     remote_uid INTEGER, link INTEGER, modseq INTEGER NOT NULL, UNIQUE (mailbox, uid));
 CREATE INDEX IF NOT EXISTS messages_remote ON messages (mailbox, remote_uid);
 CREATE INDEX IF NOT EXISTS messages_link ON messages (link);
+CREATE INDEX IF NOT EXISTS messages_message_id ON messages (message_id);
 CREATE TABLE IF NOT EXISTS ops (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, op TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS tokens (account TEXT PRIMARY KEY, refresh TEXT NOT NULL, access TEXT, expires INTEGER);
@@ -150,7 +151,7 @@ CREATE INDEX IF NOT EXISTS tree_members_member ON tree_members (member);
 CREATE TABLE IF NOT EXISTS invites (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, uid TEXT NOT NULL, method TEXT NOT NULL, sequence INTEGER NOT NULL,
     summary TEXT NOT NULL, organizer TEXT NOT NULL, dtstart TEXT NOT NULL, ics TEXT NOT NULL,
-    response TEXT, received INTEGER NOT NULL, UNIQUE (account, uid, method, sequence));
+    response TEXT, received INTEGER NOT NULL, message TEXT NOT NULL DEFAULT '', UNIQUE (account, uid, method, sequence));
 CREATE TABLE IF NOT EXISTS arrivals (seq INTEGER PRIMARY KEY AUTOINCREMENT, message INTEGER NOT NULL, at INTEGER NOT NULL);
 ";
 
@@ -211,7 +212,7 @@ pub fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-fn message_id(raw: &[u8]) -> String {
+pub fn message_id(raw: &[u8]) -> String {
     let p = crate::mime::parse(raw);
     p.header(raw, "Message-ID").unwrap_or_default()
 }
@@ -243,6 +244,11 @@ impl MailStore {
                 params![ALL_INBOXES, now() as u32],
             )?;
             tree::migrate(&c)?;
+            // Added later: the Message-ID of the mail an invitation came in.
+            let has_message: bool = c.query_row("SELECT COUNT(*) FROM pragma_table_info('invites') WHERE name = 'message'", [], |r| r.get(0))?;
+            if !has_message {
+                c.execute_batch("ALTER TABLE invites ADD COLUMN message TEXT NOT NULL DEFAULT '';")?;
+            }
         }
         Ok(store)
     }
@@ -932,6 +938,7 @@ impl MailStore {
 
     // Invitations
 
+    /// Records an invitation that came in mail `message` (its Message-ID).
     #[allow(clippy::too_many_arguments)]
     pub fn add_invite(
         &self,
@@ -943,11 +950,12 @@ impl MailStore {
         organizer: &str,
         dtstart: &str,
         ics: &str,
+        message: &str,
     ) -> Result<bool> {
         let n = self.db().execute(
-            "INSERT OR IGNORE INTO invites (account, uid, method, sequence, summary, organizer, dtstart, ics, received)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![account, uid, method, sequence, summary, organizer, dtstart, ics, now()],
+            "INSERT OR IGNORE INTO invites (account, uid, method, sequence, summary, organizer, dtstart, ics, received, message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![account, uid, method, sequence, summary, organizer, dtstart, ics, now(), message],
         )?;
         Ok(n == 1)
     }
@@ -955,7 +963,7 @@ impl MailStore {
     pub fn invites(&self) -> Vec<Invite> {
         let c = self.db();
         let mut st = c
-            .prepare("SELECT id, account, uid, method, summary, organizer, dtstart, ics, response FROM invites WHERE method = 'REQUEST' ORDER BY dtstart DESC LIMIT 200")
+            .prepare("SELECT id, account, uid, method, summary, organizer, dtstart, ics, response, message FROM invites WHERE method = 'REQUEST' ORDER BY dtstart DESC LIMIT 200")
             .unwrap();
         st.query_map([], |r| {
             Ok(Invite {
@@ -968,6 +976,7 @@ impl MailStore {
                 dtstart: r.get(6)?,
                 ics: r.get(7)?,
                 response: r.get(8)?,
+                message: r.get(9)?,
             })
         })
         .unwrap()
@@ -983,6 +992,54 @@ impl MailStore {
         self.db().execute("UPDATE invites SET response = ?2 WHERE id = ?1", params![id, response])?;
         Ok(())
     }
+
+    /// Whether some invitation doesn't know the mail it came in.
+    pub fn invites_without_mail(&self) -> bool {
+        self.db().query_row("SELECT EXISTS (SELECT 1 FROM invites WHERE message = '')", [], |r| r.get(0)).unwrap_or(false)
+    }
+
+    /// Gives the invitations of `account` with this key, not knowing their mail yet, `message`.
+    pub fn set_invite_mail(&self, account: &str, uid: &str, method: &str, sequence: i64, message: &str) -> Result<usize> {
+        Ok(self.db().execute(
+            "UPDATE invites SET message = ?5 WHERE account = ?1 AND uid = ?2 AND method = ?3 AND sequence = ?4 AND message = ''",
+            params![account, uid, method, sequence, message],
+        )?)
+    }
+
+    /// True the first time it is asked for `key`, never again.
+    pub fn first_time(&self, key: &str) -> bool {
+        self.db().execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?1, 1)", [key]).is_ok_and(|n| n == 1)
+    }
+
+    /// The real rows of the accounts' folders: (account, Message-ID, blob), newest first.
+    pub fn account_rows(&self) -> Vec<(String, String, String)> {
+        let c = self.db();
+        let mut st = c
+            .prepare(
+                "SELECT b.account, m.message_id, m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox
+                 WHERE m.link IS NULL AND b.account IS NOT NULL AND m.message_id != '' ORDER BY m.date DESC",
+            )
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().filter_map(Result::ok).collect()
+    }
+
+    /// The message of `account` with this Message-ID, out of the trash and
+    /// spam if it is elsewhere too.
+    pub fn message_with_id(&self, account: &str, message_id: &str) -> Option<i64> {
+        if message_id.is_empty() {
+            return None;
+        }
+        let c = self.db();
+        c.query_row(
+            "SELECT m.id FROM messages m JOIN mailboxes b ON b.id = m.mailbox
+             WHERE b.account = ?1 AND m.message_id = ?2 AND m.link IS NULL
+             ORDER BY b.special IN ('\\Trash', '\\Junk'), m.id DESC LIMIT 1",
+            params![account, message_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -996,6 +1053,8 @@ pub struct Invite {
     pub dtstart: String,
     pub ics: String,
     pub response: Option<String>,
+    /// The Message-ID of the mail it came in ('' when not known).
+    pub message: String,
 }
 
 #[cfg(test)]
@@ -1044,6 +1103,28 @@ mod tests {
 
     fn raw(id: &str) -> Vec<u8> {
         format!("Message-ID: <{id}>\r\nSubject: s\r\n\r\nbody\r\n").into_bytes()
+    }
+
+    #[test]
+    fn an_invitation_finds_the_mail_it_came_in() {
+        let s = MailStore::memory();
+        let inbox = s.remote_mailbox("work", "INBOX", "Work/Inbox", "").unwrap();
+        let trash = s.remote_mailbox("work", "Trash", "Work/Trash", "\\Trash").unwrap();
+        let (kept, _) = s.add_fetched(inbox, &raw("inv"), &[], 0, 1).unwrap();
+        s.add_fetched(trash, &raw("inv"), &[], 0, 1).unwrap();
+        let mid = message_id(&raw("inv"));
+        assert_eq!(s.message_with_id("work", &mid), Some(kept), "out of the trash");
+        assert_eq!(s.message_with_id("home", &mid), None, "another account's");
+        assert_eq!(s.message_with_id("work", ""), None);
+
+        s.add_invite("work", "u", "REQUEST", 0, "Sync", "o@x.fr", "20991023T100000Z", "", "").unwrap();
+        assert!(s.invites_without_mail());
+        assert_eq!(s.set_invite_mail("work", "u", "REQUEST", 1, &mid).unwrap(), 0, "another version");
+        assert_eq!(s.set_invite_mail("work", "u", "REQUEST", 0, &mid).unwrap(), 1);
+        assert_eq!(s.set_invite_mail("work", "u", "REQUEST", 0, "<other>").unwrap(), 0, "kept once known");
+        assert_eq!(s.invites()[0].message, mid);
+        assert!(!s.invites_without_mail());
+        assert!(s.first_time("k") && !s.first_time("k"));
     }
 
     #[test]
