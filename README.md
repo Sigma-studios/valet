@@ -20,7 +20,10 @@ the native apps of every device.
   from the account the invitation came to.
 
 - **Webmail** on valet's own site, from any browser: your tree of folders
-  (and every account's own folders), search, reading, and writing with
+  (and every account's own folders), search, a Filter menu (read or unread,
+  starred, from or to someone, suggested from the folder's mail as you type,
+  with attachments, invitations, a date range; the filters on show as chips
+  under the search, each removed with its ✕), reading, and writing with
   formatting (reply, reply all, forward, attachments). What you write is saved
   as a draft in the account's Drafts folder every few seconds, so it carries on
   from another device or app. Folders can be created, renamed and deleted, here

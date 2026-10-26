@@ -364,6 +364,40 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .pane:has(#bulk input[name=id]:checked) .toolbar .bulk-actions { display:flex; }
 .toolbar .bulk-actions .count { font-size:14px; font-weight:600; margin-right:4px; }
 .toolbar label.pickall { display:flex; flex-direction:row; align-items:center; margin:0 4px 0 12px; }
+/* The Filter button, its menu, and the filters on as chips under the toolbar. */
+.toolbar details.filter { position:relative; }
+.toolbar details.filter > summary { list-style:none; cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; white-space:nowrap; }
+.toolbar details.filter > summary::-webkit-details-marker { display:none; }
+.toolbar details.filter > summary:hover, .toolbar details.filter[open] > summary { background:var(--line); }
+.toolbar details.filter > summary.on { border-color:var(--accent); color:var(--accent); }
+.toolbar details.filter > summary .count { background:var(--accent); color:#fff; border-radius:9px; font-size:11px; font-weight:700; line-height:17px; padding:0 6px; }
+.filter .panel { position:absolute; right:0; top:calc(100% + 6px); z-index:10; width:320px; max-width:calc(100vw - 24px); max-height:calc(100vh - 130px); overflow-y:auto; display:flex; flex-direction:column; gap:16px; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; box-shadow:0 8px 28px rgb(0 0 0 / .2); }
+.filter fieldset { border:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; min-width:0; }
+.filter legend { padding:0; margin-bottom:8px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+.filter .segmented { display:flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+.filter .segmented label { flex:1; position:relative; margin:0; }
+.filter .segmented label + label { border-left:1px solid var(--line); }
+.filter .segmented input { position:absolute; opacity:0; pointer-events:none; }
+.filter .segmented span { display:block; text-align:center; padding:5px 0; font-size:14px; color:var(--fg); cursor:pointer; }
+.filter .segmented span:hover { background:var(--line); }
+.filter .segmented input:checked + span { background:var(--accent); color:#fff; }
+.filter .segmented input:focus-visible + span { outline:2px solid var(--accent); outline-offset:-2px; }
+.filter label.check { flex-direction:row; align-items:center; gap:8px; font-size:14px; color:var(--fg); cursor:pointer; }
+.filter .person { position:relative; display:flex; flex-direction:column; gap:2px; font-size:13px; color:var(--muted); }
+.filter .person input, .filter select, .filter .range input { width:100%; }
+.filter .range { display:none; gap:8px; } .filter .range label { flex:1; min-width:0; }
+.filter:has(select[name=when] option[value=custom]:checked) .range { display:flex; }
+.filter .suggest { position:absolute; left:0; right:0; top:100%; z-index:11; margin:3px 0 0; padding:4px; list-style:none; max-height:260px; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; box-shadow:0 6px 20px rgb(0 0 0 / .18); }
+.filter .suggest li { display:flex; flex-direction:column; padding:5px 8px; border-radius:5px; cursor:pointer; font-size:14px; color:var(--fg); overflow-wrap:anywhere; }
+.filter .suggest li .addr { font-size:12px; color:var(--muted); }
+.filter .suggest li:hover, .filter .suggest li[aria-selected=true] { background:var(--line); }
+.filter .foot { display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--line); padding-top:12px; }
+.toolbar .filter .foot button { background:var(--accent); color:#fff; border-color:transparent; padding:6px 18px; }
+.toolbar .filter .foot button:hover { background:var(--accent); filter:brightness(1.1); }
+.toolbar .filters-on { flex-basis:100%; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.filters-on a.chip { display:inline-flex; align-items:center; gap:6px; padding:2px 8px 2px 10px; border-radius:14px; font-size:13px; color:var(--fg); background:color-mix(in srgb, var(--accent) 14%, var(--card)); border:1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+.filters-on a.chip span { font-size:11px; color:var(--muted); }
+.filters-on a.chip:hover { text-decoration:none; border-color:var(--accent); } .filters-on a.chip:hover span { color:var(--fg); }
 /* A message opened from the list: beside it when there's room (the list
    then shows subjects only), instead of it otherwise. */
 @media (min-width: 1260px) {
@@ -439,6 +473,268 @@ pub struct ListQuery {
     /// Only that message's part of the page, not marked read (the list's
     /// script fetches it ahead, then shows it).
     fragment: Option<String>,
+    // The Filter menu's (see `Filter`); empty, no filtering.
+    /// `unread` or `read`.
+    #[serde(default)]
+    read: String,
+    #[serde(default)]
+    starred: String,
+    /// Part of a sender's name or address; of a recipient's (To or Cc).
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    attachment: String,
+    #[serde(default)]
+    invite: String,
+    /// One of `WHEN`; `custom`: from `since` to `until`, days both included.
+    #[serde(default)]
+    when: String,
+    #[serde(default)]
+    since: String,
+    #[serde(default)]
+    until: String,
+}
+
+/// The filters' keys in a list's address.
+const FILTER_KEYS: [&str; 9] = ["read", "starred", "from", "to", "attachment", "invite", "when", "since", "until"];
+
+/// The Filter menu's dates.
+const WHEN: [(&str, &str); 6] = [
+    ("", "Any time"),
+    ("today", "Today"),
+    ("week", "Last 7 days"),
+    ("month", "Last 30 days"),
+    ("year", "Last 12 months"),
+    ("custom", "Between dates…"),
+];
+
+impl ListQuery {
+    /// The search and the filters on, as they go in the list's address.
+    fn criteria(&self) -> Vec<(&'static str, &str)> {
+        let custom = self.when == "custom";
+        [
+            ("q", self.q.as_str()),
+            ("read", &self.read),
+            ("starred", &self.starred),
+            ("from", &self.from),
+            ("to", &self.to),
+            ("attachment", &self.attachment),
+            ("invite", &self.invite),
+            ("when", &self.when),
+            ("since", if custom { &self.since } else { "" }),
+            ("until", if custom { &self.until } else { "" }),
+        ]
+        .into_iter()
+        .filter(|(_, v)| !v.trim().is_empty())
+        .collect()
+    }
+
+    /// The list's page, with its search and filters but those of `drop`.
+    fn link(&self, id: i64, page: usize, drop: &[&str]) -> String {
+        let mut l = format!("/box/{id}?page={page}");
+        for (k, v) in self.criteria().into_iter().filter(|(k, _)| !drop.contains(k)) {
+            l.push_str(&format!("&{k}={}", percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC)));
+        }
+        l
+    }
+
+    /// The filters on, as said on their chips, each with the keys that drop it.
+    fn chips(&self) -> Vec<(String, &'static [&'static str])> {
+        let mut on: Vec<(String, &'static [&'static str])> = Vec::new();
+        match self.read.as_str() {
+            "unread" => on.push(("Unread".into(), &["read"])),
+            "read" => on.push(("Read".into(), &["read"])),
+            _ => {}
+        }
+        if !self.starred.is_empty() {
+            on.push(("Starred".into(), &["starred"]));
+        }
+        if !self.from.trim().is_empty() {
+            on.push((format!("From: {}", self.from.trim()), &["from"]));
+        }
+        if !self.to.trim().is_empty() {
+            on.push((format!("To: {}", self.to.trim()), &["to"]));
+        }
+        if !self.attachment.is_empty() {
+            on.push(("With attachments".into(), &["attachment"]));
+        }
+        if !self.invite.is_empty() {
+            on.push(("Invitations".into(), &["invite"]));
+        }
+        let dates: &'static [&'static str] = &["when", "since", "until"];
+        if self.when == "custom" {
+            let day = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
+            let say = |d: chrono::NaiveDate| d.format("%-d %b %Y").to_string();
+            match ordered(day(&self.since), day(&self.until)) {
+                (Some(a), Some(b)) if a == b => on.push((say(a), dates)),
+                (Some(a), Some(b)) => on.push((format!("{} – {}", say(a), say(b)), dates)),
+                (Some(a), None) => on.push((format!("Since {}", say(a)), dates)),
+                (None, Some(b)) => on.push((format!("Until {}", say(b)), dates)),
+                (None, None) => {}
+            }
+        } else if let Some((_, label)) = WHEN.iter().find(|(w, _)| !w.is_empty() && *w == self.when) {
+            on.push((label.to_string(), dates));
+        }
+        on
+    }
+}
+
+/// Two days, the earlier first.
+fn ordered(a: Option<chrono::NaiveDate>, b: Option<chrono::NaiveDate>) -> (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>) {
+    match (a, b) {
+        (Some(x), Some(y)) if y < x => (Some(y), Some(x)),
+        other => other,
+    }
+}
+
+/// What a list keeps: the messages meeting every filter on.
+#[derive(Default)]
+struct Filter {
+    seen: Option<bool>,
+    starred: bool,
+    /// Lowercase.
+    from: String,
+    to: String,
+    attachment: bool,
+    invite: bool,
+    /// Unix seconds: from (included), until (excluded).
+    after: Option<i64>,
+    before: Option<i64>,
+}
+
+impl Filter {
+    fn of(q: &ListQuery) -> Filter {
+        use chrono::{Days, Months, TimeZone};
+        let zone = crate::calendar::default_zone();
+        let today = chrono::Utc::now().with_timezone(&zone).date_naive();
+        // A day's midnight in the settings' zone (or the first hour it has).
+        let start = |d: chrono::NaiveDate| {
+            (0..3).find_map(|h| zone.from_local_datetime(&d.and_hms_opt(h, 0, 0)?).earliest()).map(|t| t.timestamp())
+        };
+        let day = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
+        let (after, before) = match q.when.as_str() {
+            "today" => (start(today), None),
+            "week" => (today.checked_sub_days(Days::new(7)).and_then(start), None),
+            "month" => (today.checked_sub_days(Days::new(30)).and_then(start), None),
+            "year" => (today.checked_sub_months(Months::new(12)).and_then(start), None),
+            "custom" => {
+                let (a, b) = ordered(day(&q.since), day(&q.until));
+                (a.and_then(start), b.and_then(|b| b.succ_opt()).and_then(start))
+            }
+            _ => (None, None),
+        };
+        Filter {
+            seen: match q.read.as_str() {
+                "unread" => Some(false),
+                "read" => Some(true),
+                _ => None,
+            },
+            starred: !q.starred.is_empty(),
+            from: q.from.trim().to_lowercase(),
+            to: q.to.trim().to_lowercase(),
+            attachment: !q.attachment.is_empty(),
+            invite: !q.invite.is_empty(),
+            after,
+            before,
+        }
+    }
+
+    /// On what the list knows without opening the message: flags, date.
+    fn keeps(&self, m: &Msg) -> bool {
+        self.seen.is_none_or(|s| has_flag(m, "\\Seen") == s)
+            && (!self.starred || has_flag(m, "\\Flagged"))
+            && self.after.is_none_or(|a| m.date >= a)
+            && self.before.is_none_or(|b| m.date < b)
+    }
+
+    /// Whether some filter reads the message itself.
+    fn opens(&self) -> bool {
+        !self.from.is_empty() || !self.to.is_empty() || self.attachment || self.invite
+    }
+
+    fn keeps_facts(&self, f: &Facts) -> bool {
+        let names = |people: &[(String, String)], part: &str| {
+            part.is_empty() || people.iter().any(|(n, a)| n.to_lowercase().contains(part) || a.to_lowercase().contains(part))
+        };
+        names(&f.from, &self.from) && names(&f.to, &self.to) && (!self.attachment || f.attachment) && (!self.invite || f.invite)
+    }
+}
+
+/// What the filters and the address suggestions read in a message.
+struct Facts {
+    /// `(name, address)`: of the senders; of the recipients (To, Cc).
+    from: Vec<(String, String)>,
+    to: Vec<(String, String)>,
+    /// Files attached (an invitation's own `.ics` isn't one).
+    attachment: bool,
+    invite: bool,
+}
+
+/// By blob: a blob's content never changes, so neither do its facts.
+static FACTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Arc<Facts>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn facts(app: &App, blob: &str) -> Option<Arc<Facts>> {
+    let kept = || FACTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = kept().get(blob) {
+        return Some(f.clone());
+    }
+    let raw = app.mail.blob(blob)?;
+    let m = parse(&raw)?;
+    let people = |a: Option<&mail_parser::Address>| -> Vec<(String, String)> {
+        a.map(|a| a.iter().filter_map(|x| Some((x.name().unwrap_or("").trim().to_string(), x.address()?.trim().to_string()))).collect())
+            .unwrap_or_default()
+    };
+    let mut to = people(m.to());
+    to.extend(people(m.cc()));
+    let html_body = has_html_body(&m);
+    let f = Arc::new(Facts {
+        from: people(m.from()),
+        to,
+        attachment: m.attachments().any(|a| shown_attachment(a, html_body) && !crate::invites::is_calendar(a)),
+        invite: crate::invites::is_invitation(&m),
+    });
+    kept().insert(blob.to_string(), f.clone());
+    Some(f)
+}
+
+#[derive(Deserialize)]
+pub struct SuggestQuery {
+    /// `from` or `to`.
+    #[serde(default)]
+    field: String,
+    #[serde(default)]
+    q: String,
+}
+
+/// For the Filter menu: senders (or recipients) of the folder's mail
+/// matching what is typed, those whose name or address starts so first,
+/// then the most frequent.
+pub async fn addresses(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query(s): Query<SuggestQuery>) -> Response {
+    if !authed(&app, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let typed = s.q.trim().to_lowercase();
+    // By address: a name it is given, and how often it comes.
+    let mut people: std::collections::HashMap<String, (String, String, usize)> = Default::default();
+    for m in app.mail.messages(id) {
+        let Some(f) = facts(&app, &m.blob) else { continue };
+        for (name, address) in if s.field == "to" { &f.to } else { &f.from } {
+            let p = people.entry(address.to_lowercase()).or_insert_with(|| (String::new(), address.clone(), 0));
+            if p.0.is_empty() {
+                p.0 = name.clone();
+            }
+            p.2 += 1;
+        }
+    }
+    let starts = |s: &str| s.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| w.starts_with(&typed));
+    let mut found: Vec<(String, String, usize)> =
+        people.into_values().filter(|(n, a, _)| n.to_lowercase().contains(&typed) || a.to_lowercase().contains(&typed)).collect();
+    found.sort_by_cached_key(|(n, a, count)| (!(starts(n) || starts(a)), std::cmp::Reverse(*count), a.to_lowercase()));
+    let found: Vec<serde_json::Value> = found.into_iter().take(8).map(|(name, address, _)| serde_json::json!({ "name": name, "address": address })).collect();
+    axum::Json(found).into_response()
 }
 
 fn flash_of(q: &ListQuery) -> Markup {
@@ -460,17 +756,150 @@ fn matches(raw: &[u8], words: &[String]) -> bool {
     words.iter().all(|w| hay.contains(w.as_str()))
 }
 
+const FUNNEL: &str = r#"<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 3h12l-4.6 5.4V13l-2.8 1.4v-6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>"#;
+
+/// The Filter button and its menu, part of the toolbar's form: applied
+/// together, with the search.
+fn filter_menu(id: i64, q: &ListQuery, on: usize) -> Markup {
+    let today = chrono::Utc::now().with_timezone(&crate::calendar::default_zone()).format("%Y-%m-%d").to_string();
+    let read = if q.read == "unread" || q.read == "read" { q.read.as_str() } else { "" };
+    let person = |field: &str, label: &str, value: &str| {
+        html! {
+            div.person {
+                label for={"filter-" (field)} { (label) }
+                input #{"filter-" (field)} type="text" name=(field) value=(value) placeholder="Name or address" autocomplete="off" spellcheck="false"
+                    role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls={"suggest-" (field)}
+                    data-suggest={"/box/" (id) "/addresses?field=" (field)};
+                ul.suggest #{"suggest-" (field)} role="listbox" aria-label={(label) " suggestions"} hidden {}
+            }
+        }
+    };
+    html! {
+        details.filter {
+            summary.on[on > 0] title="Filter the messages listed" {
+                (PreEscaped(FUNNEL)) "Filter"
+                @if on > 0 { span.count aria-label={(on) " on"} { (on) } }
+            }
+            div.panel {
+                fieldset {
+                    legend { "Status" }
+                    div.segmented {
+                        @for (value, label) in [("", "All"), ("unread", "Unread"), ("read", "Read")] {
+                            label { input type="radio" name="read" value=(value) checked[read == value]; span { (label) } }
+                        }
+                    }
+                    label.check { input type="checkbox" name="starred" value="1" checked[!q.starred.is_empty()]; "Starred only" }
+                }
+                fieldset {
+                    legend { "Contains" }
+                    label.check { input type="checkbox" name="attachment" value="1" checked[!q.attachment.is_empty()]; "Attachments" }
+                    label.check { input type="checkbox" name="invite" value="1" checked[!q.invite.is_empty()]; "An invitation" }
+                }
+                fieldset {
+                    legend { "People" }
+                    (person("from", "From", &q.from))
+                    (person("to", "To or Cc", &q.to))
+                }
+                fieldset {
+                    legend { "Date" }
+                    select name="when" aria-label="Date" {
+                        @for (value, label) in WHEN { option value=(value) selected[q.when == value] { (label) } }
+                    }
+                    div.range {
+                        label { "From" input type="date" name="since" value=(q.since) max=(today); }
+                        label { "To" input type="date" name="until" value=(q.until) max=(today); }
+                    }
+                }
+                div.foot {
+                    a href=(q.link(id, 0, &FILTER_KEYS)) { "Reset" }
+                    button type="submit" { "Apply" }
+                }
+            }
+        }
+    }
+}
+
+/// The Filter menu: closed by a click elsewhere or Escape; what's left empty
+/// stays out of the list's address; people suggested as they're typed, from
+/// the folder's mail.
+const FILTER_SCRIPT: &str = r#"
+{
+  const form = document.querySelector('form.toolbar'), menu = form.querySelector('details.filter');
+  document.addEventListener('click', (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; });
+  menu.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !e.defaultPrevented) { menu.open = false; menu.querySelector('summary').focus(); }
+  });
+  const when = form.elements.when;
+  when.addEventListener('change', () => { if (when.value === 'custom') form.elements.since.focus(); });
+  form.addEventListener('formdata', (e) => {
+    const custom = e.formData.get('when') === 'custom';
+    for (const [k, v] of [...e.formData]) if (!String(v).trim() || (!custom && (k === 'since' || k === 'until'))) e.formData.delete(k);
+  });
+  for (const input of form.querySelectorAll('input[data-suggest]')) {
+    const list = document.getElementById(input.getAttribute('aria-controls'));
+    let items = [], at = -1, timer = null, asked = 0;
+    const show = (open) => { list.hidden = !open; input.setAttribute('aria-expanded', String(open)); };
+    const mark = (i) => {
+      at = i;
+      [...list.children].forEach((li, j) => li.setAttribute('aria-selected', String(j === i)));
+      if (i < 0) { input.removeAttribute('aria-activedescendant'); return; }
+      input.setAttribute('aria-activedescendant', list.children[i].id);
+      list.children[i].scrollIntoView({ block: 'nearest' });
+    };
+    const draw = () => {
+      list.replaceChildren(...items.map((p, i) => {
+        const li = document.createElement('li'), name = document.createElement('span');
+        li.id = `${list.id}-${i}`;
+        li.setAttribute('role', 'option');
+        li.dataset.i = i;
+        name.textContent = p.name || p.address;
+        li.append(name);
+        if (p.name) { const a = document.createElement('span'); a.className = 'addr'; a.textContent = p.address; li.append(a); }
+        return li;
+      }));
+      mark(-1);
+      show(items.length > 0);
+    };
+    // Only the answer to the last question counts.
+    const ask = async () => {
+      const n = ++asked;
+      try {
+        const r = await fetch(`${input.dataset.suggest}&q=${encodeURIComponent(input.value.trim())}`);
+        if (!r.ok) return;
+        const found = await r.json();
+        if (n !== asked || document.activeElement !== input) return;
+        items = found;
+        draw();
+      } catch (_) {}
+    };
+    const pick = (i) => { input.value = items[i].address; show(false); };
+    input.addEventListener('focus', ask);
+    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(ask, 120); });
+    input.addEventListener('blur', () => { asked++; show(false); });
+    input.addEventListener('keydown', (e) => {
+      const open = !list.hidden, n = items.length;
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n) {
+        e.preventDefault();
+        if (!open) { show(true); mark(-1); }
+        else if (e.key === 'ArrowDown') mark((at + 1) % n);
+        else mark(at <= 0 ? n - 1 : at - 1);
+      } else if (e.key === 'Enter' && open && at >= 0) { e.preventDefault(); pick(at); }
+      else if (e.key === 'Escape' && open) { e.preventDefault(); show(false); }
+    });
+    // Before the field loses the focus.
+    list.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const li = e.target.closest('li');
+      if (li) pick(+li.dataset.i);
+    });
+  }
+}
+"#;
+
 pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query(q): Query<ListQuery>) -> Response {
     guard!(app, headers);
     let Some(mbox) = app.mail.mailbox(id) else { return StatusCode::NOT_FOUND.into_response() };
-    let link = |page: usize| {
-        let mut l = format!("/box/{id}?page={page}");
-        if !q.q.is_empty() {
-            l.push_str("&q=");
-            l.push_str(&percent_encoding::utf8_percent_encode(&q.q, percent_encoding::NON_ALPHANUMERIC).to_string());
-        }
-        l
-    };
+    let link = |page: usize| q.link(id, page, &[]);
     if let (Some(open), Some(_)) = (q.open, &q.fragment) {
         return match reader(&app, open, &q, Some((id, link(q.page)))) {
             Some((subject, body)) => maud::html! { div.readcol data-subject=(subject) { (body) } }.into_response(),
@@ -488,6 +917,12 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     };
     let mut msgs = app.mail.messages(id);
     msgs.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
+    // What the message's flags and date tell first; then what opening it does.
+    let filter = Filter::of(&q);
+    msgs.retain(|m| filter.keeps(m));
+    if filter.opens() {
+        msgs.retain(|m| facts(&app, &m.blob).is_some_and(|f| filter.keeps_facts(&f)));
+    }
     let words: Vec<String> = q.q.split_whitespace().map(str::to_lowercase).collect();
     if !words.is_empty() {
         msgs.retain(|m| app.mail.blob(&m.blob).is_some_and(|raw| matches(&raw, &words)));
@@ -502,6 +937,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     };
     let title = if mbox.is_node() { short_name(&mbox) } else { place_name(&mbox) };
     let drafts = mbox.special.eq_ignore_ascii_case("\\Drafts");
+    let chips = q.chips();
     let page_title = reading.as_ref().map(|(_, (subject, _))| subject.clone()).unwrap_or_else(|| title.clone());
     mail_page(&page_title, id, &app, html! {
         (flash_of(&q))
@@ -510,7 +946,8 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                 button.refresh type="button" data-folder=(id) title="Check every account for new mail now, this folder first" { "↻ Refresh" }
                 span.refresh-note.small.muted role="status" {}
                 input type="search" name="q" value=(q.q) placeholder={"Search " (title)};
-                @if !q.q.is_empty() { a.button href={"/box/" (id)} { "Clear" } }
+                @if !q.q.is_empty() { a.button href=(q.link(id, 0, &["q"])) title="Clear the search (the filters stay)" { "Clear" } }
+                (filter_menu(id, &q, chips.len()))
             }
             // Shown while messages are ticked; they act on the list's form.
             span.bulk-actions {
@@ -522,12 +959,21 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                 button.danger form="bulk" name="action" value="delete" { "Delete" }
                 button.plain type="button" #pick-none { "Cancel" }
             }
+            @if !chips.is_empty() {
+                div.filters-on {
+                    @for (label, drop) in &chips {
+                        a.chip href=(q.link(id, 0, drop)) title="Remove this filter" { (label) span aria-hidden="true" { "✕" } }
+                    }
+                    @if chips.len() > 1 { a.small href=(q.link(id, 0, &FILTER_KEYS)) { "Clear filters" } }
+                }
+            }
         }
+        script { (PreEscaped(FILTER_SCRIPT)) }
         script { (PreEscaped(REFRESH_SCRIPT)) }
         div.split.reading[reading.is_some()] data-list=(link(q.page)) data-title=(title) {
             div.listcol {
                 @if shown.is_empty() {
-                    p.muted { @if q.q.is_empty() { "Nothing here." } @else { "No message matches." } }
+                    p.muted { @if q.criteria().is_empty() { "Nothing here." } @else { "No message matches." } }
                 } @else {
                     form #bulk method="post" action={"/box/" (id) "/bulk"} {
                         input type="hidden" name="back" value=(link(q.page));
@@ -717,8 +1163,7 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
     let raw = app.mail.blob(&src.blob).unwrap_or_default();
     let m = parse(&raw)?;
     let subject = m.subject().filter(|s| !s.trim().is_empty()).unwrap_or("(no subject)").to_string();
-    // mail-parser turns a text-only message into HTML too: only real HTML goes in the frame.
-    let html_body = m.html_body.first().and_then(|&i| m.part(i)).is_some_and(|p| p.is_text_html());
+    let html_body = has_html_body(&m);
     let remote = html_body && m.body_html(0).is_some_and(|h| has_remote(&h));
     let images = q.images.is_some();
     let back = pane.as_ref().map(|(b, _)| *b).unwrap_or(row.mailbox);
@@ -732,7 +1177,7 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
     let attachments: Vec<(usize, String, usize)> = m
         .attachments()
         .enumerate()
-        .filter(|(_, a)| !is_inline_image(a) || !html_body)
+        .filter(|(_, a)| shown_attachment(a, html_body))
         .map(|(i, a)| {
             use mail_parser::MimeHeaders;
             (i, a.attachment_name().unwrap_or("attachment").to_string(), a.contents().len())
@@ -823,6 +1268,16 @@ fn human_size(n: usize) -> String {
         n if n < 1024 * 1024 => format!("{} KB", n / 1024),
         n => format!("{:.1} MB", n as f64 / 1024.0 / 1024.0),
     }
+}
+
+/// mail-parser turns a text-only message into HTML too: only real HTML goes in the frame.
+fn has_html_body(m: &mail_parser::Message) -> bool {
+    m.html_body.first().and_then(|&i| m.part(i)).is_some_and(|p| p.is_text_html())
+}
+
+/// Listed under the message: not an image its HTML shows.
+fn shown_attachment(a: &mail_parser::MessagePart, html_body: bool) -> bool {
+    !is_inline_image(a) || !html_body
 }
 
 fn is_inline_image(p: &mail_parser::MessagePart) -> bool {
@@ -2092,5 +2547,62 @@ mod tests {
         assert_eq!(everyone(m.to()), "me@y.fr, Bob <bob@z.fr>");
         assert!(matches(raw, &["réunion".into(), "jour".into()]));
         assert!(!matches(raw, &["absent".into()]));
+    }
+
+    fn query(pairs: &str) -> ListQuery {
+        Query::<ListQuery>::try_from_uri(&format!("/box/1?{pairs}").parse().unwrap()).unwrap().0
+    }
+
+    #[test]
+    fn filters_in_the_address() {
+        let q = query("q=r%C3%A9union&read=unread&from=Ann+B&when=week&since=2026-01-01&page=2");
+        assert_eq!(q.link(4, 0, &[]), "/box/4?page=0&q=r%C3%A9union&read=unread&from=Ann%20B&when=week");
+        assert_eq!(q.link(4, 1, &["q"]), "/box/4?page=1&read=unread&from=Ann%20B&when=week");
+        assert_eq!(q.link(4, 0, &FILTER_KEYS), "/box/4?page=0&q=r%C3%A9union");
+        let chips: Vec<String> = q.chips().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(chips, ["Unread", "From: Ann B", "Last 7 days"]);
+        let chips = |s: &str| query(s).chips().into_iter().map(|(l, _)| l).collect::<Vec<_>>();
+        assert_eq!(chips("when=custom&since=2026-10-20&until=2026-10-12"), ["12 Oct 2026 – 20 Oct 2026"]);
+        assert_eq!(chips("when=custom&until=2026-10-12"), ["Until 12 Oct 2026"]);
+        assert!(chips("when=custom&read=everything&from=+").is_empty());
+    }
+
+    #[test]
+    fn filter_keeps() {
+        let msg = |flags: &[&str], date: i64| Msg {
+            id: 1, mailbox: 1, uid: 1, blob: String::new(), flags: flags.iter().map(|f| f.to_string()).collect(), date, size: 0, modseq: 0, remote_uid: None, link: None,
+        };
+        let f = Filter::of(&query("read=unread&starred=1"));
+        assert!(f.keeps(&msg(&["\\Flagged"], 0)));
+        assert!(!f.keeps(&msg(&["\\Flagged", "\\Seen"], 0)) && !f.keeps(&msg(&[], 0)));
+        assert!(Filter::of(&query("read=read")).keeps(&msg(&["\\seen"], 0)));
+        // Days in the settings' zone (Paris), both included, either order.
+        let f = Filter::of(&query("when=custom&since=2026-10-12&until=2026-10-10"));
+        assert!(f.keeps(&msg(&[], 1_791_583_200)), "10 Oct, 00:00 in Paris");
+        assert!(!f.keeps(&msg(&[], 1_791_583_199)));
+        assert!(f.keeps(&msg(&[], 1_791_842_399)) && !f.keeps(&msg(&[], 1_791_842_400)), "until the end of 12 Oct");
+        let now = crate::mailstore::now();
+        let week = Filter::of(&query("when=week"));
+        assert!(week.keeps(&msg(&[], now - 6 * 86400)) && !week.keeps(&msg(&[], now - 9 * 86400)));
+        assert!(!Filter::of(&query("")).opens() && Filter::of(&query("to=x")).opens());
+    }
+
+    #[test]
+    fn filter_reads_people_and_parts() {
+        let facts = Facts {
+            from: vec![("Ann B".into(), "ann@x.fr".into())],
+            to: vec![("".into(), "me@y.fr".into()), ("Bob".into(), "bob@z.fr".into())],
+            attachment: true,
+            invite: false,
+        };
+        assert!(Filter::of(&query("from=ANN")).keeps_facts(&facts) && Filter::of(&query("from=x.fr&to=bob")).keeps_facts(&facts));
+        assert!(!Filter::of(&query("from=bob")).keeps_facts(&facts));
+        assert!(Filter::of(&query("attachment=1")).keeps_facts(&facts) && !Filter::of(&query("invite=1")).keeps_facts(&facts));
+        let invite = b"From: o@x\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:u\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n--b--\r\n";
+        let m = parse(invite).unwrap();
+        assert!(crate::invites::is_invitation(&m));
+        assert!(!m.attachments().any(|a| shown_attachment(a, has_html_body(&m)) && !crate::invites::is_calendar(a)), "its .ics isn't an attachment");
+        let reply = String::from_utf8_lossy(invite).replace("REQUEST", "REPLY");
+        assert!(!crate::invites::is_invitation(&parse(reply.as_bytes()).unwrap()), "an answer isn't an invitation");
     }
 }

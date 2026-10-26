@@ -1,7 +1,16 @@
-"""The webmail with the tree, against GreenMail."""
+"""The webmail with the tree, against GreenMail; with a scratch directory
+given and Chrome there, the list's Filter menu in a headless Chrome.
 
+  webmail_e2e.py [<dir>]"""
+
+import email.utils
+import html
+import imaplib
+import os
 import re
+import sys
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -193,6 +202,109 @@ def main():
     told = next((l for l in ev.iter_lines(chunk_size=1, decode_unicode=True) if l == "event: changed"), None)
     ev.close()
     check(told, "mail come in is told")
+
+    filters(s, inbox)
+    if len(sys.argv) > 1:
+        from cdp import CHROME
+        if os.access(CHROME, os.X_OK):
+            filter_menu(s, inbox, sys.argv[1])
+        else:
+            print("(no Chrome: the Filter menu's browser checks skipped)")
+
+
+def filters(s, inbox):
+    """The list's filters, alone and together, and the people suggested."""
+    att = (
+        "From: =?utf-8?q?Zo=C3=A9_Martin?= <zoe@acme.test>\r\nTo: test@local.test\r\nCc: Bob <bob@acme.test>\r\n"
+        f"Subject: filt-att\r\nDate: {email.utils.formatdate()}\r\nMIME-Version: 1.0\r\n"
+        "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nthe report\r\n"
+        "--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=r.pdf\r\n\r\n%PDF-1\r\n--b--\r\n"
+    ).encode()
+    old = re.sub(rb"Date: [^\r]*", b"Date: Wed, 15 Jan 2020 10:00:00 +0000", message("filt-old"))
+    g = gm_imap("test")
+    g.append("INBOX", r"(\Flagged)", None, att)
+    g.append("INBOX", None, imaplib.Time2Internaldate(datetime(2020, 1, 15, 10, tzinfo=timezone.utc)), old)
+    g.logout()
+    wait(lambda: {"filt-att", "filt-old"} <= set(rows(s, inbox)), "two messages to filter come in")
+    page = lambda **p: s.get(f"{WEB}/box/{inbox}", params=p).text
+    listed = lambda **p: {html.unescape(t) for t in re.findall(r'<span class="subject">([^<]*)</span>', page(**p))}
+    everything = listed()
+
+    check(listed(**{"from": "ZOÉ"}) == {"filt-att"} and listed(**{"from": "acme.test"}) == {"filt-att"}, "From: part of the sender's name or address")
+    check(listed(to="bob") == {"filt-att"}, "To: Cc counts")
+    with_files = listed(attachment="1")
+    check("filt-att" in with_files and "filt-old" not in with_files and "Invitation: Planning" not in with_files, f"with attachments (an invitation's .ics isn't one): {with_files}")
+    check(listed(invite="1") == {"Invitation: Planning", "Invitation: Retro"}, "invitations, not the answer to one")
+    starred = listed(starred="1")
+    check("filt-att" in starred and "filt-old" not in starred, "starred only")
+    check("ahead" in listed(read="read") and "ahead" not in listed(read="unread") and "filt-att" in listed(read="unread"), "read, unread")
+    check(listed(when="custom", since="2020-01-31", until="2020-01-01") == {"filt-old"}, "between two dates (either order)")
+    check("filt-old" not in listed(when="week") and "filt-att" in listed(when="today"), "the last days")
+    check(listed(when="", since="2020-01-01", until="2020-01-31") == everything, "dates count only for Between dates")
+    check(listed(read="unread", attachment="1", **{"from": "zoe"}) == {"filt-att"}, "filters together")
+    check(listed(q="report", starred="1") == {"filt-att"} and "No message matches." in page(q="report", read="read"), "and with the search")
+
+    on = page(read="unread", **{"from": "zoe"})
+    check('<span class="count" aria-label="2 on">2</span>' in on, "the Filter button counts the filters on")
+    chips = dict((html.unescape(t), html.unescape(h)) for h, t in re.findall(r'<a class="chip" href="([^"]*)"[^>]*>([^<]*)<', on))
+    check(chips == {"Unread": f"/box/{inbox}?page=0&from=zoe", "From: zoe": f"/box/{inbox}?page=0&read=unread"}, f"a chip each, which removes it: {chips}")
+    check(f'href="/box/{inbox}?page=0"' in on and "Clear filters" in on, "and Clear filters")
+    check('<input type="radio" name="read" value="unread" checked>' in on and 'name="from" value="zoe"' in on, "the menu shows what is on")
+
+    sug = lambda field, q: s.get(f"{WEB}/box/{inbox}/addresses", params={"field": field, "q": q}).json()
+    check(sug("from", "zo")[:1] == [{"name": "Zoé Martin", "address": "zoe@acme.test"}], f"senders suggested as typed: {sug('from', 'zo')}")
+    check(sug("to", "bo")[:1] == [{"name": "Bob", "address": "bob@acme.test"}] and not sug("from", "bob@"), "recipients for To")
+    check(sug("from", "")[0]["address"] == "someone@else.org", "nothing typed: the most frequent first")
+    check(requests.get(f"{WEB}/box/{inbox}/addresses?q=zo", timeout=10).status_code == 401, "suggestions only when logged in")
+
+
+def filter_menu(s, inbox, out):
+    """The Filter menu in Chrome: opens, suggests, applies, shows its chips."""
+    from cdp import Browser
+    shots = os.path.join(out, "shots")
+    os.makedirs(shots, exist_ok=True)
+    b = Browser(os.path.join(out, "chrome-filters"), port=9335)
+    b.go(f"{WEB}/login")
+    b.js(f"document.querySelector('input[name=password]').value = {os.environ['VALET_PASSWORD']!r}; document.querySelector('form').submit()")
+    b.settle(1.5)
+    b.go(f"{WEB}/box/{inbox}", 1.5)
+
+    def until(expr, what):
+        end = time.time() + 10
+        while time.time() < end and not b.js(expr):
+            b.settle(0.2)
+        check(b.js(expr), what)
+
+    check(b.js("!document.querySelector('.filter .panel').checkVisibility()"), "the menu starts closed")
+    b.js("document.querySelector('details.filter > summary').click()")
+    check(b.js("document.querySelector('.filter .panel').checkVisibility() && getComputedStyle(document.querySelector('.filter .panel')).position === 'absolute'"), "Filter opens its menu")
+    b.js("document.querySelector('input[name=read][value=unread]').click()")
+    b.js("{ const i = document.getElementById('filter-from'); i.focus(); i.value = 'zo'; i.dispatchEvent(new Event('input')) }")
+    until("!document.getElementById('suggest-from').hidden && (document.querySelector('#suggest-from li')?.textContent || '').includes('zoe@acme.test')", "From suggests as it is typed")
+    b.shot(f"{shots}/filter-menu.png")
+    key = lambda k: b.js(f"document.getElementById('filter-from').dispatchEvent(new KeyboardEvent('keydown', {{ key: {k!r}, bubbles: true, cancelable: true }}))")
+    key("ArrowDown")
+    check(b.js("document.querySelector('#suggest-from li').getAttribute('aria-selected')") == "true", "arrows go through the suggestions")
+    key("Enter")
+    check(b.js("document.getElementById('filter-from').value") == "zoe@acme.test" and b.js("document.getElementById('suggest-from').hidden"), "Enter picks one")
+    check(b.js("document.querySelector('details.filter').open"), "the menu stays open meanwhile")
+    b.js("{ const w = document.querySelector('select[name=when]'); w.value = 'custom'; w.dispatchEvent(new Event('change')) }")
+    check(b.js("getComputedStyle(document.querySelector('.filter .range')).display") == "flex", "Between dates shows the two dates")
+    b.js("{ const w = document.querySelector('select[name=when]'); w.value = ''; w.dispatchEvent(new Event('change')) }")
+    b.js("document.querySelector('.filter .foot button').click()")
+    b.settle(1.5)
+    check(b.js("location.search") == "?read=unread&from=zoe%40acme.test", f"Apply: only what is on goes in the address ({b.js('location.search')})")
+    check(b.js("[...document.querySelectorAll('.list .subject')].map(e => e.textContent)") == ["filt-att"], "the list is filtered")
+    check(b.js("[...document.querySelectorAll('.filters-on a.chip')].map(a => a.firstChild.textContent)") == ["Unread", "From: zoe@acme.test"], "with its chips")
+    b.shot(f"{shots}/filtered.png")
+    b.js("document.querySelector('details.filter > summary').click()")
+    b.js("document.querySelector('.list').click()")
+    check(not b.js("document.querySelector('details.filter').open"), "a click elsewhere closes the menu")
+    b.js("document.querySelector('.filters-on a.chip').click()")
+    b.settle(1.5)
+    check(b.js("new URLSearchParams(location.search).toString()") == "page=0&from=zoe%40acme.test", "a chip's ✕ removes that filter only")
+    check(not b.errors, f"no script errors: {b.errors}")
+    b.close()
 
 
 main()

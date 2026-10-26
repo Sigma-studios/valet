@@ -13,23 +13,39 @@ use crate::store::name_for_uid;
 
 pub const CALENDAR: &str = "invitations";
 
-fn calendar_parts(raw: &[u8]) -> Vec<String> {
-    let Some(m) = mail_parser::MessageParser::default().parse(raw) else { return vec![] };
+/// A calendar part: an `.ics`, whether an invitation or not.
+pub fn is_calendar(p: &mail_parser::MessagePart) -> bool {
+    use mail_parser::MimeHeaders;
+    p.content_type().is_some_and(|ct| {
+        let t = format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or("")).to_ascii_lowercase();
+        t == "text/calendar" || t == "application/ics"
+    })
+}
+
+/// The text of the message's calendar parts.
+pub fn calendar_texts(m: &mail_parser::Message) -> Vec<String> {
     m.parts
         .iter()
-        .filter(|p| {
-            use mail_parser::MimeHeaders;
-            p.content_type().is_some_and(|ct| {
-                let t = format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or("")).to_ascii_lowercase();
-                t == "text/calendar" || t == "application/ics"
-            })
-        })
+        .filter(|p| is_calendar(p))
         .filter_map(|p| match &p.body {
             mail_parser::PartType::Text(t) => Some(t.to_string()),
             mail_parser::PartType::Binary(b) | mail_parser::PartType::InlineBinary(b) => Some(String::from_utf8_lossy(b).into_owned()),
             _ => None,
         })
         .collect()
+}
+
+/// Whether the message invites to an event (a calendar part with METHOD:REQUEST,
+/// not an answer, a cancellation, or an event just shared).
+pub fn is_invitation(m: &mail_parser::Message) -> bool {
+    calendar_texts(m).iter().any(|t| {
+        ical::parse(t).ok().and_then(|mut c| c.pop()).is_some_and(|c| c.value("METHOD").is_some_and(|v| v.eq_ignore_ascii_case("REQUEST")))
+    })
+}
+
+fn calendar_parts(raw: &[u8]) -> Vec<String> {
+    let Some(m) = mail_parser::MessageParser::default().parse(raw) else { return vec![] };
+    calendar_texts(&m)
 }
 
 fn master(cal: &Component) -> Option<&Component> {

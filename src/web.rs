@@ -63,6 +63,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/inbox", get(webmail::inbox))
         .route("/box/{id}", get(webmail::list))
         .route("/box/{id}/bulk", post(webmail::bulk))
+        .route("/box/{id}/addresses", get(webmail::addresses))
         .route("/msg/{id}", get(webmail::view).post(webmail::action))
         .route("/msg/{id}/html", get(webmail::html_body))
         .route("/msg/{id}/seen", post(webmail::mark_seen))
