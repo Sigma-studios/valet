@@ -152,6 +152,8 @@ def main():
     wait(lambda: "Planning" in s.get(f"{WEB}/invitations").text, "the invitation is waiting")
     planning = lambda: [e for e in s.get(f"{WEB}/calendar/month/2099-11").json()["events"] if e["title"] == "Planning"]
     check(planning() and planning()[0]["calendar"] == "invitations", "in the Invitations calendar meanwhile")
+    dentist = [e for e in s.get(f"{WEB}/calendar/month/2099-11").json()["events"] if e["title"] == "Dentist"]
+    check(planning()[0]["unanswered"] and not dentist[0]["unanswered"], "told apart as not answered yet; my own event isn't")
     card = s.get(f"{WEB}/invitations").text
     check(re.search(r"Overlaps <b>Dentist</b> <time[^>]*>05/11/2099 11:30</time>–12:30 \(Calendar\)", card), "it says what it overlaps, not itself")
     inv = re.search(r'action="/invites/(\d+)"', s.get(f"{WEB}/invitations").text).group(1)
@@ -163,6 +165,22 @@ def main():
     check(not planning(), "off the Invitations calendar")
     time.sleep(2)
     check(len(gm_subjects("org", "INBOX")) == sent_before, "no answer reached the organizer")
+
+    # Another, accepted from its event's card in the calendar.
+    g = gm_imap("test")
+    g.append("INBOX", None, None, invite.replace(b"ignore-me@e2e", b"accept-me@e2e").replace(b"Planning", b"Retro"))
+    g.logout()
+    retro = lambda: [e for e in s.get(f"{WEB}/calendar/month/2099-11").json()["events"] if e["title"] == "Retro"]
+    wait(lambda: retro(), "the second invitation is on the calendar")
+    check(retro()[0]["unanswered"] and retro()[0].get("invite"), "with the invitation to answer it")
+    check("invite" not in dentist[0], "an event of my own has none")
+    r = s.post(f"{WEB}/calendar/invite", data={"invite": retro()[0]["invite"], "answer": "MAYBE?", "calendar": "calendar"})
+    check(r.status_code == 422 and r.json()["error"] == "not answered: unknown answer", "an unknown answer is refused, as JSON")
+    r = s.post(f"{WEB}/calendar/invite", data={"invite": retro()[0]["invite"], "answer": "ACCEPTED", "calendar": "calendar"})
+    check(r.ok and r.json() == {"ok": True, "waiting": 0}, f"accepted from the calendar, nothing left waiting: {r.text}")
+    check(retro() and retro()[0]["calendar"] == "calendar" and not retro()[0]["unanswered"] and "invite" not in retro()[0], "moved to the calendar picked, answered")
+    wait(lambda: "Accepted: Retro" in gm_subjects("org", "INBOX"), "the organizer gets the answer")
+    check(re.search(r"Retro.*?answered: accepted", s.get(f"{WEB}/invitations").text, re.S), "the Invitations page knows")
     m.logout()
 
     # Open pages are told of changes, to fetch their list again.

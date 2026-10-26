@@ -28,9 +28,12 @@
 .cal-month .more { font-size:12px; color:var(--muted); padding:0 4px; }
 .chip { display:block; font-size:12px; line-height:18px; padding:0 5px; border-radius:4px; margin:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; color:var(--fg); }
 .chip:hover { filter:brightness(0.95); }
-.chip.allday { color:#fff; }
+.chip.allday { color:#fff; background:var(--c); }
 .chip .t { color:var(--muted); margin-right:4px; }
-.chip .d { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; vertical-align:1px; }
+.chip .d { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; vertical-align:1px; background:var(--c); }
+/* Invitations not answered yet: hollow. */
+.chip.unanswered .d { background:none; box-shadow:inset 0 0 0 1.5px var(--c); }
+.chip.allday.unanswered { background:color-mix(in srgb, var(--c) 14%, var(--card)); color:var(--fg); outline:1px dashed var(--c); outline-offset:-1px; }
 
 /* Week and day */
 .cal-week { border:1px solid var(--line); border-radius:8px; background:var(--card); overflow:hidden; }
@@ -45,8 +48,9 @@
 .cal-week .hours div { height:var(--hour); font-size:11px; color:var(--muted); text-align:right; padding-right:6px; transform:translateY(-7px); }
 .cal-week .col { position:relative; border-left:1px solid var(--line); background:repeating-linear-gradient(to bottom, transparent 0, transparent calc(var(--hour) - 1px), var(--line) calc(var(--hour) - 1px), var(--line) var(--hour)); cursor:pointer; }
 .cal-week .col.today { background-color:color-mix(in srgb, var(--accent) 5%, transparent); }
-.cal-week .ev { position:absolute; border-radius:5px; padding:2px 5px; font-size:12px; line-height:15px; overflow:hidden; color:#fff; cursor:pointer; border:1px solid var(--card); }
+.cal-week .ev { position:absolute; border-radius:5px; padding:2px 5px; font-size:12px; line-height:15px; overflow:hidden; color:#fff; cursor:pointer; border:1px solid var(--card); background:var(--c); }
 .cal-week .ev .t { opacity:.85; font-size:11px; }
+.cal-week .ev.unanswered { background:color-mix(in srgb, var(--c) 14%, var(--card)); color:var(--fg); border:1px dashed var(--c); }
 .cal-week .now { position:absolute; left:0; right:0; height:2px; background:var(--bad); z-index:2; pointer-events:none; }
 
 /* Dialogs */
@@ -63,6 +67,9 @@ dialog.cal-dlg .row-check { flex-direction:row; align-items:center; gap:6px; col
 dialog.cal-dlg .actions { display:flex; gap:8px; justify-content:flex-end; align-items:center; margin-top:6px; flex-wrap:wrap; }
 dialog.cal-dlg .actions .left { margin-right:auto; }
 dialog.cal-dlg .err { margin:0; }
+dialog.cal-dlg .answer { border-top:1px solid var(--line); margin-top:8px; padding-top:4px; }
+dialog.cal-dlg .answer .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:6px; }
+dialog.cal-dlg .answer label { flex-direction:row; align-items:center; gap:6px; color:var(--fg); margin-right:auto; }
 
 @media (max-width: 720px) {
   .cal-month .cell { min-height:64px; padding:2px; }

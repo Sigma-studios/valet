@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 
 use crate::App;
 use crate::accounts::{self, Account};
-use crate::ical::{self, Component, Property};
+use crate::ical::{self, Component, Property, mailto};
 use crate::mailstore::now;
 use crate::store::name_for_uid;
 
@@ -30,11 +30,6 @@ fn calendar_parts(raw: &[u8]) -> Vec<String> {
             _ => None,
         })
         .collect()
-}
-
-fn mailto(v: &str) -> String {
-    let v = v.trim();
-    v.get(..7).filter(|p| p.eq_ignore_ascii_case("mailto:")).map(|_| &v[7..]).unwrap_or(v).to_string()
 }
 
 fn master(cal: &Component) -> Option<&Component> {
@@ -230,7 +225,6 @@ mod tests {
         let parts = calendar_parts(raw);
         assert_eq!(parts.len(), 1);
         assert!(parts[0].contains("UID:inv1"));
-        assert_eq!(mailto("MAILTO:a@b.c"), "a@b.c");
         assert_eq!(stamp(20748 * 86400 + 3661), "20261022T010101Z");
     }
 }

@@ -46,6 +46,11 @@ pub struct Instance {
     pub start: When,
     pub end: When,
     pub repeats: bool,
+    /// An invitation to one of my addresses I haven't answered.
+    pub unanswered: bool,
+    /// The invitation valet got by mail for it, to answer from its card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invite: Option<i64>,
 }
 
 /// The zone of the settings until one is picked.
@@ -314,14 +319,30 @@ fn expand(cal: &Component, from: i64, to: i64) -> Vec<(When, When, &Component, b
     out
 }
 
-/// The occurrences of an event that overlap [from, to) (Unix seconds).
-pub fn instances(o: &Object, from: i64, to: i64) -> Vec<Instance> {
-    instances_where(o, from, to, |_| true)
+/// The occurrences of an event that overlap [from, to) (Unix seconds); `me`,
+/// my addresses, tells the invitations I haven't answered.
+pub fn instances(o: &Object, from: i64, to: i64, me: &[String]) -> Vec<Instance> {
+    instances_where(o, from, to, me, |_| true)
+}
+
+/// Whether `ev` (or the series it leaves its people to) invites one of `me`
+/// who hasn't answered: no PARTSTAT is NEEDS-ACTION. The organizer listed
+/// among the attendees isn't invited (but another of my addresses may be).
+fn unanswered(ev: &Component, master: Option<&Component>, me: &[String]) -> bool {
+    let people = if ev.prop("ATTENDEE").is_some() { ev } else { master.unwrap_or(ev) };
+    let organizer = people.value("ORGANIZER").map(ical::mailto).unwrap_or_default();
+    people.props.iter().any(|p| {
+        let a = ical::mailto(&p.value);
+        p.name == "ATTENDEE"
+            && me.iter().any(|m| m.eq_ignore_ascii_case(&a))
+            && !a.eq_ignore_ascii_case(&organizer)
+            && p.param("PARTSTAT").is_none_or(|s| s.eq_ignore_ascii_case("NEEDS-ACTION"))
+    })
 }
 
 /// The occurrences that overlap [from, to) and whose VEVENT (with what it
 /// leaves to the series' own) passes `keep`.
-fn instances_where(o: &Object, from: i64, to: i64, keep: impl Fn(&dyn Fn(&str) -> Option<String>) -> bool) -> Vec<Instance> {
+fn instances_where(o: &Object, from: i64, to: i64, me: &[String], keep: impl Fn(&dyn Fn(&str) -> Option<String>) -> bool) -> Vec<Instance> {
     let Ok(cals) = ical::parse(&o.data) else { return vec![] };
     let Some(cal) = cals.first() else { return vec![] };
     let (master, _) = events(cal);
@@ -340,6 +361,8 @@ fn instances_where(o: &Object, from: i64, to: i64, keep: impl Fn(&dyn Fn(&str) -
             start,
             end,
             repeats,
+            unanswered: unanswered(e, master, me),
+            invite: None,
         })
         .collect()
 }
@@ -367,7 +390,7 @@ pub fn conflicts(ics: &str, objects: &[Object], now: i64) -> Vec<Instance> {
     let mut out: Vec<Instance> = objects
         .iter()
         .filter(|o| o.uid != uid)
-        .flat_map(|o| instances_where(o, lo, hi, busy))
+        .flat_map(|o| instances_where(o, lo, hi, &[], busy))
         .filter(|i| match (i.start, i.end) {
             (When::At(a), When::At(b)) => times.iter().any(|&(s, f)| a < f && s < b),
             _ => false,
@@ -771,18 +794,18 @@ mod tests {
     #[test]
     fn single_events_in_utc_zones_and_days() {
         let o = ev("SUMMARY:Lunch\\, at Bob's\nDTSTART;TZID=Europe/Paris:20261023T120000\nDTEND;TZID=Europe/Paris:20261023T133000");
-        let i = instances(&o, at("2026-10-01T00:00:00Z"), at("2026-11-01T00:00:00Z"));
+        let i = instances(&o, at("2026-10-01T00:00:00Z"), at("2026-11-01T00:00:00Z"), &[]);
         assert_eq!(i.len(), 1);
         assert_eq!((i[0].start, i[0].end), (When::At(at("2026-10-23T10:00:00Z")), When::At(at("2026-10-23T11:30:00Z"))));
         assert_eq!(i[0].title, "Lunch, at Bob's");
-        assert!(instances(&o, at("2026-10-24T00:00:00Z"), at("2026-11-01T00:00:00Z")).is_empty());
+        assert!(instances(&o, at("2026-10-24T00:00:00Z"), at("2026-11-01T00:00:00Z"), &[]).is_empty());
 
         let day = ev("SUMMARY:Trip\nDTSTART;VALUE=DATE:20261030\nDTEND;VALUE=DATE:20261102");
-        let i = instances(&day, at("2026-11-01T00:00:00Z"), at("2026-12-01T00:00:00Z"));
+        let i = instances(&day, at("2026-11-01T00:00:00Z"), at("2026-12-01T00:00:00Z"), &[]);
         assert_eq!((i[0].start, i[0].end, i[0].all_day), (When::Day(NaiveDate::from_ymd_opt(2026, 10, 30).unwrap()), When::Day(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()), true));
 
         let outlook = ev("DTSTART;TZID=\"Romance Standard Time\":20260715T090000\nDURATION:PT1H");
-        let i = instances(&outlook, at("2026-07-01T00:00:00Z"), at("2026-08-01T00:00:00Z"));
+        let i = instances(&outlook, at("2026-07-01T00:00:00Z"), at("2026-08-01T00:00:00Z"), &[]);
         assert_eq!((i[0].start, i[0].end), (When::At(at("2026-07-15T07:00:00Z")), When::At(at("2026-07-15T08:00:00Z"))));
         assert_eq!(zone("/mozilla.org/20050126_1/Europe/Paris"), Some(Tz::Europe__Paris));
         assert_eq!(zone("(UTC+01:00) Brussels, Copenhagen, Madrid, Paris"), Some(Tz::Europe__Brussels));
@@ -796,7 +819,7 @@ mod tests {
              BEGIN:VEVENT\nUID:u\nRECURRENCE-ID;TZID=Europe/Paris:20261022T093000\nSUMMARY:Standup (late)\nDTSTART;TZID=Europe/Paris:20261022T110000\n\
              DTEND;TZID=Europe/Paris:20261022T111500\nEND:VEVENT\nEND:VCALENDAR\n",
         );
-        let i = instances(&o, at("2026-10-19T00:00:00Z"), at("2026-10-27T00:00:00Z"));
+        let i = instances(&o, at("2026-10-19T00:00:00Z"), at("2026-10-27T00:00:00Z"), &[]);
         let starts: Vec<When> = i.iter().map(|x| x.start).collect();
         // Daylight saving ends on the 25th: 9:30 in Paris is 7:30 UTC before, 8:30 after.
         assert_eq!(starts[0], When::At(at("2026-10-19T07:30:00Z")));
@@ -809,12 +832,12 @@ mod tests {
 
         // A yearly birthday, years after it began; an unreadable rule shows its first time only.
         let birthday = ev("SUMMARY:Ann\nDTSTART;VALUE=DATE:19900412\nRRULE:FREQ=YEARLY");
-        let i = instances(&birthday, at("2027-04-01T00:00:00Z"), at("2027-05-01T00:00:00Z"));
+        let i = instances(&birthday, at("2027-04-01T00:00:00Z"), at("2027-05-01T00:00:00Z"), &[]);
         assert_eq!(i[0].start, When::Day(NaiveDate::from_ymd_opt(2027, 4, 12).unwrap()));
         let until = ev("DTSTART:20261001T080000Z\nRRULE:FREQ=WEEKLY;UNTIL=20261015");
-        assert_eq!(instances(&until, at("2026-10-01T00:00:00Z"), at("2026-11-01T00:00:00Z")).len(), 3);
+        assert_eq!(instances(&until, at("2026-10-01T00:00:00Z"), at("2026-11-01T00:00:00Z"), &[]).len(), 3);
         let bad = ev("DTSTART:20261001T080000Z\nRRULE:FREQ=SOMETIMES");
-        assert_eq!(instances(&bad, at("2026-10-01T00:00:00Z"), at("2026-11-01T00:00:00Z")).len(), 1);
+        assert_eq!(instances(&bad, at("2026-10-01T00:00:00Z"), at("2026-11-01T00:00:00Z"), &[]).len(), 1);
     }
 
     #[test]
@@ -881,6 +904,36 @@ mod tests {
         assert_eq!(say("DTSTART:20261023T080000Z\nRRULE:FREQ=MONTHLY").0, "Every month on the 23rd at 10:00");
         assert_eq!(say("DTSTART;VALUE=DATE:19900412\nRRULE:FREQ=YEARLY"), ("Every year on 12 April".into(), "12/04/1990".into(), None));
         assert!(describe(&ev("DTSTART:20261020T080000Z")).is_none());
+    }
+
+    #[test]
+    fn unanswered_invitations_are_told() {
+        let me = ["me@b.c".to_string(), "alias@b.c".to_string()];
+        let when = "DTSTART:20261027T100000Z\nDTEND:20261027T110000Z\nORGANIZER:mailto:o@x.fr";
+        let unanswered = |people: &str| {
+            let o = ev(&format!("{when}\n{people}"));
+            instances(&o, at("2026-10-27T00:00:00Z"), at("2026-10-28T00:00:00Z"), &me)[0].unanswered
+        };
+        assert!(unanswered("ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@b.c"));
+        assert!(unanswered("ATTENDEE;CN=Me:MAILTO:Alias@b.c"), "no PARTSTAT is NEEDS-ACTION; any of my addresses");
+        assert!(!unanswered("ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@b.c"));
+        assert!(!unanswered("ATTENDEE;PARTSTAT=TENTATIVE:mailto:me@b.c"));
+        assert!(!unanswered("ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:someone@x.fr"), "others' answers aren't mine");
+        assert!(!unanswered(""), "my own events");
+        let mine = |people: &str| {
+            let o = ev(&format!("DTSTART:20261027T100000Z\nORGANIZER:mailto:me@b.c\n{people}"));
+            instances(&o, at("2026-10-27T00:00:00Z"), at("2026-10-28T00:00:00Z"), &me)[0].unanswered
+        };
+        assert!(!mine("ATTENDEE:mailto:me@b.c"), "nor the organizer in the list");
+        assert!(mine("ATTENDEE:mailto:me@b.c\nATTENDEE:mailto:alias@b.c"), "but another of my addresses, invited");
+        // A moved occurrence without its own people is the series'.
+        let series = object(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:u\nDTSTART:20261026T100000Z\nRRULE:FREQ=DAILY;COUNT=3\nORGANIZER:mailto:o@x.fr\n\
+             ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@b.c\nEND:VEVENT\nBEGIN:VEVENT\nUID:u\nRECURRENCE-ID:20261027T100000Z\n\
+             DTSTART:20261027T120000Z\nEND:VEVENT\nEND:VCALENDAR\n",
+        );
+        let i = instances(&series, at("2026-10-26T00:00:00Z"), at("2026-10-29T00:00:00Z"), &me);
+        assert!(i.len() == 3 && i.iter().all(|x| x.unanswered));
     }
 
     #[test]

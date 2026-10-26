@@ -135,16 +135,17 @@
   }
 
   // An event's hover: its title, and for timed ones when, in which zone.
-  const hover = (e) => e.allDay ? e.title : `${e.title}\n${T.note(e.start * 1000)}`;
+  const hover = (e) => (e.allDay ? e.title : `${e.title}\n${T.note(e.start * 1000)}`) + (e.unanswered ? '\nNot answered yet' : '');
 
+  // Invitations not answered yet are drawn hollow, in their calendar's color.
   function chip(e, day) {
     const startsHere = !e.allDay && sameDay(e.s, day);
     return el('span', {
-      class: 'chip' + (e.allDay ? ' allday' : ''),
-      style: e.allDay ? `background:${color(e.calendar)}` : '',
+      class: 'chip' + (e.allDay ? ' allday' : '') + (e.unanswered ? ' unanswered' : ''),
+      style: `--c:${color(e.calendar)}`,
       title: hover(e),
       onclick: (ev) => { ev.stopPropagation(); show(e); },
-    }, e.allDay ? null : el('span', { class: 'd', style: `background:${color(e.calendar)}` }), startsHere ? el('span', { class: 't' }, fTime.format(e.s)) : null, e.title || '(no title)');
+    }, e.allDay ? null : el('span', { class: 'd' }), startsHere ? el('span', { class: 't' }, fTime.format(e.s)) : null, e.title || '(no title)');
   }
 
   async function month() {
@@ -225,8 +226,8 @@
       for (const p of layout(placed)) {
         const w = 100 / p.cols;
         col.append(el('div', {
-          class: 'ev',
-          style: `top:${p.top}px; height:${p.height - 2}px; left:calc(${p.col * w}% + 1px); width:calc(${w}% - 3px); background:${color(p.e.calendar)}`,
+          class: 'ev' + (p.e.unanswered ? ' unanswered' : ''),
+          style: `top:${p.top}px; height:${p.height - 2}px; left:calc(${p.col * w}% + 1px); width:calc(${w}% - 3px); --c:${color(p.e.calendar)}`,
           title: hover(p.e),
           onclick: (ev) => { ev.stopPropagation(); show(p.e); },
         }, el('div', {}, p.e.title || '(no title)'), el('div', { class: 't' }, `${fTime.format(p.e.s)} – ${fTime.format(p.e.f)}`)));
@@ -286,6 +287,7 @@
         e.repeats ? ' · repeats' : '', el('br'),
         el('span', { class: 'dot', style: `display:inline-block;width:9px;height:9px;border-radius:50%;background:${color(e.calendar)};margin-right:5px` }), calName(e.calendar),
         e.location ? [el('br'), '📍 ', e.location] : null),
+      e.unanswered ? answering(e, online) : null,
       e.notes ? el('div', { class: 'notes' }, e.notes) : null,
       el('div', { class: 'actions' },
         el('button', { class: 'plain left', disabled: !online, onclick: () => remove(e) }, 'Delete'),
@@ -293,6 +295,32 @@
         el('button', { disabled: !online, onclick: () => edit(e) }, e.repeats ? 'Edit the series' : 'Edit')),
       online ? null : el('p', { class: 'muted small' }, 'Offline: editing waits until you are back online.')].filter(Boolean));
     if (!dlg.open) dlg.showModal();
+  }
+
+  // An invitation not answered yet: answered here when valet got it by mail
+  // (the organizer gets the reply), else from where it came.
+  function answering(e, online) {
+    if (!e.invite) return el('p', { class: 'small' }, 'Not answered yet: answer it from your mail or calendar app.');
+    const mine = calendars.filter((c) => c.id !== 'invitations');
+    const cal = el('select', { name: 'calendar' },
+      mine.map((c) => el('option', { value: c.id, selected: c.id === e.calendar }, c.name)), el('option', { value: '' }, 'Invitations'));
+    const err = el('p', { class: 'err small' });
+    const answer = async (a) => {
+      try {
+        const r = await post('/calendar/invite', { invite: e.invite, answer: a, calendar: cal.value });
+        // The bar's count of invitations waiting.
+        const count = document.querySelector('header a[href="/invitations"] .count');
+        if (count) r.waiting ? (count.textContent = r.waiting) : count.remove();
+        await changed();
+      }
+      catch (x) { err.textContent = x.message; }
+    };
+    const button = (a, label, attrs = {}) => el('button', { type: 'button', disabled: !online, onclick: () => answer(a), ...attrs }, label);
+    return el('div', { class: 'answer' },
+      el('p', { class: 'small' }, 'Not answered yet: the organizer gets your answer by email.'),
+      el('div', { class: 'row' }, el('label', {}, 'Put it in', cal),
+        button('ACCEPTED', 'Accept'), button('TENTATIVE', 'Maybe'), button('DECLINED', 'Decline', { class: 'plain' })),
+      err);
   }
 
   async function post(url, data) {
