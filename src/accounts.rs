@@ -45,6 +45,10 @@ pub struct Account {
     /// False only for a local test server: IMAP and SMTP without encryption.
     #[serde(default = "yes")]
     pub tls: bool,
+    /// Since when (Unix seconds) valet keeps its mail without syncing it: it
+    /// no longer logs in or sends, and changes to its mail stay in valet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<i64>,
 }
 
 fn default_days() -> u32 {
@@ -82,6 +86,11 @@ fn default_scopes() -> String {
 impl Account {
     pub fn login(&self) -> &str {
         self.user.as_deref().unwrap_or(&self.address)
+    }
+
+    /// Whether it can send as `address` now (a retired account sends nothing).
+    pub fn sends_now(&self, address: &str) -> bool {
+        self.retired.is_none() && self.sends_as(address)
     }
 
     pub fn sends_as(&self, address: &str) -> bool {
@@ -286,6 +295,9 @@ async fn smtp(acc: &Account, mail: &MailStore) -> Result<lettre::AsyncSmtpTransp
 
 /// Relays a message through the account's SMTP server.
 pub async fn send(acc: &Account, mail: &MailStore, from: &str, to: &[String], raw: &[u8]) -> Result<()> {
+    if acc.retired.is_some() {
+        bail!("{} is retired: valet no longer sends from it", acc.name);
+    }
     let envelope = lettre::address::Envelope::new(
         Some(from.parse()?),
         to.iter().map(|t| t.parse()).collect::<Result<Vec<lettre::Address>, _>>()?,

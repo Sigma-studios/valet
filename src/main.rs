@@ -119,6 +119,18 @@ impl App {
         Ok(())
     }
 
+    /// Retires the account (`true`): its sync stops and its waiting changes
+    /// go, its mail stays. Or syncs it again (`false`).
+    pub fn retire_account(self: &Arc<Self>, id: &str, retire: bool) -> Result<Account> {
+        let mut acc = self.account(id).context("no such account")?;
+        acc.retired = retire.then(mailstore::now);
+        self.mail.put_account(&acc)?;
+        *self.accounts.write().unwrap() = self.mail.accounts();
+        self.mail.forget_sync(id)?;
+        sync::restart(self, id);
+        Ok(acc)
+    }
+
     pub fn delete_account(self: &Arc<Self>, id: &str) -> Result<()> {
         if let Some(task) = self.syncs.lock().unwrap().remove(id) {
             task.abort();

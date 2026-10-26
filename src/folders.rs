@@ -44,6 +44,9 @@ fn own(b: &Mailbox) -> Result<&str> {
 
 async fn session(app: &App, account: &str) -> Result<(Account, Imap)> {
     let acc = app.account(account).context("no such account")?;
+    if acc.retired.is_some() {
+        bail!("{} is retired: its folders no longer change at the provider", acc.name);
+    }
     let s = accounts::imap(&acc, &app.mail).await?;
     Ok((acc, s))
 }

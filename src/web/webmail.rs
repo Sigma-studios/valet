@@ -1892,7 +1892,7 @@ pub async fn node_action(State(app): St, headers: HeaderMap, Path(id): Path<i64>
         "create_all" => {
             let mut made = Vec::new();
             let mut err = None;
-            for a in app.accounts() {
+            for a in app.accounts().into_iter().filter(|a| a.retired.is_none()) {
                 if app.mail.member_of(id, &a.id).is_some() {
                     continue;
                 }
@@ -2012,11 +2012,11 @@ fn my_address(app: &App, m: &mail_parser::Message, account: Option<&str>) -> Opt
     to.extend(addresses_of(m.cc()));
     to.extend(m.header_values("Delivered-To").filter_map(|v| v.as_text().map(str::to_string)));
     for addr in &to {
-        if accounts.iter().any(|a| a.sends_as(addr)) {
+        if accounts.iter().any(|a| a.sends_now(addr)) {
             return Some(addr.to_lowercase());
         }
     }
-    account.and_then(|id| accounts.iter().find(|a| a.id == id)).map(|a| a.address.clone())
+    account.and_then(|id| accounts.iter().find(|a| a.id == id && a.retired.is_none())).map(|a| a.address.clone())
 }
 
 fn is_draft(m: &Msg, folder: &Mailbox) -> bool {
@@ -2203,7 +2203,7 @@ const EDITOR_SCRIPT: &str = r#"
 "#;
 
 fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
-    let accounts = app.accounts();
+    let accounts: Vec<Account> = app.accounts().into_iter().filter(|a| a.retired.is_none()).collect();
     let senders: Vec<(String, String)> = accounts
         .iter()
         .flat_map(|a| std::iter::once(&a.address).chain(&a.aliases).map(move |addr| (addr.clone(), a.name.clone())))
@@ -2408,7 +2408,7 @@ pub async fn refresh(State(app): St, headers: HeaderMap, Query(q): Query<Refresh
     let mut passed = app.mail.passed();
     // A pass started after this is one that started later than any had
     // started now (and took the folders asked for).
-    let accounts: Vec<(Account, crate::mailstore::Passes)> = app.accounts().into_iter().map(|a| { let then = app.mail.passes(&a.id); (a, then) }).collect();
+    let accounts: Vec<(Account, crate::mailstore::Passes)> = app.accounts().into_iter().filter(|a| a.retired.is_none()).map(|a| { let then = app.mail.passes(&a.id); (a, then) }).collect();
     for (a, _) in &accounts {
         app.mail.waker(&a.id).notify_one();
     }
@@ -2441,7 +2441,7 @@ pub async fn save_draft(State(app): St, headers: HeaderMap, form: Multipart) -> 
     let (draft, files, _) = read_form(form).await;
     let saved = async {
         use anyhow::Context;
-        let acc = app.accounts().into_iter().find(|a| a.sends_as(&draft.from)).context("pick an address to send from")?;
+        let acc = app.accounts().into_iter().find(|a| a.sends_now(&draft.from)).context("pick an address to send from")?;
         let message = build(&app, &draft, files, true)?;
         let folder = match app.mail.special_folder(&acc.id, "\\Drafts") {
             Some(b) => b,
@@ -2536,7 +2536,7 @@ fn build(app: &App, d: &Draft, mut files: Files, draft: bool) -> anyhow::Result<
 /// account's Sent folder. Returns the account's name.
 async fn deliver(app: &App, d: &Draft, files: Files) -> anyhow::Result<String> {
     use anyhow::Context;
-    let acc = app.accounts().into_iter().find(|a| a.sends_as(&d.from)).context("pick an address to send from")?;
+    let acc = app.accounts().into_iter().find(|a| a.sends_now(&d.from)).context("pick an address to send from")?;
     let message = build(app, d, files, false)?;
     let recipients: Vec<String> = message.envelope().to().iter().map(|a| a.to_string()).collect();
     let raw = crate::smtpd::strip_bcc(&message.formatted());
