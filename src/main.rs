@@ -236,6 +236,8 @@ async fn main() -> Result<()> {
     tokio::spawn(imapd::serve(app.clone(), imap));
     tokio::spawn(smtpd::serve(app.clone(), smtp));
     sync::start(app.clone());
+    let finding = app.clone();
+    tokio::task::spawn_blocking(move || invites::find_mails(&finding));
     tracing::info!("{} mail accounts", app.accounts().len());
     let stopping = app.clone();
     axum::serve(http, router(app))

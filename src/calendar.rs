@@ -51,6 +51,9 @@ pub struct Instance {
     /// The invitation valet got by mail for it, to answer from its card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invite: Option<i64>,
+    /// The mail that invitation came in, to open from its card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail: Option<i64>,
 }
 
 /// The zone of the settings until one is picked.
@@ -363,6 +366,7 @@ fn instances_where(o: &Object, from: i64, to: i64, me: &[String], keep: impl Fn(
             repeats,
             unanswered: unanswered(e, master, me),
             invite: None,
+            mail: None,
         })
         .collect()
 }

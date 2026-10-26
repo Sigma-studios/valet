@@ -149,7 +149,7 @@ def main():
                                               "end_date": "2099-11-05", "end_time": "12:30", "tz": "Europe/Paris", "repeat": "none"})
     check(r.ok, f"an event at the invitation's time: {r.text}")
     invite = (
-        "From: Org <org@local.test>\r\nTo: test@local.test\r\nSubject: Invitation: Planning\r\nMIME-Version: 1.0\r\n"
+        "From: Org <org@local.test>\r\nTo: test@local.test\r\nSubject: Invitation: Planning\r\nMessage-ID: <ignore-me@e2e>\r\nMIME-Version: 1.0\r\n"
         "Content-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n"
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:ignore-me@e2e\r\nDTSTART:20991105T100000Z\r\n"
         "DTEND:20991105T110000Z\r\nSUMMARY:Planning\r\nORGANIZER:mailto:org@local.test\r\n"
@@ -182,6 +182,9 @@ def main():
     retro = lambda: [e for e in s.get(f"{WEB}/calendar/month/2099-11").json()["events"] if e["title"] == "Retro"]
     wait(lambda: retro(), "the second invitation is on the calendar")
     check(retro()[0]["unanswered"] and retro()[0].get("invite"), "with the invitation to answer it")
+    mail = retro()[0].get("mail")
+    check(mail and "Invitation: Retro" in s.get(f"{WEB}/msg/{mail}").text, "and the mail it came in, to open")
+    check(f'href="/msg/{mail}"' in s.get(f"{WEB}/invitations").text, "the invitations page links that mail too")
     check("invite" not in dentist[0], "an event of my own has none")
     r = s.post(f"{WEB}/calendar/invite", data={"invite": retro()[0]["invite"], "answer": "MAYBE?", "calendar": "calendar"})
     check(r.status_code == 422 and r.json()["error"] == "not answered: unknown answer", "an unknown answer is refused, as JSON")

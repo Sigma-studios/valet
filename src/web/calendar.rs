@@ -59,19 +59,28 @@ pub async fn month(State(app): St, headers: HeaderMap, Path(key): Path<String>) 
     let Some((first, next)) = month_bounds(&key) else { return StatusCode::NOT_FOUND.into_response() };
     let (from, to) = (secs(first) - 86400, secs(next) + 86400);
     let me = app.addresses();
-    // The latest invitation of each event, for the ones not answered yet.
-    let mut invites: HashMap<String, i64> = HashMap::new();
+    // The latest invitation of each event, for the ones not answered yet,
+    // and the mail it came in.
+    let mut invites: HashMap<String, crate::mailstore::Invite> = HashMap::new();
     for i in app.mail.invites() {
-        let id = invites.entry(i.uid).or_insert(i.id);
-        *id = (*id).max(i.id);
+        match invites.get(&i.uid) {
+            Some(had) if had.id > i.id => {}
+            _ => {
+                invites.insert(i.uid.clone(), i);
+            }
+        }
     }
+    let mut mails: HashMap<String, Option<i64>> = HashMap::new();
     let events: Vec<calendar::Instance> = app
         .store
         .all_objects()
         .iter()
         .flat_map(|o| {
-            calendar::instances(o, from, to, &me).into_iter().map(|mut i| {
-                i.invite = i.unanswered.then(|| invites.get(&o.uid).copied()).flatten();
+            let inv = invites.get(&o.uid);
+            let mail = inv.and_then(|inv| *mails.entry(o.uid.clone()).or_insert_with(|| app.mail.message_with_id(&inv.account, &inv.message)));
+            calendar::instances(o, from, to, &me).into_iter().map(move |mut i| {
+                i.invite = i.unanswered.then(|| inv.map(|inv| inv.id)).flatten();
+                i.mail = mail;
                 i
             })
         })
