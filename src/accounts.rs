@@ -131,7 +131,8 @@ pub struct Preset {
     /// Microsoft 365: OAuth with Thunderbird's public client, which
     /// organisations commonly allow.
     pub microsoft: bool,
-    pub hint: &'static str,
+    /// Where to get what the form asks: HTML, links included.
+    pub help: &'static [&'static str],
 }
 
 pub const PRESETS: &[Preset] = &[
@@ -141,7 +142,11 @@ pub const PRESETS: &[Preset] = &[
         imap: "imap.gmail.com:993",
         smtp: "smtp.gmail.com:465",
         microsoft: false,
-        hint: "An app password (myaccount.google.com/apppasswords, needs 2-step verification), not your Google password.",
+        help: &[
+            r#"Not your Google password: an app password. Make one at <a href="https://myaccount.google.com/apppasswords">myaccount.google.com/apppasswords</a> (name it "valet") and paste its 16 letters, spaces or not."#,
+            r#"App passwords need <a href="https://myaccount.google.com/signinoptions/twosv">2-Step Verification</a>: turn it on first if the page says they aren't available."#,
+            r#"A work or school account may not offer them: its admin decides (<a href="https://support.google.com/accounts/answer/185833">Google's help</a>)."#,
+        ],
     },
     Preset {
         key: "ionos",
@@ -149,7 +154,11 @@ pub const PRESETS: &[Preset] = &[
         imap: "imap.ionos.fr:993",
         smtp: "smtp.ionos.fr:465",
         microsoft: false,
-        hint: "The mailbox's password.",
+        help: &[
+            "The mailbox's own password, chosen when the address was made: not the one of your IONOS customer account.",
+            r#"Forgotten? Set a new one in <a href="https://my.ionos.fr">your IONOS account</a>: Email, then ⋯ next to the address, then Change password (<a href="https://www.ionos.com/help/email/troubleshooting-mail-basic-mail-business/changing-an-ionos-email-account-password/">IONOS help</a>)."#,
+            "The servers are IONOS France's. Elsewhere, change them under Servers to your country's (imap.ionos.de, imap.ionos.co.uk…).",
+        ],
     },
     Preset {
         key: "microsoft",
@@ -157,8 +166,20 @@ pub const PRESETS: &[Preset] = &[
         imap: "outlook.office365.com:993",
         smtp: "smtp.office365.com:587",
         microsoft: true,
-        hint: "No password: after saving, log in to Microsoft from this page.",
+        help: &[
+            "No password here: once saved, log in to Microsoft from the Mail page.",
+            r#"valet logs in as Thunderbird does. If Microsoft says "Need admin approval", your organisation's admin has to allow Mozilla Thunderbird (and IMAP) for your account."#,
+        ],
     },
+];
+
+/// The same for the other providers: where their servers and app passwords are.
+pub const OTHER_HELP: &[&str] = &[
+    r#"Your provider's help lists its IMAP and SMTP servers, often on the page about setting up mail apps or Thunderbird."#,
+    "With two-step verification on, most want an app password rather than your usual one.",
+    r#"iCloud Mail: an <a href="https://support.apple.com/102654">app-specific password</a>; servers imap.mail.me.com:993 and smtp.mail.me.com:587."#,
+    r#"Yahoo: an <a href="https://help.yahoo.com/kb/SLN15241.html">app password</a>; servers imap.mail.yahoo.com:993 and smtp.mail.yahoo.com:465."#,
+    r#"Fastmail: an <a href="https://www.fastmail.help/hc/en-us/articles/360058752854">app password</a> (not on Basic plans); servers imap.fastmail.com:993 and smtp.fastmail.com:465."#,
 ];
 
 pub const THUNDERBIRD_CLIENT: &str = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
