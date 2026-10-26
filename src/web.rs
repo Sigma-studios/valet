@@ -1324,7 +1324,15 @@ fn account_view(draft: &Account, existing: bool, preset_key: &str, err: Option<&
                     input name="password" type="password" autocomplete="new-password" required[!existing];
                 }
             }
-            @if let Some(p) = p { p.small.muted { (p.hint) } }
+            // Links open beside the form, which keeps what's typed.
+            div.small.muted {
+                "Where to find it:"
+                ul style="margin:2px 0 0; padding-left:18px" {
+                    @for h in p.map_or(crate::accounts::OTHER_HELP, |p| p.help) {
+                        li { (PreEscaped(h.replace("<a ", r#"<a target="_blank" rel="noopener" "#))) }
+                    }
+                }
+            }
             details open[!known_servers] {
                 summary.small { "Servers and sync" }
                 div style="display:flex; flex-direction:column; gap:10px; margin-top:8px" {
@@ -1399,7 +1407,8 @@ fn apply_form(base: &Account, f: &AccountForm) -> Account {
     a.address = f.address.trim().to_string();
     a.aliases = list(&f.aliases);
     if !f.password.is_empty() && a.oauth.is_none() {
-        a.password = Some(f.password.clone());
+        // Google shows app passwords in groups of four letters.
+        a.password = Some(if f.preset == "gmail" { f.password.split_whitespace().collect() } else { f.password.clone() });
     }
     a.imap = f.imap.trim().to_string();
     a.smtp = f.smtp.trim().to_string();
@@ -1499,6 +1508,25 @@ async fn answer_invite(State(app): St, headers: HeaderMap, Path(id): Path<i64>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gmail_app_passwords_lose_their_spaces() {
+        let form = |preset: &str| AccountForm {
+            preset: preset.into(),
+            name: "G".into(),
+            address: "a@gmail.com".into(),
+            aliases: String::new(),
+            password: "abcd efgh ijkl mnop".into(),
+            imap: "imap.gmail.com:993".into(),
+            smtp: "smtp.gmail.com:465".into(),
+            user: String::new(),
+            history_days: String::new(),
+            skip: String::new(),
+        };
+        let base = blank_account(preset("gmail"));
+        assert_eq!(apply_form(&base, &form("gmail")).password.as_deref(), Some("abcdefghijklmnop"));
+        assert_eq!(apply_form(&base, &form("")).password.as_deref(), Some("abcd efgh ijkl mnop"), "others' passwords stay as typed");
+    }
 
     #[test]
     fn helpers() {
