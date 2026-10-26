@@ -3,6 +3,8 @@
 //! series of one event for the form, saving and deleting, and the alarms
 //! valet's Android app rings.
 
+use std::collections::HashMap;
+
 use axum::extract::rejection::FormRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -56,7 +58,24 @@ pub async fn month(State(app): St, headers: HeaderMap, Path(key): Path<String>) 
     }
     let Some((first, next)) = month_bounds(&key) else { return StatusCode::NOT_FOUND.into_response() };
     let (from, to) = (secs(first) - 86400, secs(next) + 86400);
-    let events: Vec<calendar::Instance> = app.store.all_objects().iter().flat_map(|o| calendar::instances(o, from, to)).collect();
+    let me = app.addresses();
+    // The latest invitation of each event, for the ones not answered yet.
+    let mut invites: HashMap<String, i64> = HashMap::new();
+    for i in app.mail.invites() {
+        let id = invites.entry(i.uid).or_insert(i.id);
+        *id = (*id).max(i.id);
+    }
+    let events: Vec<calendar::Instance> = app
+        .store
+        .all_objects()
+        .iter()
+        .flat_map(|o| {
+            calendar::instances(o, from, to, &me).into_iter().map(|mut i| {
+                i.invite = i.unanswered.then(|| invites.get(&o.uid).copied()).flatten();
+                i
+            })
+        })
+        .collect();
     let calendars: Vec<_> = app.store.calendars().into_iter().map(|c| json!({ "id": c.id, "name": c.name, "color": c.color })).collect();
     let patterns: Vec<_> = app.store.patterns().into_iter().map(|p| json!({ "id": p.id, "name": p.name, "tag": p.tag, "ring": p.ring })).collect();
     axum::Json(json!({ "month": key, "at": crate::mailstore::now(), "calendars": calendars, "patterns": patterns, "events": events })).into_response()
@@ -199,6 +218,32 @@ pub async fn delete(State(app): St, headers: HeaderMap, form: Result<axum::extra
         Ok(true) => axum::Json(json!({ "ok": true })).into_response(),
         Ok(false) => refused("that event is gone"),
         Err(e) => refused(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AnswerForm {
+    invite: i64,
+    answer: String,
+    #[serde(default)]
+    calendar: String,
+}
+
+/// Answers an invitation from its event's card, as the Invitations page
+/// does: the organizer gets the reply, the event moves to `calendar`. Says
+/// how many still wait, for the bar.
+pub async fn answer(State(app): St, headers: HeaderMap, form: Result<axum::extract::Form<AnswerForm>, FormRejection>) -> Response {
+    if !authed(&app, &headers) {
+        return unauthorized();
+    }
+    let Ok(axum::extract::Form(f)) = form else { return refused("not answered: that invitation can't be found") };
+    if !matches!(f.answer.as_str(), "ACCEPTED" | "TENTATIVE" | "DECLINED") {
+        return refused("not answered: unknown answer");
+    }
+    let calendar = (!f.calendar.is_empty()).then_some(f.calendar.as_str());
+    match crate::invites::respond(&app, f.invite, &f.answer, calendar).await {
+        Ok(()) => axum::Json(json!({ "ok": true, "waiting": waiting(&app).len() })).into_response(),
+        Err(e) => refused(format!("not answered: {e:#}")),
     }
 }
 

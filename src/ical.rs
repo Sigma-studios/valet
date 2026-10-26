@@ -54,6 +54,12 @@ impl Component {
     }
 }
 
+/// The address of a calendar user (`mailto:a@b.c`).
+pub fn mailto(v: &str) -> String {
+    let v = v.trim();
+    v.get(..7).filter(|p| p.eq_ignore_ascii_case("mailto:")).map(|_| &v[7..]).unwrap_or(v).to_string()
+}
+
 impl Property {
     /// The value of parameter `name` (case-insensitive), unquoted.
     pub fn param(&self, name: &str) -> Option<&str> {
@@ -225,6 +231,7 @@ mod tests {
         let att = ev.prop("ATTENDEE").unwrap();
         assert_eq!(att.param("cn"), Some("Doe: J"));
         assert_eq!(att.value, "mailto:j@x.fr");
+        assert_eq!(mailto(" MAILTO:a@b.c"), "a@b.c");
         assert_eq!(ev.prop("DTSTART").unwrap().param("TZID"), Some("Europe/Paris"));
         let again = parse(&cals[0].to_ics()).unwrap();
         assert_eq!(again, cals);

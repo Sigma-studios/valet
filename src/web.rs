@@ -28,6 +28,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/calendar/month/{key}", get(calendar::month))
         .route("/calendar/event", get(calendar::event).post(calendar::save))
         .route("/calendar/event/delete", post(calendar::delete))
+        .route("/calendar/invite", post(calendar::answer))
         .route("/calendar/alarms.json", get(calendar::alarms))
         .route("/assets/{name}", get(assets::file))
         .route("/sw.js", get(assets::service_worker))
