@@ -2015,7 +2015,7 @@ fn draft_for(app: &App, q: &ComposeQuery) -> Draft {
         (_, Some(id), ..) => (id, "all"),
         (_, _, Some(id), _) => (id, "forward"),
         (.., Some(id)) => (id, "draft"),
-        _ => return Draft { html: "<p><br></p>".into(), ..Default::default() },
+        _ => return Draft { html: "<div><br></div>".into(), ..Default::default() },
     };
     let Some((_, src, folder)) = locate(app, id) else { return Draft::default() };
     let raw = app.mail.blob(&src.blob).unwrap_or_default();
@@ -2042,7 +2042,7 @@ fn draft_for(app: &App, q: &ComposeQuery) -> Draft {
     if mode == "forward" {
         d.subject = prefixed("Fwd:", subject);
         d.html = format!(
-            "<p><br></p><p>---------- Forwarded message ----------<br>From: {}<br>Date: {}<br>Subject: {}<br>To: {}</p>{}",
+            "<div><br></div><div>---------- Forwarded message ----------<br>From: {}<br>Date: {}<br>Subject: {}<br>To: {}</div><br>{}",
             escape(&everyone(m.from())),
             escape(&when),
             escape(subject),
@@ -2070,7 +2070,7 @@ fn draft_for(app: &App, q: &ComposeQuery) -> Draft {
     }
     d.subject = prefixed("Re:", subject);
     d.html = format!(
-        "<p><br></p><p>On {}, {} wrote:</p><blockquote>{}</blockquote>",
+        "<div><br></div><div>On {}, {} wrote:</div><blockquote>{}</blockquote>",
         escape(&when),
         escape(&who(m.from())),
         quotable_html(&m)
@@ -2108,6 +2108,8 @@ const EDITOR_CSS: &str = r#"
 const EDITOR_SCRIPT: &str = r#"
 (() => {
   const form = document.querySelector('form.write'), ed = form.querySelector('.editor');
+  // Enter goes to the next line, as in mail apps; a <p> would leave a blank line's space.
+  document.execCommand('defaultParagraphSeparator', false, 'div');
   const status = form.querySelector('.status');
   let dirty = false, saving = null, sending = false;
   for (const b of form.querySelectorAll('.editor-bar button')) {
@@ -2213,7 +2215,7 @@ fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
                         (tool("insertOrderedList", "", html! { "1. List" }, "Numbered list"))
                         (tool("formatBlock", "blockquote", html! { "Quote" }, "Quote"))
                         (tool("formatBlock", "h3", html! { "Heading" }, "Heading"))
-                        (tool("formatBlock", "p", html! { "Text" }, "Normal text"))
+                        (tool("formatBlock", "div", html! { "Text" }, "Normal text"))
                         (tool("removeFormat", "", html! { "Clear" }, "Clear formatting"))
                     }
                     div.editor contenteditable="true" autofocus[!d.to.is_empty()] { (PreEscaped(&d.html)) }
