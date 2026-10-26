@@ -55,6 +55,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/push/remove", post(push::remove))
         .route("/mail/accounts/new", get(new_account_page).post(create_account))
         .route("/mail/accounts/{id}", get(edit_account_page).post(update_account))
+        .route("/mail/accounts/{id}/retire", post(retire_account))
         .route("/mail/accounts/{id}/delete", post(delete_account))
         .route("/mail/oauth/{account}/start", post(oauth_start))
         .route("/mail/oauth", get(oauth_callback))
@@ -161,6 +162,8 @@ main { max-width:960px; margin:0 auto; padding:16px; } body.wide main { max-widt
 }
 h1 { font-size:22px; margin:8px 0 16px; } h2 { font-size:17px; margin:24px 0 8px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin:12px 0; }
+.card.retired { background:none; border-style:dashed; } .card.retired h2 { color:var(--muted); }
+.pill { font-size:11px; font-weight:600; border:1px solid var(--line); border-radius:9px; padding:1px 7px; color:var(--muted); vertical-align:2px; }
 .muted { color:var(--muted); } .small { font-size:13px; }
 .ok { color:var(--good); } .err { color:var(--bad); }
 table { width:100%; border-collapse:collapse; } td, th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
@@ -1018,6 +1021,13 @@ fn account_status_inner(app: &App, a: &crate::accounts::Account, boxes: &[crate:
     let (ops, op_error) = app.mail.pending_ops(&a.id);
     let folders: Vec<_> = boxes.iter().filter(|b| b.account.as_deref() == Some(a.id.as_str())).collect();
     let count: u32 = folders.iter().map(|b| app.mail.count(b.id).0).sum();
+    if let Some(t) = a.retired {
+        return html! {
+            p.muted { "Not synced since " (at(t)) ": " (folders.len()) " folders, " (count) " messages kept here." }
+            p.small.muted { "Its mail reads as before, here and in your mail apps. valet no longer logs in to it or sends from it: "
+                "what you change in its mail (read, flagged, moved, deleted) stays in valet." }
+        };
+    }
     html! {
         @match app.mail.status(&a.id) {
             Some((true, msg, t)) => p.ok { "● " (msg) span.muted.small { " · " (at(t)) } },
@@ -1052,7 +1062,7 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
     let accounts = app.accounts();
     // The Microsoft login shows until the account is connected, or when asked for again.
     let login_shown = |a: &crate::accounts::Account| {
-        a.oauth.is_some() && (app.mail.token(&a.id).is_none() || m.relogin.as_deref() == Some(a.id.as_str()))
+        a.oauth.is_some() && a.retired.is_none() && (app.mail.token(&a.id).is_none() || m.relogin.as_deref() == Some(a.id.as_str()))
     };
     page("Accounts", "/mail", html! {
         h1 { "Mail accounts" }
@@ -1061,15 +1071,23 @@ async fn mail_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> 
             p.muted { "No account yet: add your mailboxes below. valet logs in to each, keeps a copy, and serves them all to your mail apps as one account." }
         }
         @for a in &accounts {
-            div.card {
+            div.card.retired[a.retired.is_some()] {
                 div style="display:flex; justify-content:space-between; align-items:start; gap:8px" {
-                    h2 style="margin-top:0" { (a.name) " " span.muted.small { (a.address) } }
+                    h2 style="margin-top:0" { (a.name) " " span.muted.small { (a.address) } @if a.retired.is_some() { " " span.pill { "Retired" } } }
                     details.menu {
                         summary aria-label="Actions" { "⋯" }
                         div {
                             a href={"/mail/accounts/" (a.id)} { "Edit" }
-                            @if a.oauth.is_some() && !login_shown(a) {
+                            @if a.oauth.is_some() && a.retired.is_none() && !login_shown(a) {
                                 a href={"/mail?relogin=" (a.id)} { "Log in to Microsoft again" }
+                            }
+                            form method="post" action={"/mail/accounts/" (a.id) "/retire"}
+                                onsubmit=[a.retired.is_none().then_some("return confirm('Stop syncing this account? Its mail stays here and in your mail apps, readable as before; valet stops logging in to it and sending from it, and changes to its mail stay in valet. You can sync it again later.')")] {
+                                @if a.retired.is_some() {
+                                    button type="submit" name="action" value="resume" title="Log in to it again and sync it" { "Sync again" }
+                                } @else {
+                                    button type="submit" name="action" value="retire" title="For an address that is out of service" { "Stop syncing, keep the mail" }
+                                }
                             }
                             form method="post" action={"/mail/accounts/" (a.id) "/delete"}
                                 onsubmit="return confirm('Remove this account from valet? Its mail stays at the provider; the copy kept here goes.')" {
@@ -1300,6 +1318,7 @@ fn blank_account(p: Option<&Preset>) -> Account {
         history_days: 90,
         skip: Vec::new(),
         tls: true,
+        retired: None,
     }
 }
 
@@ -1452,7 +1471,9 @@ async fn save_account_form(app: &Arc<App>, base: Account, existing: bool, f: Acc
     if let Err(e) = app.save_account(acc.clone()) {
         return shown(&format!("{e:#}"));
     }
-    let msg = if acc.oauth.is_some() && app.mail.token(&acc.id).is_none() {
+    let msg = if acc.retired.is_some() {
+        format!("Saved {}.", acc.name)
+    } else if acc.oauth.is_some() && app.mail.token(&acc.id).is_none() {
         format!("Saved {}: now log in to Microsoft.", acc.name)
     } else {
         format!("Saved {}: syncing.", acc.name)
@@ -1470,6 +1491,22 @@ async fn update_account(State(app): St, headers: HeaderMap, Path(id): Path<Strin
     guard!(app, headers);
     let Some(base) = app.account(&id) else { return StatusCode::NOT_FOUND.into_response() };
     save_account_form(&app, base, true, f).await
+}
+
+#[derive(Deserialize)]
+struct RetireForm {
+    /// `retire`, or `resume`.
+    action: String,
+}
+
+async fn retire_account(State(app): St, headers: HeaderMap, Path(id): Path<String>, Form(f): Form<RetireForm>) -> Response {
+    guard!(app, headers);
+    let retire = f.action != "resume";
+    match app.retire_account(&id, retire) {
+        Ok(acc) if retire => back("/mail", Some(&format!("{} no longer syncs: its mail stays here.", acc.name)), None),
+        Ok(acc) => back("/mail", Some(&format!("Syncing {} again.", acc.name)), None),
+        Err(e) => back("/mail", None, Some(&format!("{e:#}"))),
+    }
 }
 
 async fn delete_account(State(app): St, headers: HeaderMap, Path(id): Path<String>) -> Response {

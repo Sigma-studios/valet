@@ -23,13 +23,14 @@ pub fn start(app: Arc<App>) {
     }
 }
 
-/// (Re)starts the account's sync task, with its current settings.
+/// (Re)starts the account's sync task, with its current settings; stops it
+/// for a retired account.
 pub fn restart(app: &Arc<App>, id: &str) {
     let mut syncs = app.syncs.lock().unwrap();
     if let Some(old) = syncs.remove(id) {
         old.abort();
     }
-    let Some(acc) = app.account(id) else { return };
+    let Some(acc) = app.account(id).filter(|a| a.retired.is_none()) else { return };
     let app = app.clone();
     let task = tokio::spawn(async move {
         let mut backoff = 15;

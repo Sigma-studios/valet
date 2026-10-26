@@ -210,6 +210,50 @@ def main():
             filter_menu(s, inbox, sys.argv[1])
         else:
             print("(no Chrome: the Filter menu's browser checks skipped)")
+    retiring(s, inbox)
+
+
+def retiring(s, inbox):
+    """An account out of service: its sync stops, its mail stays, changes stay in valet; then syncing again."""
+    r = s.post(f"{WEB}/mail/accounts/org/retire", data={"action": "retire"})
+    check(flash(r)[0] == "Org no longer syncs: its mail stays here.", "stop syncing Org, keep the mail")
+    card = re.search(r'<div class="card retired">.*?</div>\s*</div>', r.text, re.S)
+    check(card and "Org" in card.group(0) and "Retired" in card.group(0) and "Sync again" in card.group(0), "its card says so, with Sync again")
+    status = s.get(f"{WEB}/mail/status").json()["org"]
+    check("Not synced since" in status and "●" not in status, f"no error shown for it: {status}")
+    check("org-hello" in rows(s, inbox), "its mail is still in the combined inbox")
+
+    g = gm_imap("org")
+    g.append("INBOX", None, None, message("org-after", to="org@local.test"))
+    g.logout()
+    r = s.post(f"{WEB}/mail/refresh")
+    check(r.ok and r.json() == {"done": True, "failed": [], "waiting": []}, f"Refresh leaves it out, no failure: {r.text}")
+    time.sleep(2)
+    check("org-after" not in rows(s, inbox), "nothing new is fetched")
+
+    hello = rows(s, inbox)["org-hello"]
+    r = s.post(f"{WEB}/msg/{hello}", data={"action": "flag", "back": str(inbox)})
+    check("★ Unflag" in r.text, "flagging its mail works here")
+    time.sleep(2)
+    g = gm_imap("org")
+    g.select("INBOX")
+    flagged = g.search(None, '(FLAGGED SUBJECT "org-hello")')[1][0]
+    g.logout()
+    check(flagged == b"", "and stays in valet: not flagged at the provider")
+    s.post(f"{WEB}/tree", data={"name": "Only-new", "parent": ""})
+    r = s.post(f"{WEB}/msg/{hello}", data={"action": "move", "to": str(node_id(s, "Only-new")), "back": str(inbox)})
+    check("Org is retired: its folders no longer change at the provider" in (flash(r)[1] or ""), f"no folder is made for it: {flash(r)}")
+
+    page = s.get(f"{WEB}/compose").text
+    check('<option value="org@local.test"' not in page and '<option value="test@local.test"' in page, "it isn't offered to send from")
+    r = s.post(f"{WEB}/compose", files={"from": (None, "org@local.test"), "to": (None, "x@y.z"), "subject": (None, "nope"), "html": (None, "<div>hi</div>")})
+    check("Not sent: pick an address to send from" in r.text, "nor does it send")
+    reply = s.get(f"{WEB}/compose", params={"reply": hello}).text
+    check('<option value="test@local.test" selected' in reply or 'selected' not in reply.split('name="from"')[1].split("</select>")[0], "a reply to its mail goes from a live account")
+
+    r = s.post(f"{WEB}/mail/accounts/org/retire", data={"action": "resume"})
+    check(flash(r)[0] == "Syncing Org again." and '<div class="card retired">' not in r.text, "Sync again")
+    wait(lambda: "org-after" in rows(s, inbox), "what came meanwhile is fetched")
 
 
 def filters(s, inbox):

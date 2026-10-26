@@ -96,8 +96,11 @@ every calendar, repeating events included; events are added, edited and
 deleted there, and reach every app at its next sync), and **Invitations**
 (events waiting for an answer). **Settings** holds the rest: the time zone
 every page shows times in (Paris unless changed; hovering a time names its
-zone, and the device's own time when it is set to another), mail accounts,
-calendars and their default patterns, alert patterns, the alerts of each
+zone, and the device's own time when it is set to another), mail accounts
+(an address out of service can *stop syncing, keep the mail*: its mail
+stays readable everywhere, in the combined folders too, while valet no
+longer logs in to it or sends from it, and changes to its mail stay in
+valet; *Sync again* undoes it), calendars and their default patterns, alert patterns, the alerts of each
 event, `.ics` import (Google, Outlook, IONOS exports; importing again updates
 instead of duplicating), and how to connect each app.
 

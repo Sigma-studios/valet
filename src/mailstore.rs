@@ -325,6 +325,16 @@ impl MailStore {
         Ok(())
     }
 
+    /// Stops replaying the account's changes, and forgets how its sync went:
+    /// for a retired account (its waiting changes would never reach the
+    /// provider), or one syncing again.
+    pub fn forget_sync(&self, id: &str) -> Result<()> {
+        let c = self.db();
+        c.execute("DELETE FROM ops WHERE account = ?1", [id])?;
+        c.execute("DELETE FROM status WHERE account = ?1", [id])?;
+        Ok(())
+    }
+
     /// Forgets the account and everything kept for it (its mail stays at the provider).
     pub fn delete_account(&self, id: &str) -> Result<()> {
         self.prune_mailboxes(id, &[])?;
@@ -615,8 +625,19 @@ impl MailStore {
 
     // Changes from mail apps
 
+    /// For the provider; a retired account's changes stay here.
     fn enqueue(&self, account: &str, op: &Op) -> Result<()> {
-        self.db().execute("INSERT INTO ops (account, op) VALUES (?1, ?2)", params![account, serde_json::to_string(op)?])?;
+        let c = self.db();
+        let retired = c
+            .query_row("SELECT data FROM accounts WHERE id = ?1", [account], |r| r.get::<_, String>(0))
+            .optional()?
+            .and_then(|d| serde_json::from_str::<crate::accounts::Account>(&d).ok())
+            .is_some_and(|a| a.retired.is_some());
+        if retired {
+            return Ok(());
+        }
+        c.execute("INSERT INTO ops (account, op) VALUES (?1, ?2)", params![account, serde_json::to_string(op)?])?;
+        drop(c);
         self.waker(account).notify_one();
         Ok(())
     }
@@ -684,7 +705,9 @@ impl MailStore {
     pub fn sender_account(&self, raw: &[u8]) -> Option<String> {
         let p = crate::mime::parse(raw);
         let from = p.header(raw, "From").and_then(|f| crate::mime::addresses(&f).into_iter().next()).map(|(_, m, h)| format!("{m}@{h}"))?;
-        self.accounts().into_iter().find(|a| a.sends_as(&from)).map(|a| a.id)
+        let accounts = self.accounts();
+        // A live account first, if a retired one had the same address.
+        accounts.iter().find(|a| a.sends_now(&from)).or_else(|| accounts.iter().find(|a| a.sends_as(&from))).map(|a| a.id.clone())
     }
 
     /// The account folder for a special use (`\Trash`…): the one the provider
@@ -1000,6 +1023,23 @@ mod tests {
         assert!(m.mailbox(inbox).is_none() && m.status("b").is_none());
         assert_eq!(m.count(m.all_inboxes()).0, 0);
         assert_eq!(m.db().query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_retired_accounts_changes_stay_here() {
+        let s = MailStore::memory();
+        let json = r#"{"id":"old","name":"Old","address":"me@old.fr","imap":"i:993","smtp":"s:465","password":"p","retired":1}"#;
+        s.put_account(&serde_json::from_str(json).unwrap()).unwrap();
+        let inbox = s.remote_mailbox("old", "INBOX", "Old/Inbox", "").unwrap();
+        let keep = s.remote_mailbox("old", "Keep", "Old/Keep", "").unwrap();
+        let (id, _) = s.add_fetched(inbox, &raw("a"), &[], 0, 7).unwrap();
+        s.store(&[id], &StoreMode::Add, &["\\Flagged".into()]).unwrap();
+        assert_eq!(s.message(id).unwrap().flags, ["\\Flagged"]);
+        s.copy(&[id], keep, true).unwrap();
+        assert!(s.messages(inbox).is_empty() && s.messages(keep).len() == 1, "moved here");
+        s.expunge(&[s.messages(keep)[0].id]).unwrap();
+        assert!(s.messages(keep).is_empty() && s.ops("old").is_empty(), "and nothing waits for the provider");
+        assert_eq!(s.sender_account(b"From: me@old.fr\r\n\r\n").as_deref(), Some("old"), "its sent mail is still filed in it");
     }
 
     fn raw(id: &str) -> Vec<u8> {
