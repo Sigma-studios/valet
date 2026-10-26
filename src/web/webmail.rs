@@ -157,6 +157,11 @@ const REFRESH_SCRIPT: &str = r#"
       document.dispatchEvent(new Event('valet:list'));
       added = [...col.querySelectorAll('a.link')].filter((a) => !before.has(a.dataset.id)).length;
     }
+    // The toolbar's parts saying what the list shows: the Filter button, chips, links.
+    for (const el of document.querySelectorAll('[data-swap]')) {
+      const f = doc.querySelector(`[data-swap="${el.dataset.swap}"]`);
+      if (f) el.replaceWith(f);
+    }
     for (const a of document.querySelectorAll('nav.folders a.folder')) {
       const badge = doc.querySelector(`nav.folders a.folder[href="${a.getAttribute('href')}"] .badge`);
       a.querySelector('.badge')?.remove();
@@ -170,6 +175,7 @@ const REFRESH_SCRIPT: &str = r#"
     if (!next) next = chain = chain.catch(() => {}).then(() => { next = null; return swap(); });
     return next;
   };
+  window.valetList = { update };
   b.addEventListener('click', async () => {
     if (!navigator.onLine) { say("You're offline: new mail can be checked once you're back online.", true); return; }
     b.disabled = true;
@@ -392,8 +398,7 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .filter .suggest li .addr { font-size:12px; color:var(--muted); }
 .filter .suggest li:hover, .filter .suggest li[aria-selected=true] { background:var(--line); }
 .filter .foot { display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--line); padding-top:12px; }
-.toolbar .filter .foot button { background:var(--accent); color:#fff; border-color:transparent; padding:6px 18px; }
-.toolbar .filter .foot button:hover { background:var(--accent); filter:brightness(1.1); }
+.toolbar .filters-on:empty { display:none; }
 .toolbar .filters-on { flex-basis:100%; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
 .filters-on a.chip { display:inline-flex; align-items:center; gap:6px; padding:2px 8px 2px 10px; border-radius:14px; font-size:13px; color:var(--fg); background:color-mix(in srgb, var(--accent) 14%, var(--card)); border:1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
 .filters-on a.chip span { font-size:11px; color:var(--muted); }
@@ -776,7 +781,7 @@ fn filter_menu(id: i64, q: &ListQuery, on: usize) -> Markup {
     };
     html! {
         details.filter {
-            summary.on[on > 0] title="Filter the messages listed" {
+            summary.on[on > 0] title="Filter the messages listed" data-swap="filter-summary" {
                 (PreEscaped(FUNNEL)) "Filter"
                 @if on > 0 { span.count aria-label={(on) " on"} { (on) } }
             }
@@ -811,20 +816,39 @@ fn filter_menu(id: i64, q: &ListQuery, on: usize) -> Markup {
                     }
                 }
                 div.foot {
-                    a href=(q.link(id, 0, &FILTER_KEYS)) { "Reset" }
-                    button type="submit" { "Apply" }
+                    span.small.muted { "Applied as you choose" }
+                    a href=(q.link(id, 0, &FILTER_KEYS)) data-swap="filter-reset" { "Reset" }
                 }
             }
         }
     }
 }
 
-/// The Filter menu: closed by a click elsewhere or Escape; what's left empty
-/// stays out of the list's address; people suggested as they're typed, from
-/// the folder's mail.
+/// The Filter menu: each choice applies at once, the list swapped in place
+/// (names typed, after a pause), the menu staying open; closed by a click
+/// elsewhere or Escape. What's left empty stays out of the list's address.
+/// People are suggested as they're typed, from the folder's mail.
 const FILTER_SCRIPT: &str = r#"
 {
   const form = document.querySelector('form.toolbar'), menu = form.querySelector('details.filter');
+  // The list comes after this script in the page.
+  const apply = () => {
+    const split = document.querySelector('.split');
+    const url = `${form.getAttribute('action')}?${new URLSearchParams([['page', '0'], ...new FormData(form)])}`;
+    if (url === split.dataset.list) return;
+    split.dataset.list = url;
+    const open = split.querySelector('.row.open a.link')?.dataset.id;
+    history.replaceState(null, '', open ? `${url}&open=${open}` : url);
+    window.valetList.update().then((r) => { if (r.gone) location = r.gone; }, () => { location = url; });
+  };
+  let typing = null;
+  const panel = menu.querySelector('.panel');
+  panel.addEventListener('change', apply);
+  panel.addEventListener('input', (e) => {
+    if (!e.target.matches('[data-suggest]')) return;
+    clearTimeout(typing);
+    typing = setTimeout(apply, 400);
+  });
   document.addEventListener('click', (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; });
   menu.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !e.defaultPrevented) { menu.open = false; menu.querySelector('summary').focus(); }
@@ -872,7 +896,7 @@ const FILTER_SCRIPT: &str = r#"
         draw();
       } catch (_) {}
     };
-    const pick = (i) => { input.value = items[i].address; show(false); };
+    const pick = (i) => { input.value = items[i].address; show(false); apply(); };
     input.addEventListener('focus', ask);
     input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(ask, 120); });
     input.addEventListener('blur', () => { asked++; show(false); });
@@ -946,7 +970,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                 button.refresh type="button" data-folder=(id) title="Check every account for new mail now, this folder first" { "↻ Refresh" }
                 span.refresh-note.small.muted role="status" {}
                 input type="search" name="q" value=(q.q) placeholder={"Search " (title)};
-                @if !q.q.is_empty() { a.button href=(q.link(id, 0, &["q"])) title="Clear the search (the filters stay)" { "Clear" } }
+                a.button href=(q.link(id, 0, &["q"])) hidden[q.q.is_empty()] title="Clear the search (the filters stay)" data-swap="clear-search" { "Clear" }
                 (filter_menu(id, &q, chips.len()))
             }
             // Shown while messages are ticked; they act on the list's form.
@@ -959,13 +983,11 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                 button.danger form="bulk" name="action" value="delete" { "Delete" }
                 button.plain type="button" #pick-none { "Cancel" }
             }
-            @if !chips.is_empty() {
-                div.filters-on {
-                    @for (label, drop) in &chips {
-                        a.chip href=(q.link(id, 0, drop)) title="Remove this filter" { (label) span aria-hidden="true" { "✕" } }
-                    }
-                    @if chips.len() > 1 { a.small href=(q.link(id, 0, &FILTER_KEYS)) { "Clear filters" } }
+            div.filters-on data-swap="filters-on" {
+                @for (label, drop) in &chips {
+                    a.chip href=(q.link(id, 0, drop)) title="Remove this filter" { (label) span aria-hidden="true" { "✕" } }
                 }
+                @if chips.len() > 1 { a.small href=(q.link(id, 0, &FILTER_KEYS)) { "Clear filters" } }
             }
         }
         script { (PreEscaped(FILTER_SCRIPT)) }

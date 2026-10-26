@@ -259,7 +259,7 @@ def filters(s, inbox):
 
 
 def filter_menu(s, inbox, out):
-    """The Filter menu in Chrome: opens, suggests, applies, shows its chips."""
+    """The Filter menu in Chrome: opens, suggests, applies each choice in place, shows its chips."""
     from cdp import Browser
     shots = os.path.join(out, "shots")
     os.makedirs(shots, exist_ok=True)
@@ -278,7 +278,12 @@ def filter_menu(s, inbox, out):
     check(b.js("!document.querySelector('.filter .panel').checkVisibility()"), "the menu starts closed")
     b.js("document.querySelector('details.filter > summary').click()")
     check(b.js("document.querySelector('.filter .panel').checkVisibility() && getComputedStyle(document.querySelector('.filter .panel')).position === 'absolute'"), "Filter opens its menu")
+    b.js("window.samePage = true")
     b.js("document.querySelector('input[name=read][value=unread]').click()")
+    until("new URLSearchParams(location.search).get('read') === 'unread' && ![...document.querySelectorAll('.list .subject')].some(e => e.textContent === 'ahead')",
+          "Unread applies at once, without Apply")
+    check(b.js("window.samePage && document.querySelector('details.filter').open"), "the list swapped in place, the menu still open")
+    check(b.js("document.querySelector('details.filter > summary .count')?.textContent") == "1", "the button counts it")
     b.js("{ const i = document.getElementById('filter-from'); i.focus(); i.value = 'zo'; i.dispatchEvent(new Event('input')) }")
     until("!document.getElementById('suggest-from').hidden && (document.querySelector('#suggest-from li')?.textContent || '').includes('zoe@acme.test')", "From suggests as it is typed")
     b.shot(f"{shots}/filter-menu.png")
@@ -287,14 +292,13 @@ def filter_menu(s, inbox, out):
     check(b.js("document.querySelector('#suggest-from li').getAttribute('aria-selected')") == "true", "arrows go through the suggestions")
     key("Enter")
     check(b.js("document.getElementById('filter-from').value") == "zoe@acme.test" and b.js("document.getElementById('suggest-from').hidden"), "Enter picks one")
-    check(b.js("document.querySelector('details.filter').open"), "the menu stays open meanwhile")
-    b.js("{ const w = document.querySelector('select[name=when]'); w.value = 'custom'; w.dispatchEvent(new Event('change')) }")
+    until("location.search === '?page=0&read=unread&from=zoe%40acme.test'", "picking applies it; only what is on goes in the address")
+    until("JSON.stringify([...document.querySelectorAll('.list .subject')].map(e => e.textContent)) === '[\"filt-att\"]'", "the list is filtered")
+    b.js("{ const w = document.querySelector('select[name=when]'); w.value = 'custom'; w.dispatchEvent(new Event('change', { bubbles: true })) }")
     check(b.js("getComputedStyle(document.querySelector('.filter .range')).display") == "flex", "Between dates shows the two dates")
-    b.js("{ const w = document.querySelector('select[name=when]'); w.value = ''; w.dispatchEvent(new Event('change')) }")
-    b.js("document.querySelector('.filter .foot button').click()")
-    b.settle(1.5)
-    check(b.js("location.search") == "?read=unread&from=zoe%40acme.test", f"Apply: only what is on goes in the address ({b.js('location.search')})")
-    check(b.js("[...document.querySelectorAll('.list .subject')].map(e => e.textContent)") == ["filt-att"], "the list is filtered")
+    b.js("{ const w = document.querySelector('select[name=when]'); w.value = ''; w.dispatchEvent(new Event('change', { bubbles: true })) }")
+    until("location.search === '?page=0&read=unread&from=zoe%40acme.test'", "back to any time")
+    check(b.js("window.samePage && document.querySelector('details.filter').open && !document.querySelector('.filter .foot button')"), "all in place, the menu open, no Apply button")
     check(b.js("[...document.querySelectorAll('.filters-on a.chip')].map(a => a.firstChild.textContent)") == ["Unread", "From: zoe@acme.test"], "with its chips")
     b.shot(f"{shots}/filtered.png")
     b.js("document.querySelector('details.filter > summary').click()")
