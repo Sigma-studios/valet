@@ -1029,17 +1029,9 @@ async fn connect_page(State(app): St, headers: HeaderMap) -> Response {
 // Mail
 
 /// An account's sync status and counts, in an element the Mail page refreshes.
-/// What an account's mail takes here, worked out at most every minute (the
-/// Mail page asks every few seconds).
+/// What an account's mail takes here (see `storage::usage`).
 fn stored(app: &App, account: &str) -> u64 {
-    static KNOWN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (i64, u64)>>> = std::sync::LazyLock::new(Default::default);
-    let t = crate::mailstore::now();
-    if let Some((_, n)) = KNOWN.lock().unwrap().get(account).copied().filter(|(at, _)| t - at < 60) {
-        return n;
-    }
-    let n = app.mail.account_bytes(account);
-    KNOWN.lock().unwrap().insert(account.to_string(), (t, n));
-    n
+    storage::usage(app).get(account).map_or(0, |u| u.total())
 }
 
 fn account_status(app: &App, a: &crate::accounts::Account, boxes: &[crate::mailstore::Mailbox]) -> Markup {
