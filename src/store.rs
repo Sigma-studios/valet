@@ -207,6 +207,12 @@ impl Store {
         Ok(rev)
     }
 
+    /// The size of valet.db.
+    pub fn db_bytes(&self) -> u64 {
+        let c = self.db();
+        c.query_row("SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
+    }
+
     // Settings
 
     pub fn setting(&self, key: &str) -> Option<String> {

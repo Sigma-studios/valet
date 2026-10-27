@@ -199,6 +199,12 @@ has got, and what each account's mail takes here. Mail is kept compressed
 (about a fourth of its size for text; attachments, already compressed, lose
 the third their encoding adds).
 
+Settings → Storage shows what valet's data takes, in all (each account,
+then calendars and indexes) and in each account by kind (text, attachments,
+Spam and Trash), and can email you, from an account to its own address, once
+the data reaches 90% of a size you set (checked hourly; again only after it
+went back under 80%).
+
 A later *mail since* or *attachments since* date removes what it leaves out
 from valet, once confirmed: the page says how many messages and attachments
 go, and the room it frees. It all stays at the provider: an earlier date

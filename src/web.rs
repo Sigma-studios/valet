@@ -57,6 +57,8 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/mail/accounts/{id}", get(edit_account_page).post(update_account))
         .route("/mail/accounts/{id}/retire", post(retire_account))
         .route("/mail/accounts/{id}/keep", post(keep_account))
+        .route("/storage", get(storage::storage_page).post(storage::save_alert))
+        .route("/storage/test", post(storage::test_alert))
         .route("/mail/accounts/{id}/delete", post(delete_account))
         .route("/mail/oauth/{account}/start", post(oauth_start))
         .route("/mail/oauth", get(oauth_callback))
@@ -109,7 +111,10 @@ macro_rules! guard {
 mod assets;
 mod calendar;
 mod push;
+mod storage;
 mod webmail;
+
+pub use storage::watch as watch_storage;
 
 /// The app, for what every page shows (the count of invitations waiting).
 static APP: std::sync::OnceLock<std::sync::Weak<App>> = std::sync::OnceLock::new();
@@ -128,6 +133,7 @@ fn waiting(app: &App) -> Vec<crate::mailstore::Invite> {
 const SETTINGS: &[(&str, &str)] = &[
     ("/settings", "Overview"),
     ("/mail", "Mail accounts"),
+    ("/storage", "Storage"),
     ("/calendars", "Calendars"),
     ("/patterns", "Alert patterns"),
     ("/events", "Event alerts"),
@@ -384,6 +390,9 @@ async fn home(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> Respo
             p.muted.small { "Turn off your apps' own default alerts, or valet will see them as alerts you set yourself." }
         }
         (push::section(&app))
+        h2 { "Storage" }
+        (storage::overview(&app))
+        p.small style="margin-top:-4px" { a href="/storage" { "Each account, and an alert by email →" } }
         h2 { "Calendars" }
         @if calendars.is_empty() {
             p.muted { "No calendar yet. " a href="/calendars" { "Create one" } " or " a href="/import" { "import" } " your existing ones." }
