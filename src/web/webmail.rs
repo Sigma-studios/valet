@@ -352,11 +352,6 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .tag { font-size:11px; border:1px solid var(--line); border-radius:4px; padding:0 4px; color:var(--muted); margin-right:4px; }
 /* In All mail: a message in Spam or Trash. */
 .tag.bin { color:var(--bad); border-color:currentColor; }
-.toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
-.toolbar form { display:inline; margin:0; }
-.toolbar input[type=search] { flex:1; min-width:160px; }
-.toolbar a.button, .toolbar button { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; }
-.toolbar a.button:hover, .toolbar button:hover { background:var(--line); text-decoration:none; }
 .toolbar button.danger { color:var(--bad); }
 /* "Move to…" as wide as what it shows, not as its longest folder name (which
    the open menu still shows in full), so the actions after it don't wrap. */
@@ -373,39 +368,6 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .pane:has(#bulk input[name=id]:checked) .toolbar .bulk-actions { display:flex; }
 .toolbar .bulk-actions .count { font-size:14px; font-weight:600; margin-right:4px; }
 .toolbar label.pickall { display:flex; flex-direction:row; align-items:center; margin:0 4px 0 12px; }
-/* The Filter button, its menu, and the filters on as chips under the toolbar. */
-.toolbar details.filter { position:relative; }
-.toolbar details.filter > summary { list-style:none; cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; white-space:nowrap; }
-.toolbar details.filter > summary::-webkit-details-marker { display:none; }
-.toolbar details.filter > summary:hover, .toolbar details.filter[open] > summary { background:var(--line); }
-.toolbar details.filter > summary.on { border-color:var(--accent); color:var(--accent); }
-.toolbar details.filter > summary .count { background:var(--accent); color:#fff; border-radius:9px; font-size:11px; font-weight:700; line-height:17px; padding:0 6px; }
-.filter .panel { position:absolute; right:0; top:calc(100% + 6px); z-index:10; width:320px; max-width:calc(100vw - 24px); max-height:calc(100vh - 130px); overflow-y:auto; display:flex; flex-direction:column; gap:16px; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; box-shadow:0 8px 28px rgb(0 0 0 / .2); }
-.filter fieldset { border:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; min-width:0; }
-.filter legend { padding:0; margin-bottom:8px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
-.filter .segmented { display:flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
-.filter .segmented label { flex:1; position:relative; margin:0; }
-.filter .segmented label + label { border-left:1px solid var(--line); }
-.filter .segmented input { position:absolute; opacity:0; pointer-events:none; }
-.filter .segmented span { display:block; text-align:center; padding:5px 0; font-size:14px; color:var(--fg); cursor:pointer; }
-.filter .segmented span:hover { background:var(--line); }
-.filter .segmented input:checked + span { background:var(--accent); color:#fff; }
-.filter .segmented input:focus-visible + span { outline:2px solid var(--accent); outline-offset:-2px; }
-.filter label.check { flex-direction:row; align-items:center; gap:8px; font-size:14px; color:var(--fg); cursor:pointer; }
-.filter .person { position:relative; display:flex; flex-direction:column; gap:2px; font-size:13px; color:var(--muted); }
-.filter .person input, .filter select, .filter .range input { width:100%; }
-.filter .range { display:none; gap:8px; } .filter .range label { flex:1; min-width:0; }
-.filter:has(select[name=when] option[value=custom]:checked) .range { display:flex; }
-.filter .suggest { position:absolute; left:0; right:0; top:100%; z-index:11; margin:3px 0 0; padding:4px; list-style:none; max-height:260px; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; box-shadow:0 6px 20px rgb(0 0 0 / .18); }
-.filter .suggest li { display:flex; flex-direction:column; padding:5px 8px; border-radius:5px; cursor:pointer; font-size:14px; color:var(--fg); overflow-wrap:anywhere; }
-.filter .suggest li .addr { font-size:12px; color:var(--muted); }
-.filter .suggest li:hover, .filter .suggest li[aria-selected=true] { background:var(--line); }
-.filter .foot { display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--line); padding-top:12px; }
-.toolbar .filters-on:empty { display:none; }
-.toolbar .filters-on { flex-basis:100%; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
-.filters-on a.chip { display:inline-flex; align-items:center; gap:6px; padding:2px 8px 2px 10px; border-radius:14px; font-size:13px; color:var(--fg); background:color-mix(in srgb, var(--accent) 14%, var(--card)); border:1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
-.filters-on a.chip span { font-size:11px; color:var(--muted); }
-.filters-on a.chip:hover { text-decoration:none; border-color:var(--accent); } .filters-on a.chip:hover span { color:var(--fg); }
 /* A message opened from the list: beside it when there's room (the list
    then shows subjects only), instead of it otherwise. */
 @media (min-width: 1260px) {
@@ -445,12 +407,55 @@ form.write textarea { min-height:320px; font:inherit; padding:8px; border:1px so
 }
 "#;
 
+/// A list's toolbar: search, the Filter button and its menu, the filters on
+/// as chips (also the Invitations page's).
+pub(super) const FILTER_CSS: &str = r#"
+.toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+.toolbar form { display:inline; margin:0; }
+.toolbar input[type=search] { flex:1; min-width:160px; }
+.toolbar a.button, .toolbar button { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; }
+.toolbar a.button:hover, .toolbar button:hover { background:var(--line); text-decoration:none; }
+/* The Filter button, its menu, and the filters on as chips under the toolbar. */
+.toolbar details.filter { position:relative; }
+.toolbar details.filter > summary { list-style:none; cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; white-space:nowrap; }
+.toolbar details.filter > summary::-webkit-details-marker { display:none; }
+.toolbar details.filter > summary:hover, .toolbar details.filter[open] > summary { background:var(--line); }
+.toolbar details.filter > summary.on { border-color:var(--accent); color:var(--accent); }
+.toolbar details.filter > summary .count { background:var(--accent); color:#fff; border-radius:9px; font-size:11px; font-weight:700; line-height:17px; padding:0 6px; }
+.filter .panel { position:absolute; right:0; top:calc(100% + 6px); z-index:10; width:320px; max-width:calc(100vw - 24px); max-height:calc(100vh - 130px); overflow-y:auto; display:flex; flex-direction:column; gap:16px; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; box-shadow:0 8px 28px rgb(0 0 0 / .2); }
+.filter fieldset { border:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; min-width:0; }
+.filter legend { padding:0; margin-bottom:8px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+.filter .segmented { display:flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+.filter .segmented label { flex:1; position:relative; margin:0; }
+.filter .segmented label + label { border-left:1px solid var(--line); }
+.filter .segmented input { position:absolute; opacity:0; pointer-events:none; }
+.filter .segmented span { display:block; text-align:center; padding:5px 0; font-size:14px; color:var(--fg); cursor:pointer; }
+.filter .segmented span:hover { background:var(--line); }
+.filter .segmented input:checked + span { background:var(--accent); color:#fff; }
+.filter .segmented input:focus-visible + span { outline:2px solid var(--accent); outline-offset:-2px; }
+.filter label.check { flex-direction:row; align-items:center; gap:8px; font-size:14px; color:var(--fg); cursor:pointer; }
+.filter .person { position:relative; display:flex; flex-direction:column; gap:2px; font-size:13px; color:var(--muted); }
+.filter .person input, .filter select, .filter .range input { width:100%; }
+.filter .range { display:none; gap:8px; } .filter .range label { flex:1; min-width:0; }
+.filter:has(select[name=when] option[value=custom]:checked) .range { display:flex; }
+.filter .suggest { position:absolute; left:0; right:0; top:100%; z-index:11; margin:3px 0 0; padding:4px; list-style:none; max-height:260px; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; box-shadow:0 6px 20px rgb(0 0 0 / .18); }
+.filter .suggest li { display:flex; flex-direction:column; padding:5px 8px; border-radius:5px; cursor:pointer; font-size:14px; color:var(--fg); overflow-wrap:anywhere; }
+.filter .suggest li .addr { font-size:12px; color:var(--muted); }
+.filter .suggest li:hover, .filter .suggest li[aria-selected=true] { background:var(--line); }
+.filter .foot { display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--line); padding-top:12px; }
+.toolbar .filters-on:empty { display:none; }
+.toolbar .filters-on { flex-basis:100%; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.filters-on a.chip { display:inline-flex; align-items:center; gap:6px; padding:2px 8px 2px 10px; border-radius:14px; font-size:13px; color:var(--fg); background:color-mix(in srgb, var(--accent) 14%, var(--card)); border:1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+.filters-on a.chip span { font-size:11px; color:var(--muted); }
+.filters-on a.chip:hover { text-decoration:none; border-color:var(--accent); } .filters-on a.chip:hover span { color:var(--fg); }
+"#;
+
 fn mail_page(title: &str, current: i64, app: &App, body: Markup) -> Response {
     page_wide(
         title,
         "/inbox",
         html! {
-            style { (PreEscaped(MAIL_CSS)) }
+            style { (PreEscaped(FILTER_CSS)) (PreEscaped(MAIL_CSS)) }
             div.mail {
                 (sidebar(app, current))
                 div.pane { (body) }
@@ -771,7 +776,7 @@ fn matches(raw: &[u8], words: &[String]) -> bool {
     words.iter().all(|w| hay.contains(w.as_str()))
 }
 
-const FUNNEL: &str = r#"<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 3h12l-4.6 5.4V13l-2.8 1.4v-6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>"#;
+pub(super) const FUNNEL: &str = r#"<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 3h12l-4.6 5.4V13l-2.8 1.4v-6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>"#;
 
 /// The Filter button and its menu, part of the toolbar's form: applied
 /// together, with the search. `all_mail`: the list is All mail.

@@ -170,7 +170,9 @@ def main():
     r = s.post(f"{WEB}/invites/{inv}", data={"answer": "IGNORED", "calendar": ""})
     check(flash(r)[0] == "Ignored: the organizer isn't told.", "Ignore")
     page = s.get(f"{WEB}/invitations").text
-    check("Nothing waiting" in page and ">ignored<" in page, "no longer waiting; listed as ignored")
+    check("Nothing waiting" in page and ">ignored<" not in page, "no longer waiting, so not listed at first")
+    page = s.get(f"{WEB}/invitations?status=answered").text
+    check(">ignored<" in page and "Planning" in page and ">Answered<" in page, "listed as ignored among the answered, a chip saying so")
     check(not planning(), "off the Invitations calendar")
     time.sleep(2)
     check(len(gm_subjects("org", "INBOX")) == sent_before, "no answer reached the organizer")
@@ -192,7 +194,21 @@ def main():
     check(r.ok and r.json() == {"ok": True, "waiting": 0}, f"accepted from the calendar, nothing left waiting: {r.text}")
     check(retro() and retro()[0]["calendar"] == "calendar" and not retro()[0]["unanswered"] and "invite" not in retro()[0], "moved to the calendar picked, answered")
     wait(lambda: "Accepted: Retro" in gm_subjects("org", "INBOX"), "the organizer gets the answer")
-    check(re.search(r"Retro.*?answered: accepted", s.get(f"{WEB}/invitations").text, re.S), "the Invitations page knows")
+    check(re.search(r"Retro.*?answered: accepted", s.get(f"{WEB}/invitations?status=all").text, re.S), "the Invitations page knows")
+    # Its search and filters.
+    titles = lambda **q: set(re.findall(r'<div class="card"><div[^>]*><div><b>([^<]*)</b>', s.get(f"{WEB}/invitations", params=q).text))
+    check(titles(status="all") == {"Planning", "Retro"}, "all of them")
+    check(titles(status="all", q="retro") == {"Retro"}, "searched by title")
+    check(titles(status="all", q="org@local") == {"Planning", "Retro"} and not titles(status="all", q="nobody-at-all"), "searched by organizer")
+    check(titles(status="all", **{"from": "org@"}) == {"Planning", "Retro"} and not titles(status="all", **{"from": "else@"}), "filtered by organizer")
+    check(not titles(status="all", when="past"), "none past")
+    check(not titles(status="weird") and "No invitation matches" not in s.get(f"{WEB}/invitations", params={"status": "weird"}).text, "an unknown status: the default")
+    page = s.get(f"{WEB}/invitations", params={"status": "all", "q": "retro"}).text
+    check('name="back" value="/invitations?q=retro&amp;status=all"' in page, "an answer comes back to the list as filtered")
+    r = s.post(f"{WEB}/invites/{inv}", data={"answer": "IGNORED", "back": "/invitations?q=planning&status=all"}, allow_redirects=False)
+    check(r.headers["location"].startswith("/invitations?q=planning&status=all&ok="), f"and does: {r.headers['location']}")
+    r = s.post(f"{WEB}/invites/{inv}", data={"answer": "IGNORED", "back": "https://elsewhere.example/"}, allow_redirects=False)
+    check(r.headers["location"].startswith("/invitations?ok="), "not elsewhere")
     m.logout()
 
     # Open pages are told of changes, to fetch their list again.
@@ -211,6 +227,7 @@ def main():
         from cdp import CHROME
         if os.access(CHROME, os.X_OK):
             filter_menu(s, inbox, sys.argv[1])
+            invitation_filters(sys.argv[1])
         else:
             print("(no Chrome: the Filter menu's browser checks skipped)")
     all_mail(s, inbox)
@@ -362,6 +379,44 @@ def filters(s, inbox):
     check(sug("to", "bo")[:1] == [{"name": "Bob", "address": "bob@acme.test"}] and not sug("from", "bob@"), "recipients for To")
     check(sug("from", "")[0]["address"] == "someone@else.org", "nothing typed: the most frequent first")
     check(requests.get(f"{WEB}/box/{inbox}/addresses?q=zo", timeout=10).status_code == 401, "suggestions only when logged in")
+
+
+def invitation_filters(out):
+    """The Invitations page's Filter menu in Chrome: not answered and upcoming
+    at first, each choice applied in place."""
+    from cdp import Browser
+    shots = os.path.join(out, "shots")
+    os.makedirs(shots, exist_ok=True)
+    b = Browser(os.path.join(out, "chrome-invites"), port=9336)
+    b.go(f"{WEB}/login")
+    b.js(f"document.querySelector('input[name=password]').value = {os.environ['VALET_PASSWORD']!r}; document.querySelector('form').submit()")
+    b.settle(1.5)
+    b.go(f"{WEB}/invitations", 1.5)
+
+    def until(expr, what):
+        end = time.time() + 10
+        while time.time() < end and not b.js(expr):
+            b.settle(0.2)
+        check(b.js(expr), what)
+
+    cards = "JSON.stringify([...document.querySelectorAll('.card b:first-child')].map(e => e.textContent).sort())"
+    check(b.js(cards) == "[]" and b.js("document.querySelector('details.filter > summary .count')?.textContent") == "2", "both answered: none shown, two filters on")
+    check(b.js("[...document.querySelectorAll('.filters-on a.chip')].map(a => a.firstChild.textContent).join()") == "Not answered,Upcoming", "said on chips")
+    b.js("document.querySelector('details.filter > summary').click()")
+    check(b.js("document.querySelector('.filter .panel').checkVisibility() && getComputedStyle(document.querySelector('.filter .panel')).position === 'absolute'"), "Filter opens its menu, styled as the mail's")
+    b.js("window.samePage = true")
+    b.js("document.querySelector('input[name=status][value=all]').click()")
+    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\"]'", "All applies at once")
+    check(b.js("window.samePage && document.querySelector('details.filter').open"), "in place, the menu still open")
+    check(b.js("document.querySelector('form[action^=\"/invites/\"] input[name=back]').value") == "/invitations?status=all", "an answer comes back here")
+    b.js("{ const i = document.getElementById('filter-from'); i.focus(); i.value = 'nobody'; i.dispatchEvent(new Event('input', { bubbles: true })) }")
+    until(f"{cards} === '[]' && document.body.textContent.includes('No invitation matches')", "an organizer typed applies after a pause")
+    b.shot(f"{shots}/invitations-filter.png")
+    b.js("document.querySelector('[data-swap=filter-reset]').click()")
+    b.settle(1.5)
+    check(b.js("location.search") == "" and b.js(cards) == "[]", "Reset: back to those waiting")
+    check(not b.errors, f"no script errors: {b.errors}")
+    b.close()
 
 
 def filter_menu(s, inbox, out):
