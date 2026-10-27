@@ -178,7 +178,7 @@ pub enum Pass {
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL, atts INTEGER, att_bytes INTEGER, removed INTEGER, text_bytes INTEGER);
+CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL, atts INTEGER, att_bytes INTEGER, removed INTEGER, text_bytes INTEGER, len INTEGER);
 CREATE TABLE IF NOT EXISTS mailboxes (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, account TEXT, remote TEXT,
     special TEXT NOT NULL DEFAULT '', uidvalidity INTEGER NOT NULL, uidnext INTEGER NOT NULL DEFAULT 1,
@@ -264,6 +264,22 @@ fn join_flags(f: &[String]) -> String {
 /// How every compressed message starts; a message as received never does.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
+/// A message ready to keep: its hash, compressed, what its attachments
+/// weigh. Worked out before taking the store.
+struct Packed {
+    hash: String,
+    data: Vec<u8>,
+    atts: crate::mime::Attachments,
+    text_bytes: u64,
+}
+
+impl Packed {
+    fn of(raw: &[u8]) -> Packed {
+        let data = pack(raw);
+        Packed { hash: hex::encode(Sha256::digest(raw)), atts: crate::mime::attachments(raw), text_bytes: text_bytes(raw, data.len()), data }
+    }
+}
+
 /// What the message takes kept without its attachments (`stored`: kept with them).
 fn text_bytes(raw: &[u8], stored: usize) -> u64 {
     match crate::mime::strip(raw) {
@@ -329,6 +345,7 @@ impl MailStore {
                 ("blobs", "att_bytes", "INTEGER"),
                 ("blobs", "removed", "INTEGER"),
                 ("blobs", "text_bytes", "INTEGER"),
+                ("blobs", "len", "INTEGER"),
                 ("mailboxes", "filled_since", "INTEGER"),
             ] {
                 let has: bool = c.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"), [], |r| r.get(0))?;
@@ -586,18 +603,13 @@ impl MailStore {
         Some(unpack(data))
     }
 
-    /// Kept compressed, under the hash of the message as it is.
-    fn put_blob(c: &Connection, raw: &[u8]) -> rusqlite::Result<String> {
-        let hash = hex::encode(Sha256::digest(raw));
-        if c.query_row("SELECT 1 FROM blobs WHERE hash = ?1", [&hash], |_| Ok(())).optional()?.is_none() {
-            let a = crate::mime::attachments(raw);
-            let data = pack(raw);
-            c.execute(
-                "INSERT INTO blobs (hash, data, atts, att_bytes, removed, text_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![hash, data, a.count, a.bytes as i64, a.removed, text_bytes(raw, data.len()) as i64],
-            )?;
-        }
-        Ok(hash)
+    /// Keeps a message packed beforehand (see `Packed::of`), if not kept already.
+    fn put_blob(c: &Connection, p: &Packed) -> rusqlite::Result<String> {
+        c.execute(
+            "INSERT OR IGNORE INTO blobs (hash, data, atts, att_bytes, removed, text_bytes, len) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![p.hash, p.data, p.atts.count, p.atts.bytes as i64, p.atts.removed, p.text_bytes as i64, p.data.len() as i64],
+        )?;
+        Ok(p.hash.clone())
     }
 
     /// Once: compresses the messages kept before valet compressed them, and
@@ -637,7 +649,7 @@ impl MailStore {
             for (id, new, a) in done {
                 packed += new.is_some() as u64;
                 let _ = c.execute(
-                    "UPDATE blobs SET data = COALESCE(?2, data), atts = ?3, att_bytes = ?4, removed = ?5 WHERE rowid = ?1",
+                    "UPDATE blobs SET data = COALESCE(?2, data), atts = ?3, att_bytes = ?4, removed = ?5, len = length(COALESCE(?2, data)) WHERE rowid = ?1",
                     params![id, new, a.count, a.bytes as i64, a.removed],
                 );
             }
@@ -665,6 +677,18 @@ impl MailStore {
     /// Once for the messages kept before it was noted: what each takes
     /// without its attachments, a few at a time.
     pub fn measure(&self) {
+        // Their size as kept, so what they take is told without reading them.
+        loop {
+            let n = self
+                .db()
+                .execute("UPDATE blobs SET len = length(data) WHERE rowid IN (SELECT rowid FROM blobs WHERE len IS NULL LIMIT 200)", [])
+                .unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            // Pages waiting for the store get it in between.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let mut after = 0i64;
         let mut n = 0;
         loop {
@@ -740,15 +764,20 @@ impl MailStore {
     /// whether it is new to valet.
     pub fn add_fetched(&self, mailbox: i64, raw: &[u8], flags: &[String], date: i64, remote_uid: u32) -> Result<(i64, bool)> {
         let mid = message_id(raw);
+        let known = |c: &Connection| -> rusqlite::Result<Option<i64>> {
+            c.query_row("SELECT id FROM messages WHERE mailbox = ?1 AND remote_uid = ?2", params![mailbox, remote_uid], |r| r.get(0)).optional()
+        };
+        if let Some(id) = known(&self.db())? {
+            return Ok((id, false));
+        }
+        // Compressed before taking the store, which pages wait for meanwhile.
+        let packed = Packed::of(raw);
         let id = {
             let c = self.db();
-            if let Some(id) = c
-                .query_row("SELECT id FROM messages WHERE mailbox = ?1 AND remote_uid = ?2", params![mailbox, remote_uid], |r| r.get(0))
-                .optional()?
-            {
+            if let Some(id) = known(&c)? {
                 return Ok((id, false));
             }
-            let blob = Self::put_blob(&c, raw)?;
+            let blob = Self::put_blob(&c, &packed)?;
             let doomed = c.execute("DELETE FROM doomed WHERE rowid = (SELECT rowid FROM doomed WHERE mailbox = ?1 AND blob = ?2 LIMIT 1)", params![mailbox, blob])?;
             if doomed > 0 {
                 drop(c);
@@ -960,56 +989,48 @@ impl MailStore {
     /// The message (and its rows in the tree) is now `raw`: the same mail,
     /// with or without its attachments.
     pub fn set_content(&self, id: i64, raw: &[u8]) -> Result<()> {
+        let packed = Packed::of(raw);
         let c = self.db();
-        let blob = Self::put_blob(&c, raw)?;
+        let blob = Self::put_blob(&c, &packed)?;
         c.execute("UPDATE messages SET blob = ?2, size = ?3 WHERE id = ?1 OR link = ?1", params![id, blob, raw.len() as i64])?;
         Ok(())
     }
 
-    /// What the account's mail takes here, compressed, by kind (a message
+    /// What each account's mail takes here, compressed, by kind (a message
     /// in several of its folders counts once; in Spam or Trash only if all
-    /// its copies are).
-    pub fn account_usage(&self, account: &str) -> Usage {
+    /// its copies are). One pass over the messages, for every account.
+    pub fn usage(&self) -> std::collections::HashMap<String, Usage> {
         let c = self.db();
-        c.query_row(
-            r"WITH r AS (SELECT m.blob, MIN(CASE WHEN lower(b.special) IN ('\junk', '\trash') THEN 1 ELSE 0 END) AS bin
-                         FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account = ?1 GROUP BY m.blob)
-              SELECT COUNT(*),
-                     COALESCE(SUM(CASE WHEN r.bin = 0 THEN t.text END), 0),
-                     COALESCE(SUM(CASE WHEN r.bin = 0 THEN length(x.data) - t.text END), 0),
-                     COALESCE(SUM(CASE WHEN r.bin = 1 THEN length(x.data) END), 0),
-                     COALESCE(SUM(CASE WHEN r.bin = 0 THEN x.atts END), 0),
-                     COALESCE(SUM(x.removed), 0)
-              FROM r JOIN blobs x ON x.hash = r.blob
-              -- Without its attachments; until measured, from their size.
-              JOIN (SELECT hash, COALESCE(min(text_bytes, length(data)), length(data) - min(COALESCE(att_bytes, 0), length(data))) AS text FROM blobs) t
-                ON t.hash = x.hash",
-            [account],
-            |r| {
-                let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
-                Ok(Usage { messages: n(0)?, text: n(1)?, attachments: n(2)?, bins: n(3)?, attachment_count: n(4)?, removed: n(5)? })
-            },
-        )
-        .unwrap_or_default()
+        let mut st = c
+            .prepare(
+                r"WITH r AS (SELECT b.account, m.blob, MIN(CASE WHEN lower(b.special) IN ('\junk', '\trash') THEN 1 ELSE 0 END) AS bin
+                             FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account IS NOT NULL GROUP BY b.account, m.blob),
+                  y AS (SELECT r.account, r.bin, COALESCE(b.len, 0) AS len, b.atts, b.removed, b.text_bytes, b.att_bytes
+                        FROM r JOIN blobs b ON b.hash = r.blob),
+                  -- Without its attachments; until measured, from their size.
+                  x AS (SELECT account, bin, len, atts, removed, COALESCE(min(text_bytes, len), len - min(COALESCE(att_bytes, 0), len)) AS text FROM y)
+                  SELECT account, COUNT(*),
+                         COALESCE(SUM(CASE WHEN bin = 0 THEN text END), 0),
+                         COALESCE(SUM(CASE WHEN bin = 0 THEN len - text END), 0),
+                         COALESCE(SUM(CASE WHEN bin = 1 THEN len END), 0),
+                         COALESCE(SUM(CASE WHEN bin = 0 THEN atts END), 0),
+                         COALESCE(SUM(removed), 0)
+                  FROM x GROUP BY account",
+            )
+            .unwrap();
+        st.query_map([], |r| {
+            let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
+            Ok((r.get::<_, String>(0)?, Usage { messages: n(1)?, text: n(2)?, attachments: n(3)?, bins: n(4)?, attachment_count: n(5)?, removed: n(6)? }))
+        })
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect()
     }
 
     /// The size of mail.db.
     pub fn db_bytes(&self) -> u64 {
         let c = self.db();
         c.query_row("SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
-    }
-
-    /// What the account's mail takes here, compressed (a message in
-    /// several of its folders counts once).
-    pub fn account_bytes(&self, account: &str) -> u64 {
-        let c = self.db();
-        c.query_row(
-            "SELECT COALESCE(SUM(length(data)), 0) FROM blobs WHERE hash IN
-             (SELECT m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account = ?1)",
-            [account],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0) as u64
     }
 
     /// Rows mirroring the provider, by remote UID.
@@ -1252,9 +1273,10 @@ impl MailStore {
             _ => None,
         };
         let (folder, account, remote) = self.landing(target, from.as_deref())?;
+        let packed = Packed::of(raw);
         let id = {
             let c = self.db();
-            let blob = Self::put_blob(&c, raw)?;
+            let blob = Self::put_blob(&c, &packed)?;
             let mid = message_id(raw);
             let id = Self::insert_row(&c, folder, &blob, &join_flags(flags), date, raw.len(), &mid, None, None)?;
             drop(c);
@@ -1629,10 +1651,15 @@ mod tests {
         let trash = s.remote_mailbox("work", "Trash", "Work/Trash", "\\Trash").unwrap();
         s.add_fetched(trash, &with_file("binned"), &[], 1_600_000_000, 1).unwrap();
         s.add_fetched(trash, &with_file("new"), &[], 1_600_000_000, 2).unwrap();
-        let u = s.account_usage("work");
+        let u = s.usage()["work"];
         assert_eq!((u.messages, u.attachment_count, u.removed), (4, 3, 0), "{u:?}: four messages, once each; the one only in the trash apart");
         assert!(u.bins > 30_000 && u.attachments > 3 * 25_000 && u.text > 0 && u.text < 5_000, "{u:?}");
-        assert_eq!(u.total(), s.account_bytes("work"), "all of it, by kind");
+        let whole: i64 = s
+            .db()
+            .query_row("SELECT SUM(length(data)) FROM blobs WHERE hash IN (SELECT m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account = 'work')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(u.total(), whole as u64, "all of it, by kind");
+        assert_eq!(s.usage()["home"].messages, 1, "each account its own");
         assert!(s.db_bytes() > 0);
 
         s.set_filled_since(inbox, 0).unwrap();

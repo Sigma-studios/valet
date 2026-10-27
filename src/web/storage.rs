@@ -82,8 +82,25 @@ struct Totals {
     all: u64,
 }
 
+/// Each account's usage, worked out at most every minute (it reads every
+/// message's row, and the Mail page asks every few seconds).
+pub fn usage(app: &App) -> std::collections::HashMap<String, Usage> {
+    type Known = Option<(i64, std::collections::HashMap<String, Usage>)>;
+    static KNOWN: std::sync::Mutex<Known> = std::sync::Mutex::new(None);
+    let t = now();
+    if let Some((at, u)) = KNOWN.lock().unwrap().as_ref()
+        && t - at < 60
+    {
+        return u.clone();
+    }
+    let u = app.mail.usage();
+    *KNOWN.lock().unwrap() = Some((t, u.clone()));
+    u
+}
+
 fn totals(app: &App) -> Totals {
-    let accounts: Vec<(Account, Usage)> = app.accounts().into_iter().map(|a| { let u = app.mail.account_usage(&a.id); (a, u) }).collect();
+    let by = usage(app);
+    let accounts: Vec<(Account, Usage)> = app.accounts().into_iter().map(|a| { let u = by.get(&a.id).copied().unwrap_or_default(); (a, u) }).collect();
     Totals { accounts, all: app.mail.db_bytes() + app.store.db_bytes() }
 }
 
