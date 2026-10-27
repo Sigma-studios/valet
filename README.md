@@ -17,7 +17,8 @@ the native apps of every device.
 - **Invitations** arriving in an inbox land in the calendar (an "Invitations"
   calendar until answered), and can be answered from valet's Invitations page,
   which names the events each one would overlap: the organizer gets the reply
-  from the account the invitation came to.
+  from the account the invitation came to. It shows those not answered yet,
+  for events still to come, and searches and filters them all like the mail.
 
 - **Webmail** on valet's own site, from any browser: your tree of folders
   (and every account's own folders), search, a Filter menu (read or unread,

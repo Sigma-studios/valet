@@ -979,7 +979,7 @@ impl MailStore {
     pub fn invites(&self) -> Vec<Invite> {
         let c = self.db();
         let mut st = c
-            .prepare("SELECT id, account, uid, method, summary, organizer, dtstart, ics, response, message FROM invites WHERE method = 'REQUEST' ORDER BY dtstart DESC LIMIT 200")
+            .prepare("SELECT id, account, uid, method, summary, organizer, dtstart, ics, response, message FROM invites WHERE method = 'REQUEST' ORDER BY dtstart DESC")
             .unwrap();
         st.query_map([], |r| {
             Ok(Invite {

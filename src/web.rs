@@ -1147,15 +1147,173 @@ setInterval(async () => {
     })
 }
 
-/// Invitations: events not in a calendar yet, waiting for an answer.
-async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> Response {
+#[derive(Deserialize, Default)]
+struct InvitesQuery {
+    #[serde(default)]
+    q: String,
+    /// Empty: not answered yet; `answered`; `all`.
+    #[serde(default)]
+    status: String,
+    /// Empty: events still to come; `past`; `all`.
+    #[serde(default)]
+    when: String,
+    /// Part of the organizer's address.
+    #[serde(default)]
+    from: String,
+    /// The account it came to.
+    #[serde(default)]
+    account: String,
+    ok: Option<String>,
+    err: Option<String>,
+}
+
+/// The Invitations page's filters, in its address.
+const INVITE_FILTERS: [&str; 4] = ["status", "when", "from", "account"];
+
+impl InvitesQuery {
+    fn criteria(&self) -> Vec<(&'static str, &str)> {
+        [("q", self.q.as_str()), ("status", &self.status), ("when", &self.when), ("from", &self.from), ("account", &self.account)]
+            .into_iter()
+            .filter(|(_, v)| !v.trim().is_empty())
+            .collect()
+    }
+
+    /// The page with its search and filters, but those of `drop`, and `set`.
+    fn link(&self, drop: &[&str], set: &[(&str, &str)]) -> String {
+        let enc = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
+        let pairs: Vec<String> = self
+            .criteria()
+            .into_iter()
+            .filter(|(k, _)| !drop.contains(k) && !set.iter().any(|(s, _)| s == k))
+            .chain(set.iter().copied())
+            .map(|(k, v)| format!("{k}={}", enc(v)))
+            .collect();
+        if pairs.is_empty() { "/invitations".into() } else { format!("/invitations?{}", pairs.join("&")) }
+    }
+
+    /// The filters on, as said on their chips, each with its link off. Not
+    /// answered and still to come are on unless asked otherwise.
+    fn chips(&self, accounts: &[crate::accounts::Account]) -> Vec<(String, String)> {
+        let mut on = Vec::new();
+        match self.status.as_str() {
+            "" => on.push(("Not answered".into(), self.link(&[], &[("status", "all")]))),
+            "answered" => on.push(("Answered".into(), self.link(&[], &[("status", "all")]))),
+            _ => {}
+        }
+        match self.when.as_str() {
+            "" => on.push(("Upcoming".into(), self.link(&[], &[("when", "all")]))),
+            "past" => on.push(("Past".into(), self.link(&[], &[("when", "all")]))),
+            _ => {}
+        }
+        if !self.from.trim().is_empty() {
+            on.push((format!("From: {}", self.from.trim()), self.link(&["from"], &[])));
+        }
+        if let Some(a) = accounts.iter().find(|a| a.id == self.account) {
+            on.push((format!("To: {}", a.name), self.link(&["account"], &[])));
+        }
+        on
+    }
+
+    fn keeps(&self, i: &crate::mailstore::Invite, today: &str, words: &[String]) -> bool {
+        let upcoming = i.dtstart.get(..8).is_some_and(|d| d >= today);
+        let from = self.from.trim().to_lowercase();
+        (match self.status.as_str() {
+            "" => i.response.is_none(),
+            "answered" => i.response.is_some(),
+            _ => true,
+        }) && (match self.when.as_str() {
+            "" => upcoming,
+            "past" => !upcoming,
+            _ => true,
+        }) && (from.is_empty() || i.organizer.to_lowercase().contains(&from))
+            && (self.account.is_empty() || i.account == self.account)
+            && (words.is_empty() || {
+                let hay = format!("{} {} {}", i.summary, i.organizer, i.ics).to_lowercase();
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+    }
+}
+
+/// The Filter menu: each choice applies at once, the list swapped in place
+/// (an organizer typed, after a pause), the menu staying open; closed by a
+/// click elsewhere or Escape. What's left empty stays out of the address.
+const INVITES_SCRIPT: &str = r#"
+{
+  const form = document.querySelector('form.toolbar'), menu = form.querySelector('details.filter');
+  let shown = location.pathname + location.search, asked = 0;
+  form.addEventListener('formdata', (e) => {
+    for (const [k, v] of [...e.formData]) if (!String(v).trim()) e.formData.delete(k);
+  });
+  const apply = async () => {
+    const qs = new URLSearchParams(new FormData(form)).toString();
+    const url = qs ? `/invitations?${qs}` : '/invitations';
+    if (url === shown) return;
+    shown = url;
+    history.replaceState(null, '', url);
+    const n = ++asked;
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (r.redirected || !r.ok) throw new Error(r.status);
+      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      if (n !== asked) return;
+      for (const el of document.querySelectorAll('[data-swap]')) {
+        const f = doc.querySelector(`[data-swap="${el.dataset.swap}"]`);
+        if (f) el.replaceWith(f);
+      }
+    } catch (_) { location = url; }
+  };
+  let typing = null;
+  const panel = menu.querySelector('.panel');
+  panel.addEventListener('change', apply);
+  panel.addEventListener('input', (e) => {
+    if (e.target.type !== 'text') return;
+    clearTimeout(typing);
+    typing = setTimeout(apply, 400);
+  });
+  document.addEventListener('click', (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; });
+  menu.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { menu.open = false; menu.querySelector('summary').focus(); }
+  });
+}
+"#;
+
+/// Invitations, those not answered yet for events still to come at first;
+/// searched and filtered like the mail.
+async fn invitations_page(State(app): St, headers: HeaderMap, Query(mut q): Query<InvitesQuery>) -> Response {
     guard!(app, headers);
-    let waiting = waiting(&app);
-    let others: Vec<crate::mailstore::Invite> = app.mail.invites().into_iter().filter(|i| !waiting.iter().any(|w| w.id == i.id)).collect();
+    // Anything else: as when not said.
+    if !matches!(q.status.as_str(), "answered" | "all") {
+        q.status.clear();
+    }
+    if !matches!(q.when.as_str(), "past" | "all") {
+        q.when.clear();
+    }
+    let today = crate::util::today();
+    let words: Vec<String> = q.q.split_whitespace().map(str::to_lowercase).collect();
+    let all = app.mail.invites();
+    let mut organizers: Vec<&str> = all.iter().map(|i| i.organizer.as_str()).filter(|o| !o.is_empty()).collect();
+    organizers.sort_unstable();
+    organizers.dedup();
+    let mut found: Vec<&crate::mailstore::Invite> = all.iter().filter(|i| q.keeps(i, &today, &words)).collect();
+    // The next ones first, then the latest past.
+    let upcoming = |i: &crate::mailstore::Invite| i.dtstart.get(..8).is_some_and(|d| d >= today.as_str());
+    found.sort_by(|a, b| match (upcoming(a), upcoming(b)) {
+        (true, true) => a.dtstart.cmp(&b.dtstart),
+        (false, false) => b.dtstart.cmp(&a.dtstart),
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+    });
+    let total = found.len();
+    found.truncate(200);
+    let accounts = app.accounts();
+    let account_name = |id: &str| accounts.iter().find(|a| a.id == id).map(|a| a.name.clone());
+    let chips = q.chips(&accounts);
+    let here = q.link(&[], &[]);
     let all_calendars = app.store.calendars();
     let calendars: Vec<&Calendar> = all_calendars.iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
     let calendar_name = |id: &str| all_calendars.iter().find(|c| c.id == id).map_or(id.to_string(), |c| c.name.clone());
-    let objects = if waiting.is_empty() { vec![] } else { app.store.all_objects() };
+    let unanswered = found.iter().any(|i| i.response.is_none());
+    let objects = if unanswered { app.store.all_objects() } else { vec![] };
     let now = crate::mailstore::now();
     let card = |i: &crate::mailstore::Invite| html! {
         div.card {
@@ -1164,6 +1322,7 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
                     b { (i.summary) }
                     div.small.muted {
                         (starts(&i.ics)) " · from " (i.organizer)
+                        @if accounts.len() > 1 { @if let Some(a) = account_name(&i.account) { " · to " (a) } }
                         @if let Some(m) = app.mail.message_with_id(&i.account, &i.message) { " · " a href={"/msg/" (m)} { "the mail" } }
                     }
                     // Before answering: what it would clash with.
@@ -1188,6 +1347,7 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
                 }
             }
             form.row method="post" action={"/invites/" (i.id)} data-busy style="margin-top:10px" {
+                input type="hidden" name="back" value=(here);
                 label { "Put it in" select name="calendar" {
                     @for c in &calendars { option value=(c.id) { (c.name) } }
                     option value="" { "Invitations" }
@@ -1199,20 +1359,79 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(m): Query<Ms
             }
         }
     };
-    page("Invitations", "/invitations", html! {
-        h1 { "Invitations" }
-        (flash(&m))
-        @if waiting.is_empty() {
-            p.muted { "Nothing waiting: invitations arriving in your inboxes show here until you answer them." }
-        } @else {
-            @for i in &waiting { (card(i)) }
-            p.muted.small { "Answering emails the organizer from the account the invitation came to, and puts the event in the calendar you pick. Accepting from a mail app works too. "
-                "Ignore dismisses it without telling the organizer." }
+    let segmented = |name: &str, value: &str, choices: [(&str, &str); 3]| html! {
+        div.segmented {
+            @for (v, label) in choices {
+                label { input type="radio" name=(name) value=(v) checked[value == v]; span { (label) } }
+            }
         }
-        @if !others.is_empty() {
-            details style="margin-top:20px" {
-                summary { "Answered or past (" (others.len()) ")" }
-                @for i in &others { (card(i)) }
+    };
+    page("Invitations", "/invitations", html! {
+        style { (PreEscaped(webmail::FILTER_CSS)) }
+        h1 { "Invitations" }
+        (flash(&Msg { ok: q.ok.clone(), err: q.err.clone(), relogin: None }))
+        form.toolbar method="get" action="/invitations" {
+            input type="search" name="q" value=(q.q) placeholder="Search invitations";
+            a.button href=(q.link(&["q"], &[])) hidden[q.q.is_empty()] title="Clear the search (the filters stay)" { "Clear" }
+            details.filter {
+                summary.on[!chips.is_empty()] title="Filter the invitations listed" data-swap="filter-summary" {
+                    (PreEscaped(webmail::FUNNEL)) "Filter"
+                    @if !chips.is_empty() { span.count aria-label={(chips.len()) " on"} { (chips.len()) } }
+                }
+                div.panel {
+                    fieldset {
+                        legend { "Status" }
+                        (segmented("status", &q.status, [("", "Not answered"), ("answered", "Answered"), ("all", "All")]))
+                    }
+                    fieldset {
+                        legend { "Date" }
+                        (segmented("when", &q.when, [("", "Upcoming"), ("past", "Past"), ("all", "All")]))
+                    }
+                    fieldset {
+                        legend { "People" }
+                        div.person {
+                            label for="filter-from" { "Organizer" }
+                            input #filter-from type="text" name="from" value=(q.from) placeholder="Name or address" list="organizers" autocomplete="off" spellcheck="false";
+                            datalist #organizers { @for o in &organizers { option value=(o) {} } }
+                        }
+                        @if accounts.len() > 1 {
+                            div.person {
+                                label for="filter-account" { "Came to" }
+                                select #filter-account name="account" {
+                                    option value="" { "Any account" }
+                                    @for a in &accounts { option value=(a.id) selected[q.account == a.id] { (a.name) } }
+                                }
+                            }
+                        }
+                    }
+                    div.foot {
+                        span.small.muted { "Applied as you choose" }
+                        a href=(q.link(&INVITE_FILTERS, &[])) data-swap="filter-reset" title="Back to those not answered yet, still to come" { "Reset" }
+                    }
+                }
+            }
+            div.filters-on data-swap="filters-on" {
+                @for (label, off) in &chips {
+                    a.chip href=(off) title="Remove this filter" { (label) span aria-hidden="true" { "✕" } }
+                }
+                @if chips.len() > 1 { a.small href=(q.link(&["from", "account"], &[("status", "all"), ("when", "all")])) { "Clear filters" } }
+            }
+        }
+        script { (PreEscaped(INVITES_SCRIPT)) }
+        div data-swap="invites" {
+            @if found.is_empty() {
+                @if q.criteria().is_empty() {
+                    p.muted { "Nothing waiting: invitations arriving in your inboxes show here until you answer them." }
+                } @else {
+                    p.muted { "No invitation matches." }
+                }
+            } @else {
+                @for i in &found { (card(i)) }
+                @if total > found.len() { p.muted.small { "The first " (found.len()) " of " (total) ": search or filter to see the others." } }
+                @if unanswered {
+                    p.muted.small { "Answering emails the organizer from the account the invitation came to, and puts the event in the calendar you pick. Accepting from a mail app works too. "
+                        "Ignore dismisses it without telling the organizer." }
+                }
             }
         }
     })
@@ -1532,23 +1751,27 @@ struct AnswerForm {
     answer: String,
     #[serde(default)]
     calendar: String,
+    /// The Invitations page as searched and filtered.
+    #[serde(default)]
+    back: String,
 }
 
 async fn answer_invite(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Form(f): Form<AnswerForm>) -> Response {
     guard!(app, headers);
+    let to = if f.back.starts_with("/invitations") { f.back.as_str() } else { "/invitations" };
     if f.answer == "IGNORED" {
         return match crate::invites::ignore(&app, id) {
-            Ok(()) => back("/invitations", Some("Ignored: the organizer isn't told."), None),
-            Err(e) => back("/invitations", None, Some(&format!("{e:#}"))),
+            Ok(()) => back(to, Some("Ignored: the organizer isn't told."), None),
+            Err(e) => back(to, None, Some(&format!("{e:#}"))),
         };
     }
     if !matches!(f.answer.as_str(), "ACCEPTED" | "TENTATIVE" | "DECLINED") {
-        return back("/invitations", None, Some("Unknown answer."));
+        return back(to, None, Some("Unknown answer."));
     }
     let calendar = (!f.calendar.is_empty()).then_some(f.calendar.as_str());
     match crate::invites::respond(&app, id, &f.answer, calendar).await {
-        Ok(()) => back("/invitations", Some("Answered: the organizer gets your reply by email."), None),
-        Err(e) => back("/invitations", None, Some(&format!("{e:#}"))),
+        Ok(()) => back(to, Some("Answered: the organizer gets your reply by email."), None),
+        Err(e) => back(to, None, Some(&format!("{e:#}"))),
     }
 }
 
