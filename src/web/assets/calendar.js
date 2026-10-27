@@ -326,9 +326,10 @@
     };
     const button = (a, label, attrs = {}) => el('button', { type: 'button', disabled: !online, onclick: (ev) => answer(a, ev.currentTarget), ...attrs }, label);
     const row = el('div', { class: 'row' }, el('label', {}, 'Put it in', cal),
-      button('ACCEPTED', 'Accept'), button('TENTATIVE', 'Maybe'), button('DECLINED', 'Decline', { class: 'plain' }));
+      button('ACCEPTED', 'Accept'), button('TENTATIVE', 'Maybe'), button('DECLINED', 'Decline', { class: 'plain' }),
+      button('IGNORED', 'Ignore', { class: 'plain', title: "Dismiss it without answering: it leaves the calendar, the organizer isn't told" }));
     return el('div', { class: 'answer' },
-      el('p', { class: 'small' }, 'Not answered yet: the organizer gets your answer by email.'),
+      el('p', { class: 'small' }, 'Not answered yet: the organizer gets your answer by email (Ignore tells them nothing).'),
       row, err);
   }
 

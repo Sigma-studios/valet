@@ -209,6 +209,20 @@ def main():
     check(r.headers["location"].startswith("/invitations?q=planning&status=all&ok="), f"and does: {r.headers['location']}")
     r = s.post(f"{WEB}/invites/{inv}", data={"answer": "IGNORED", "back": "https://elsewhere.example/"}, allow_redirects=False)
     check(r.headers["location"].startswith("/invitations?ok="), "not elsewhere")
+
+    # A third, ignored from its event's card in the calendar.
+    g = gm_imap("test")
+    g.append("INBOX", None, None, invite.replace(b"ignore-me@e2e", b"skip-me@e2e").replace(b"Planning", b"Standup"))
+    g.logout()
+    standup = lambda: [e for e in s.get(f"{WEB}/calendar/month/2099-11").json()["events"] if e["title"] == "Standup"]
+    wait(lambda: standup(), "the third invitation is on the calendar")
+    sent_before = len(gm_subjects("org", "INBOX"))
+    r = s.post(f"{WEB}/calendar/invite", data={"invite": standup()[0]["invite"], "answer": "IGNORED", "calendar": ""})
+    check(r.ok and r.json() == {"ok": True, "waiting": 0}, f"ignored from the calendar, nothing left waiting: {r.text}")
+    check(not standup(), "off the calendar")
+    check(re.search(r"Standup.*?>ignored<", s.get(f"{WEB}/invitations?status=answered").text, re.S), "the Invitations page knows")
+    time.sleep(2)
+    check(len(gm_subjects("org", "INBOX")) == sent_before, "the organizer isn't told")
     m.logout()
 
     # Open pages are told of changes, to fetch their list again.
@@ -232,6 +246,7 @@ def main():
             print("(no Chrome: the Filter menu's browser checks skipped)")
     all_mail(s, inbox)
     keeping(s, inbox)
+    storage(s)
     retiring(s, inbox)
 
 
@@ -345,6 +360,31 @@ def keeping(s, inbox):
     check(flash(keep(mail_since="2016-13-45"))[1] == "2016-13-45 isn't a date.", "a wrong date is refused")
 
 
+def storage(s):
+    """What valet's data takes, in all and by account; the alert by email."""
+    over = s.get(f"{WEB}/settings").text
+    check(re.search(r"[\d.]+ (KB|MB)<small> used by valet", over) and 'href="/storage"' in over, "the Overview says what valet's data takes")
+    check(re.search(r'<li><i style="background:var\(--s1\)"></i>Test <b>', over) and "Calendars, indexes and other" in over, "a bar by account, and the rest")
+    page = s.get(f"{WEB}/storage").text
+    check(page.count('<div class="card viz">') == 3, "Storage: the whole, then each account")
+    test = page[page.index("Test <span"):]
+    check(all(k in test for k in ("Text and formatting", "Attachments", "Spam and Trash")) and re.search(r"\d+ messages, \d+ attachments", test),
+          "each account by kind, with its counts")
+    check(re.search(r'<span style="flex:\d+ 1 0; background:var\(--s2\)" title="Attachments: ', test), "its attachments are a segment, told on hover")
+
+    r = s.post(f"{WEB}/storage", data={"gb": "lots", "account": "test"})
+    check(flash(r)[1] == "lots isn't a size in GB.", "a size that isn't one is refused")
+    r = s.post(f"{WEB}/storage", data={"gb": "0.0001", "account": "test"})
+    check(flash(r)[0] == "Saved: an email when valet's data nears 100 KB." and "the alert is at 100 KB" in r.text and "Near the alert's size" in r.text,
+          "an alert far below what's used: saved, and the page says it's near")
+    wait(lambda: any(t.startswith("valet's data takes") for t in gm_subjects("test", "INBOX")), "the alert is emailed to the account's address")
+    r = s.post(f"{WEB}/storage/test")
+    check(flash(r)[0] == "Test sent to test@local.test.", "Send a test")
+    wait(lambda: any(t.startswith("Test: valet's data takes") for t in gm_subjects("test", "INBOX")), "the test arrives")
+    r = s.post(f"{WEB}/storage", data={"gb": "", "account": "test"})
+    check(flash(r)[0] == "No storage alert." and "the alert is at" not in r.text, "no alert")
+
+
 def retiring(s, inbox):
     """An account out of service: its sync stops, its mail stays, changes stay in valet; then syncing again."""
     r = s.post(f"{WEB}/mail/accounts/org/retire", data={"action": "retire"})
@@ -410,7 +450,7 @@ def filters(s, inbox):
     check(listed(to="bob") == {"filt-att"}, "To: Cc counts")
     with_files = listed(attachment="1")
     check("filt-att" in with_files and "filt-old" not in with_files and "Invitation: Planning" not in with_files, f"with attachments (an invitation's .ics isn't one): {with_files}")
-    check(listed(invite="1") == {"Invitation: Planning", "Invitation: Retro"}, "invitations, not the answer to one")
+    check(listed(invite="1") == {"Invitation: Planning", "Invitation: Retro", "Invitation: Standup"}, "invitations, not the answer to one")
     starred = listed(starred="1")
     check("filt-att" in starred and "filt-old" not in starred, "starred only")
     check("ahead" in listed(read="read") and "ahead" not in listed(read="unread") and "filt-att" in listed(read="unread"), "read, unread")
@@ -459,13 +499,13 @@ def invitation_filters(out):
     check(b.js("document.querySelector('.filter .panel').checkVisibility() && getComputedStyle(document.querySelector('.filter .panel')).position === 'absolute'"), "Filter opens its menu, styled as the mail's")
     b.js("window.samePage = true")
     b.js("document.querySelector('input[name=status][value=all]').click()")
-    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\"]'", "All applies at once")
+    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\",\"Standup\"]'", "All applies at once")
     check(b.js("window.samePage && document.querySelector('details.filter').open"), "in place, the menu still open")
     b.js("{ const i = document.querySelector('input[name=q]'); i.focus(); i.value = 'retro'; i.dispatchEvent(new Event('input', { bubbles: true })) }")
     until(f"location.search === '?q=retro&status=all' && {cards} === '[\"Retro\"]' && !document.querySelector('[data-swap=clear-search]').hidden",
           "the search applies as it's typed, no other filter changed")
     b.js("{ const i = document.querySelector('input[name=q]'); i.value = ''; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })) }")
-    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\"]'", "emptied, with Enter: at once")
+    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\",\"Standup\"]'", "emptied, with Enter: at once")
     check(b.js("window.samePage === true"), "still in place")
     check(b.js("document.querySelector('form[action^=\"/invites/\"] input[name=back]').value") == "/invitations?status=all", "an answer comes back here")
     b.js("{ const i = document.getElementById('filter-from'); i.focus(); i.value = 'nobody'; i.dispatchEvent(new Event('input', { bubbles: true })) }")

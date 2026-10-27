@@ -113,6 +113,27 @@ pub struct MailStore {
     hurry: Mutex<HashMap<String, HashSet<String>>>,
 }
 
+/// What an account's mail takes here, compressed, by kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Usage {
+    pub messages: u64,
+    /// Out of Spam and Trash: the messages without their attachments (text,
+    /// formatting, headers); their attachments (about, from their size).
+    pub text: u64,
+    pub attachments: u64,
+    /// In Spam or Trash, everything.
+    pub bins: u64,
+    pub attachment_count: u64,
+    /// Attachments not kept (from before the account keeps them).
+    pub removed: u64,
+}
+
+impl Usage {
+    pub fn total(&self) -> u64 {
+        self.text + self.attachments + self.bins
+    }
+}
+
 /// What keeping less of an account's mail would remove.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Trim {
@@ -157,7 +178,7 @@ pub enum Pass {
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL, atts INTEGER, att_bytes INTEGER, removed INTEGER);
+CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL, atts INTEGER, att_bytes INTEGER, removed INTEGER, text_bytes INTEGER);
 CREATE TABLE IF NOT EXISTS mailboxes (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, account TEXT, remote TEXT,
     special TEXT NOT NULL DEFAULT '', uidvalidity INTEGER NOT NULL, uidnext INTEGER NOT NULL DEFAULT 1,
@@ -243,6 +264,14 @@ fn join_flags(f: &[String]) -> String {
 /// How every compressed message starts; a message as received never does.
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
+/// What the message takes kept without its attachments (`stored`: kept with them).
+fn text_bytes(raw: &[u8], stored: usize) -> u64 {
+    match crate::mime::strip(raw) {
+        Some(slim) => pack(&slim).len().min(stored) as u64,
+        None => stored as u64,
+    }
+}
+
 fn pack(raw: &[u8]) -> Vec<u8> {
     zstd::bulk::compress(raw, 6).unwrap_or_else(|_| raw.to_vec())
 }
@@ -299,6 +328,7 @@ impl MailStore {
                 ("blobs", "atts", "INTEGER"),
                 ("blobs", "att_bytes", "INTEGER"),
                 ("blobs", "removed", "INTEGER"),
+                ("blobs", "text_bytes", "INTEGER"),
                 ("mailboxes", "filled_since", "INTEGER"),
             ] {
                 let has: bool = c.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"), [], |r| r.get(0))?;
@@ -561,9 +591,10 @@ impl MailStore {
         let hash = hex::encode(Sha256::digest(raw));
         if c.query_row("SELECT 1 FROM blobs WHERE hash = ?1", [&hash], |_| Ok(())).optional()?.is_none() {
             let a = crate::mime::attachments(raw);
+            let data = pack(raw);
             c.execute(
-                "INSERT INTO blobs (hash, data, atts, att_bytes, removed) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![hash, pack(raw), a.count, a.bytes as i64, a.removed],
+                "INSERT INTO blobs (hash, data, atts, att_bytes, removed, text_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![hash, data, a.count, a.bytes as i64, a.removed, text_bytes(raw, data.len()) as i64],
             )?;
         }
         Ok(hash)
@@ -629,6 +660,31 @@ impl MailStore {
             }
         }
         let _ = c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('compacted', 1)", []);
+    }
+
+    /// Once for the messages kept before it was noted: what each takes
+    /// without its attachments, a few at a time.
+    pub fn measure(&self) {
+        let mut after = 0i64;
+        let mut n = 0;
+        loop {
+            let rows: Vec<(i64, Vec<u8>)> = {
+                let c = self.db();
+                let mut st = c.prepare("SELECT rowid, data FROM blobs WHERE rowid > ?1 AND text_bytes IS NULL ORDER BY rowid LIMIT 100").unwrap();
+                st.query_map([after], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().filter_map(Result::ok).collect()
+            };
+            let Some(last) = rows.last().map(|r| r.0) else { break };
+            after = last;
+            let sizes: Vec<(i64, u64)> = rows.into_iter().map(|(id, data)| (id, text_bytes(&unpack(data.clone()), data.len()))).collect();
+            let c = self.db();
+            for (id, t) in sizes {
+                let _ = c.execute("UPDATE blobs SET text_bytes = ?2 WHERE rowid = ?1", params![id, t as i64]);
+                n += 1;
+            }
+        }
+        if n > 0 {
+            tracing::info!("measured {n} messages without their attachments");
+        }
     }
 
     /// Drops what no message, waiting change or doomed copy uses; frees the
@@ -908,6 +964,39 @@ impl MailStore {
         let blob = Self::put_blob(&c, raw)?;
         c.execute("UPDATE messages SET blob = ?2, size = ?3 WHERE id = ?1 OR link = ?1", params![id, blob, raw.len() as i64])?;
         Ok(())
+    }
+
+    /// What the account's mail takes here, compressed, by kind (a message
+    /// in several of its folders counts once; in Spam or Trash only if all
+    /// its copies are).
+    pub fn account_usage(&self, account: &str) -> Usage {
+        let c = self.db();
+        c.query_row(
+            r"WITH r AS (SELECT m.blob, MIN(CASE WHEN lower(b.special) IN ('\junk', '\trash') THEN 1 ELSE 0 END) AS bin
+                         FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account = ?1 GROUP BY m.blob)
+              SELECT COUNT(*),
+                     COALESCE(SUM(CASE WHEN r.bin = 0 THEN t.text END), 0),
+                     COALESCE(SUM(CASE WHEN r.bin = 0 THEN length(x.data) - t.text END), 0),
+                     COALESCE(SUM(CASE WHEN r.bin = 1 THEN length(x.data) END), 0),
+                     COALESCE(SUM(CASE WHEN r.bin = 0 THEN x.atts END), 0),
+                     COALESCE(SUM(x.removed), 0)
+              FROM r JOIN blobs x ON x.hash = r.blob
+              -- Without its attachments; until measured, from their size.
+              JOIN (SELECT hash, COALESCE(min(text_bytes, length(data)), length(data) - min(COALESCE(att_bytes, 0), length(data))) AS text FROM blobs) t
+                ON t.hash = x.hash",
+            [account],
+            |r| {
+                let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
+                Ok(Usage { messages: n(0)?, text: n(1)?, attachments: n(2)?, bins: n(3)?, attachment_count: n(4)?, removed: n(5)? })
+            },
+        )
+        .unwrap_or_default()
+    }
+
+    /// The size of mail.db.
+    pub fn db_bytes(&self) -> u64 {
+        let c = self.db();
+        c.query_row("SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
     }
 
     /// What the account's mail takes here, compressed (a message in
@@ -1505,7 +1594,14 @@ mod tests {
         let inbox = s.remote_mailbox("work", "INBOX", "Work/Inbox", "").unwrap();
         let label = s.remote_mailbox("work", "Label", "Work/Label", "").unwrap();
         let home = s.remote_mailbox("home", "INBOX", "Home/Inbox", "").unwrap();
-        let pdf = "A".repeat(40_000);
+        // Like a real file: hardly compressible.
+        let mut seed = 7u64;
+        let pdf: String = (0..40_000)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[(seed >> 58) as usize] as char
+            })
+            .collect();
         let with_file = |id: &str| {
             format!(
                 "From: a@x.fr\r\nSubject: {id}\r\nMessage-ID: <{id}@x>\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\n{}\r\n--b\r\nContent-Type: application/pdf; name=f.pdf\r\nContent-Disposition: attachment; filename=f.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n--b--\r\n",
@@ -1522,13 +1618,22 @@ mod tests {
         let stored = |h: &str| s.db().query_row("SELECT length(data) FROM blobs WHERE hash = ?1", [h], |r| r.get::<_, i64>(0)).unwrap();
         let m = s.message(mid).unwrap();
         assert_eq!(s.blob(&m.blob).unwrap(), with_file("mid"), "read back as it came");
-        assert!((stored(&m.blob) as u64) < m.size as u64 / 10, "kept compressed: {} of {}", stored(&m.blob), m.size);
+        // Its file, hardly compressible, loses what base64 added.
+        assert!((stored(&m.blob) as u64) < m.size as u64 * 3 / 4, "kept compressed: {} of {}", stored(&m.blob), m.size);
 
         let plan = s.trim_plan("work", Some(1_100_000_000), Some(1_400_000_000));
         assert_eq!((plan.messages, plan.with_attachments, plan.attachments), (1, 1, 1), "{plan:?}: the old one once, the middle one's file");
         assert_eq!(plan.attachment_bytes, 30_000);
         assert_eq!(plan.message_bytes, 0, "the old one is the home account's too: nothing freed");
         assert!(s.trim_plan("work", None, None).is_empty());
+        let trash = s.remote_mailbox("work", "Trash", "Work/Trash", "\\Trash").unwrap();
+        s.add_fetched(trash, &with_file("binned"), &[], 1_600_000_000, 1).unwrap();
+        s.add_fetched(trash, &with_file("new"), &[], 1_600_000_000, 2).unwrap();
+        let u = s.account_usage("work");
+        assert_eq!((u.messages, u.attachment_count, u.removed), (4, 3, 0), "{u:?}: four messages, once each; the one only in the trash apart");
+        assert!(u.bins > 30_000 && u.attachments > 3 * 25_000 && u.text > 0 && u.text < 5_000, "{u:?}");
+        assert_eq!(u.total(), s.account_bytes("work"), "all of it, by kind");
+        assert!(s.db_bytes() > 0);
 
         s.set_filled_since(inbox, 0).unwrap();
         assert_eq!(s.drop_mail_before("work", 1_100_000_000).unwrap(), 2);
@@ -1537,7 +1642,7 @@ mod tests {
         assert_eq!(s.strip_before("work", 1_400_000_000).unwrap(), 1);
         let slim = s.message(mid).unwrap();
         let text = String::from_utf8(s.blob(&slim.blob).unwrap()).unwrap();
-        assert!(text.contains("X-Valet-Removed: 30000") && !text.contains("AAAA") && text.contains("words"), "the file went, the text stayed");
+        assert!(text.contains("X-Valet-Removed: 30000") && !text.contains(&pdf[..100]) && text.contains("words"), "the file went, the text stayed");
         assert_eq!(slim.size as usize, text.len());
         assert_eq!(s.blob(&s.message(new).unwrap().blob).unwrap(), with_file("new"), "the new one kept whole");
         assert!(s.db().query_row("SELECT 1 FROM blobs WHERE hash = ?1", [&m.blob], |_| Ok(())).optional().unwrap().is_none(), "the whole copy is gone");

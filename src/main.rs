@@ -238,8 +238,12 @@ async fn main() -> Result<()> {
     sync::start(app.clone());
     let finding = app.clone();
     tokio::task::spawn_blocking(move || invites::find_mails(&finding));
+    web::watch_storage(app.clone());
     let compacting = app.clone();
-    tokio::task::spawn_blocking(move || compacting.mail.compact());
+    tokio::task::spawn_blocking(move || {
+        compacting.mail.compact();
+        compacting.mail.measure();
+    });
     tracing::info!("{} mail accounts", app.accounts().len());
     let stopping = app.clone();
     axum::serve(http, router(app))

@@ -239,13 +239,20 @@ pub struct AnswerForm {
 }
 
 /// Answers an invitation from its event's card, as the Invitations page
-/// does: the organizer gets the reply, the event moves to `calendar`. Says
-/// how many still wait, for the bar.
+/// does: the organizer gets the reply, the event moves to `calendar`; or
+/// ignores it. Says how many still wait, for the bar.
 pub async fn answer(State(app): St, headers: HeaderMap, form: Result<axum::extract::Form<AnswerForm>, FormRejection>) -> Response {
     if !authed(&app, &headers) {
         return unauthorized();
     }
     let Ok(axum::extract::Form(f)) = form else { return refused("not answered: that invitation can't be found") };
+    // Ignored: off the calendar, the organizer not told.
+    if f.answer == "IGNORED" {
+        return match crate::invites::ignore(&app, f.invite) {
+            Ok(()) => axum::Json(json!({ "ok": true, "waiting": waiting(&app).len() })).into_response(),
+            Err(e) => refused(format!("not ignored: {e:#}")),
+        };
+    }
     if !matches!(f.answer.as_str(), "ACCEPTED" | "TENTATIVE" | "DECLINED") {
         return refused("not answered: unknown answer");
     }
