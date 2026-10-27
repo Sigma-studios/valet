@@ -15,7 +15,16 @@ def main():
     s = web()
     m = valet_imap()
     labels = [l for _, p, l in tree_rows(s) if p is None]
-    check(labels == ["INBOX", "Drafts", "Sent", "Spam", "Trash", "Projects"], f"the tree run_mail_e2e left: {labels}")
+    check(labels == ["INBOX", "Drafts", "Sent", "All mail", "Spam", "Trash", "Projects"], f"the tree run_mail_e2e left: {labels}")
+    all_mail = node_id(s, "All mail")
+    row = re.search(rf'class="trow[^"]*" data-id="{all_mail}".*?</div>', s.get(f"{WEB}/tree").text, re.S).group(0)
+    check("every folder" in row and "Choose folders" not in row, "All mail gathers every folder: nothing to choose")
+    page = s.get(f"{WEB}/tree?node={all_mail}").text
+    check("there are no folders to choose" in page and 'name="member"' not in page and 'name="special"' not in page, "its page says so, without the checklist or special use")
+    r = s.post(f"{WEB}/tree/{all_mail}", data=[("action", "members"), ("member", "1")])
+    check(flash(r)[1] == "All mail gathers every folder by itself", f"members of All mail refused: {flash(r)}")
+    r = s.post(f"{WEB}/tree/{all_mail}", data={"action": "special", "special": ""})
+    check(flash(r)[1] == "All mail is all the mail", f"and its special use stays: {flash(r)}")
     page = s.get(f"{WEB}/tree").text
     check("Folders not in your tree" in page and "Org › Real" in page, "folders made later wait to be added")
     inbox = node_id(s, "INBOX")
@@ -90,6 +99,7 @@ def main():
     r = s.post(f"{WEB}/tree/reset")
     labels = [(l, p is None) for _, p, l in tree_rows(s)]
     check(flash(r)[0] and ("Work", True) not in labels and ("Acme", False) in labels and ("Real", True) in labels, f"reset to the default tree: {labels}")
+    check(("All mail", True) in labels and "\\All" in listing(m)["All mail"], "with All mail")
     m.logout()
 
 

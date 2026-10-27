@@ -1,7 +1,8 @@
 //! Mail storage: a local copy of each account's folders (named
 //! `Accounts/<Account>/<folder>`), plus the user's own tree of folders, whose
 //! nodes gather real folders of several accounts (their rows link to the real
-//! rows). `INBOX` is the node gathering every account's inbox. See [`tree`].
+//! rows). `INBOX` is the node gathering every account's inbox, *All mail*
+//! the one with every account folder's mail. See [`tree`].
 //!
 //! Mail apps see local UIDs; each row remembers its UID on the provider. What
 //! apps change (flags, deletions, moves, appends) is applied here at once and
@@ -14,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,9 +23,11 @@ use tokio::sync::{Notify, broadcast, watch};
 
 mod tree;
 
-pub use tree::{Node, Place, SPECIALS, Shift};
+pub use tree::{ALL_MAIL, Node, Place, SPECIALS, Shift};
 
 pub const ALL_INBOXES: &str = "INBOX";
+/// Why mail can't be moved, copied or saved into All mail.
+pub const ALL_MAIL_ISNT_A_PLACE: &str = "All mail shows the mail of every folder: put it in one of them";
 /// Where the accounts' real folders live: `Accounts/<Account>/<folder>`.
 pub const ACCOUNTS: &str = "Accounts";
 
@@ -52,6 +55,11 @@ impl Mailbox {
     /// A node of the tree (gathers real folders), not an account's folder.
     pub fn is_node(&self) -> bool {
         self.account.is_none()
+    }
+
+    /// The tree's All mail: every account folder's mail, filed nowhere itself.
+    pub fn is_all_mail(&self) -> bool {
+        self.is_node() && self.special == ALL_MAIL
     }
 
     pub fn is_inbox(&self) -> bool {
@@ -513,9 +521,9 @@ impl MailStore {
             params![mailbox, uid, blob, flags, date, size as i64, mid, remote_uid, link, modseq],
         )?;
         let id = c.last_insert_rowid();
-        // A real folder's messages also appear in each node gathering it.
+        // A real folder's messages also appear in each node gathering it, and in All mail.
         if link.is_none() {
-            for node in tree::nodes_of(c, mailbox)? {
+            for node in tree::nodes_of(c, mailbox)?.into_iter().chain(tree::all_mail(c)?.filter(|&n| n != mailbox)) {
                 Self::insert_row(c, node, blob, flags, date, size, mid, None, Some(id))?;
             }
         }
@@ -581,6 +589,13 @@ impl MailStore {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap_or((0, 0))
+    }
+
+    /// For a node's rows: (row → the account folder its message is in, its Message-ID).
+    pub fn origins(&self, node: i64) -> HashMap<i64, (i64, String)> {
+        let c = self.db();
+        let mut st = c.prepare("SELECT n.id, s.mailbox, s.message_id FROM messages n JOIN messages s ON s.id = n.link WHERE n.mailbox = ?1").unwrap();
+        st.query_map([node], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?)))).unwrap().filter_map(Result::ok).collect()
     }
 
     /// The account folder's row behind a node's row (itself otherwise).
@@ -659,6 +674,7 @@ impl MailStore {
     /// (real folder, account, provider name).
     fn landing(&self, target: i64, account: Option<&str>) -> Result<(i64, String, String)> {
         let b = self.mailbox(target).context("no such folder")?;
+        ensure!(!b.is_all_mail(), "{ALL_MAIL_ISNT_A_PLACE}");
         let folder = if b.is_node() {
             let account = account.context("that message isn't in an account")?;
             self.member_of(target, account).with_context(|| format!("{} has no folder in that account yet", b.name))?

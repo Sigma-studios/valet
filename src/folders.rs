@@ -134,6 +134,9 @@ pub async fn member_in(app: &Arc<App>, node: i64, account: &str) -> Result<i64> 
     if let Some(m) = app.mail.member_of(node, account) {
         return Ok(m);
     }
+    if app.mail.mailbox(node).is_some_and(|b| b.is_all_mail()) {
+        bail!("{}", crate::mailstore::ALL_MAIL_ISNT_A_PLACE);
+    }
     let acc = app.account(account).context("no such account")?;
     let tree = app.mail.tree();
     let mut chain = Vec::new();

@@ -49,6 +49,14 @@ def run():
     check(order.index("Projects") < order.index("Accounts"), "the tree comes before Accounts")
 
     check(set(subjects(m, "Spam")) == {"spam-test", "spam-org"}, "Spam shows both accounts' spam")
+
+    # All mail: every account folder's mail, Spam and Trash too; nothing filed into it.
+    check("\\All" in names.get("All mail", []) and order.index("Sent") < order.index("All mail") < order.index("Spam"), "All mail is listed with \\All, after Sent, before Spam")
+    everything = {"hello-1", "hello-2", "hello-3", "spam-test", "proj-test", "org-hello", "spam-org", "proj-org"}
+    check(set(subjects(m, "All mail")) == everything, "All mail has every folder's mail")
+    check(m.uid("MOVE", str(subjects(m, "INBOX")["hello-3"]), q("All mail"))[0] == "NO", "MOVE into All mail is refused")
+    check(m.append(q("All mail"), None, None, message("into-all", frm="Org <org@local.test>"))[0] == "NO", "and APPEND")
+    check("hello-3" in subjects(m, "INBOX") and len(subjects(m, "All mail")) == 8, "nothing moved")
     check(set(subjects(m, "Projects")) == {"proj-test", "proj-org"}, "Projects gathers the same path of both accounts")
 
     # MOVE into a node: the message's own account's folder.
@@ -58,6 +66,7 @@ def run():
     wait(lambda: "hello-1" in gm_subjects("test", "Spam") and "hello-1" not in gm_subjects("test", "INBOX"), "it is in Test's Spam at GreenMail")
     check("hello-1" not in gm_subjects("org", "Spam"), "and not in Org's")
     check("hello-1" in subjects(m, "Spam"), "and in the Spam node")
+    check(len(subjects(m, "All mail")) == 8 and "hello-1" in subjects(m, "All mail"), "still once in All mail")
 
     # APPEND into a node: the account its From is.
     typ, data = m.append("Sent", "(\\Seen)", None, message("sent-by-org", frm="Org <org@local.test>", to="x@y.z"))

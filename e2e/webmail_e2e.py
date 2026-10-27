@@ -213,7 +213,66 @@ def main():
             filter_menu(s, inbox, sys.argv[1])
         else:
             print("(no Chrome: the Filter menu's browser checks skipped)")
+    all_mail(s, inbox)
     retiring(s, inbox)
+
+
+def all_mail(s, inbox):
+    """All mail: every folder's mail, once; Spam and Trash told, and hidden on
+    demand; Not spam; no unread count; nothing moved into it."""
+    every = node_id(s, "All mail")
+    check(every, "the tree has All mail")
+    side = s.get(f"{WEB}/box/{inbox}").text
+    link = re.search(rf'<a class="folder[^"]*" href="/box/{every}"[^>]*>(.*?)</a>', side, re.S).group(1)
+    check('class="badge"' in side and 'class="badge"' not in link, "no unread count on All mail (the inbox has one)")
+
+    def listed(**p):
+        """{subject: its row's HTML} of All mail."""
+        page = s.get(f"{WEB}/box/{every}", params=p).text
+        found = (re.search(r'<span class="subject">([^<]*)</span>', c) for c in page.split('<div class="row')[1:])
+        return {html.unescape(f.group(1)): f.string for f in found if f}
+
+    rows_ = listed()
+    check({"hello-1", "spam-test", "bulk-0", "bulk-2", "org-hello", "ahead"} <= set(rows_), f"every folder's mail, both accounts': {sorted(rows_)}")
+    check('<span class="tag bin">Spam</span>' in rows_["hello-1"] and '<span class="tag bin">Trash</span>' in rows_["spam-test"], "Spam and Trash told on their rows")
+    check('class="tag bin"' not in rows_["bulk-0"] and '<span class="tag">Test</span>' in rows_["bulk-0"], "the others have their account only")
+    hidden = listed(hide="1")
+    check("hello-1" not in hidden and "spam-test" not in hidden and "bulk-0" in hidden, "Hide Spam and Trash")
+    page = s.get(f"{WEB}/box/{every}", params={"hide": "1"}).text
+    check("Without Spam and Trash" in page and 'name="hide" value="1" checked' in page, "with its chip, ticked in the menu")
+    check('name="hide"' not in s.get(f"{WEB}/box/{inbox}").text, "offered in All mail only")
+    check(set(listed(q="spam-test")) == {"spam-test"}, "the search goes through everything, the Trash too")
+
+    # A message in two folders of an account shows once.
+    twice = message("twice")
+    g = gm_imap("test")
+    g.append("INBOX", None, None, twice)
+    g.append("Projects", None, None, twice)
+    g.logout()
+    r = s.post(f"{WEB}/mail/refresh", params={"folder": every})
+    check(r.ok and r.json()["done"], f"Refresh from All mail goes through every folder: {r.text}")
+    check("twice" in rows(s, inbox) and "twice" in rows(s, node_id(s, "Projects")), "in Test's inbox and Projects")
+    check(s.get(f"{WEB}/box/{every}").text.count('<span class="subject">twice</span>') == 1, "once in All mail")
+    check('class="tag bin"' not in listed()["twice"], "its inbox copy")
+
+    ids = rows(s, every)
+    view = s.get(f"{WEB}/msg/{ids['hello-1']}").text
+    check('value="notspam"' in view and 'value="notspam"' not in s.get(f"{WEB}/msg/{ids['bulk-0']}").text, "Not spam, for a message in Spam only")
+    menu = view.split('name="to"')[1].split("</select>")[0]
+    check(f'value="{every}"' not in menu, "Move to… doesn't offer All mail")
+    check("Delete this message for good?" in s.get(f"{WEB}/msg/{ids['spam-test']}").text and "for good?" not in view, "deleting from the Trash asks first")
+    r = s.post(f"{WEB}/msg/{ids['bulk-0']}", data={"action": "move", "to": str(every), "back": str(every)})
+    check(flash(r)[1] == "All mail shows the mail of every folder: put it in one of them", f"nothing moves into it: {flash(r)}")
+
+    listed_at = f"/box/{every}?page=0"
+    bulk = lambda action, *subjects_: s.post(f"{WEB}/box/{every}/bulk", data=[("back", listed_at), ("action", action)] + [("id", str(ids[x])) for x in subjects_])
+    check(flash(bulk("notspam", "bulk-0"))[1] == "None of them is in Spam.", "Not spam on mail out of Spam: said so")
+    check(flash(bulk("notspam", "hello-1", "bulk-0"))[0] == "Moved 1 message to the inbox.", "Not spam from All mail")
+    wait(lambda: "hello-1" in gm_subjects("test", "INBOX") and "hello-1" not in gm_subjects("test", "Spam"), "back in Test's inbox at GreenMail")
+    check("hello-1" in rows(s, inbox) and 'class="tag bin"' not in listed()["hello-1"], "in the inbox; no longer told Spam")
+    check(flash(bulk("delete", "spam-test"))[0] == "Deleted 1 message.", "deleted from All mail, out of the Trash: for good")
+    wait(lambda: "spam-test" not in gm_subjects("test", "Trash"), "gone from Test's Trash at GreenMail")
+    check("spam-test" not in listed(), "and from All mail")
 
 
 def retiring(s, inbox):

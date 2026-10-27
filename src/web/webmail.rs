@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use super::*;
 use crate::accounts::Account;
-use crate::mailstore::{ALL_INBOXES, Mailbox, Msg, Node, Place, SPECIALS, Shift, StoreMode};
+use crate::mailstore::{ALL_INBOXES, ALL_MAIL, Mailbox, Msg, Node, Place, SPECIALS, Shift, StoreMode};
 
 const PAGE: usize = 50;
 
@@ -258,7 +258,8 @@ const CHEVRON: &str = r#"<svg viewBox="0 0 16 16" width="12" height="12" aria-hi
 fn sidebar(app: &App, current: i64) -> Markup {
     let (tree, per) = folders(app);
     let item = |b: &Mailbox| {
-        let (_, unseen) = app.mail.count(b.id);
+        // All mail's unread are the inbox's, and Spam's: no count.
+        let unseen = if b.is_all_mail() { 0 } else { app.mail.count(b.id).1 };
         html! {
             a.folder.on[b.id == current] href={"/box/" (b.id)} title=(place_name(b)) {
                 span.name { (short_name(b)) }
@@ -349,6 +350,8 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .list .when { color:var(--muted); font-size:13px; white-space:nowrap; }
 .list .star { color:#eab308; font-size:12px; }
 .tag { font-size:11px; border:1px solid var(--line); border-radius:4px; padding:0 4px; color:var(--muted); margin-right:4px; }
+/* In All mail: a message in Spam or Trash. */
+.tag.bin { color:var(--bad); border-color:currentColor; }
 .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
 .toolbar form { display:inline; margin:0; }
 .toolbar input[type=search] { flex:1; min-width:160px; }
@@ -493,6 +496,9 @@ pub struct ListQuery {
     attachment: String,
     #[serde(default)]
     invite: String,
+    /// Not the mail in Spam or Trash (for All mail).
+    #[serde(default)]
+    hide: String,
     /// One of `WHEN`; `custom`: from `since` to `until`, days both included.
     #[serde(default)]
     when: String,
@@ -503,7 +509,7 @@ pub struct ListQuery {
 }
 
 /// The filters' keys in a list's address.
-const FILTER_KEYS: [&str; 9] = ["read", "starred", "from", "to", "attachment", "invite", "when", "since", "until"];
+const FILTER_KEYS: [&str; 10] = ["read", "starred", "from", "to", "attachment", "invite", "hide", "when", "since", "until"];
 
 /// The Filter menu's dates.
 const WHEN: [(&str, &str); 6] = [
@@ -527,6 +533,7 @@ impl ListQuery {
             ("to", &self.to),
             ("attachment", &self.attachment),
             ("invite", &self.invite),
+            ("hide", &self.hide),
             ("when", &self.when),
             ("since", if custom { &self.since } else { "" }),
             ("until", if custom { &self.until } else { "" }),
@@ -567,6 +574,9 @@ impl ListQuery {
         }
         if !self.invite.is_empty() {
             on.push(("Invitations".into(), &["invite"]));
+        }
+        if !self.hide.is_empty() {
+            on.push(("Without Spam and Trash".into(), &["hide"]));
         }
         let dates: &'static [&'static str] = &["when", "since", "until"];
         if self.when == "custom" {
@@ -764,8 +774,8 @@ fn matches(raw: &[u8], words: &[String]) -> bool {
 const FUNNEL: &str = r#"<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 3h12l-4.6 5.4V13l-2.8 1.4v-6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>"#;
 
 /// The Filter button and its menu, part of the toolbar's form: applied
-/// together, with the search.
-fn filter_menu(id: i64, q: &ListQuery, on: usize) -> Markup {
+/// together, with the search. `all_mail`: the list is All mail.
+fn filter_menu(id: i64, q: &ListQuery, on: usize, all_mail: bool) -> Markup {
     let today = chrono::Utc::now().with_timezone(&crate::calendar::default_zone()).format("%Y-%m-%d").to_string();
     let read = if q.read == "unread" || q.read == "read" { q.read.as_str() } else { "" };
     let person = |field: &str, label: &str, value: &str| {
@@ -794,6 +804,7 @@ fn filter_menu(id: i64, q: &ListQuery, on: usize) -> Markup {
                         }
                     }
                     label.check { input type="checkbox" name="starred" value="1" checked[!q.starred.is_empty()]; "Starred only" }
+                    @if all_mail { label.check { input type="checkbox" name="hide" value="1" checked[!q.hide.is_empty()]; "Hide Spam and Trash" } }
                 }
                 fieldset {
                     legend { "Contains" }
@@ -941,6 +952,28 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     };
     let mut msgs = app.mail.messages(id);
     msgs.sort_by_key(|m| std::cmp::Reverse((m.date, m.id)));
+    let all_mail = mbox.is_all_mail();
+    let bins = bins(&app);
+    // A node's rows: the account folder each message is in.
+    let origins = if mbox.is_node() && (all_mail || !q.hide.is_empty()) { app.mail.origins(id) } else { Default::default() };
+    let folder_of = |m: &Msg| if mbox.is_node() { origins.get(&m.id).map(|o| o.0) } else { Some(m.mailbox) };
+    if all_mail {
+        // A message in several folders of its account shows once: from its
+        // inbox, else from out of Spam and Trash, else the newest copy.
+        let boxes: std::collections::HashMap<i64, Mailbox> = app.mail.mailboxes().into_iter().map(|b| (b.id, b)).collect();
+        let rank = |f: i64| if boxes.get(&f).is_some_and(Mailbox::is_inbox) { 0 } else if bins.contains_key(&f) { 2 } else { 1 };
+        let key = |m: &Msg| origins.get(&m.id).filter(|(_, mid)| !mid.is_empty()).map(|(f, mid)| (boxes.get(f).and_then(|b| b.account.clone()), mid.clone()));
+        let mut best: std::collections::HashMap<(Option<String>, String), (u8, i64)> = Default::default();
+        for m in &msgs {
+            let (Some(k), Some(f)) = (key(m), folder_of(m)) else { continue };
+            let r = rank(f);
+            best.entry(k).and_modify(|b| if r < b.0 { *b = (r, m.id) }).or_insert((r, m.id));
+        }
+        msgs.retain(|m| key(m).is_none_or(|k| best.get(&k).is_none_or(|b| b.1 == m.id)));
+    }
+    if !q.hide.is_empty() {
+        msgs.retain(|m| folder_of(m).is_none_or(|f| !bins.contains_key(&f)));
+    }
     // What the message's flags and date tell first; then what opening it does.
     let filter = Filter::of(&q);
     msgs.retain(|m| filter.keeps(m));
@@ -961,6 +994,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     };
     let title = if mbox.is_node() { short_name(&mbox) } else { place_name(&mbox) };
     let drafts = mbox.special.eq_ignore_ascii_case("\\Drafts");
+    let spam = mbox.special.eq_ignore_ascii_case("\\Junk") || bins.get(&id) == Some(&"Spam");
     let chips = q.chips();
     let page_title = reading.as_ref().map(|(_, (subject, _))| subject.clone()).unwrap_or_else(|| title.clone());
     mail_page(&page_title, id, &app, html! {
@@ -971,13 +1005,14 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                 span.refresh-note.small.muted role="status" {}
                 input type="search" name="q" value=(q.q) placeholder={"Search " (title)};
                 a.button href=(q.link(id, 0, &["q"])) hidden[q.q.is_empty()] title="Clear the search (the filters stay)" data-swap="clear-search" { "Clear" }
-                (filter_menu(id, &q, chips.len()))
+                (filter_menu(id, &q, chips.len(), all_mail))
             }
             // Shown while messages are ticked; they act on the list's form.
             span.bulk-actions {
                 label.pickall title="Select every message on this page" { input type="checkbox" #pickall; }
                 span.count {}
                 button form="bulk" name="action" value="archive" { "Archive" }
+                @if all_mail || spam { button form="bulk" name="action" value="notspam" title="Back to their inbox" { "Not spam" } }
                 button form="bulk" name="action" value="seen" { "Mark read" }
                 button form="bulk" name="action" value="unseen" { "Mark unread" }
                 button.danger form="bulk" name="action" value="delete" { "Delete" }
@@ -1017,6 +1052,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
                                         span.from { (from) }
                                         span.line {
                                             @if mbox.is_node() { @if let Some(a) = account_of(m) { span.tag { (a) } } }
+                                            @if all_mail { @if let Some(b) = folder_of(m).and_then(|f| bins.get(&f)) { span.tag.bin { (b) } } }
                                             span.subject { (subject) }
                                             @if !preview.is_empty() { span.preview { " — " (preview) } }
                                         }
@@ -1195,6 +1231,9 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
         None => format!("/msg/{id}?images=1"),
     };
     let (tree, _) = folders(app);
+    let in_spam = bins(app).get(&folder.id) == Some(&"Spam");
+    // Deleting it from the Trash (or from an account without one) is for good.
+    let for_good = folder.account.as_deref().and_then(|a| app.mail.special_folder(a, "\\Trash")).is_none_or(|t| t == folder.id);
     let account_folders: Vec<Mailbox> = app.mail.mailboxes().into_iter().filter(|b| b.account == folder.account && b.id != folder.id).collect();
     let attachments: Vec<(usize, String, usize)> = m
         .attachments()
@@ -1219,6 +1258,10 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
             a.button href={"/compose?reply=" (id)} { "Reply" }
             a.button href={"/compose?all=" (id)} { "Reply all" }
             a.button href={"/compose?forward=" (id)} { "Forward" }
+            @if in_spam {
+                form method="post" action={"/msg/" (id)} { (hidden)
+                    button name="action" value="notspam" title="Back to its inbox" { "Not spam" } }
+            }
             form method="post" action={"/msg/" (id)} { (hidden)
                 button name="action" value="archive" { "Archive" } }
             form method="post" action={"/msg/" (id)} { (hidden)
@@ -1231,7 +1274,7 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
                 select name="to" onchange="this.form.submit()" {
                     option value="" { "Move to…" }
                     optgroup label="Your folders" {
-                        @for (n, b) in &tree { @if b.id != back { option value=(b.id) { (indent(n.depth)) (short_name(b)) } } }
+                        @for (n, b) in &tree { @if b.id != back && !b.is_all_mail() { option value=(b.id) { (indent(n.depth)) (short_name(b)) } } }
                     }
                     @if !account_folders.is_empty() {
                         optgroup label={"Accounts › " (place_name(&folder).split(" › ").next().unwrap_or(""))} {
@@ -1240,7 +1283,7 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
                     }
                 }
             }
-            form method="post" action={"/msg/" (id)} { (hidden)
+            form method="post" action={"/msg/" (id)} onsubmit=[for_good.then_some("return confirm('Delete this message for good?')")] { (hidden)
                 button.danger name="action" value="delete" { "Delete" } }
         }
         div.card.reader {
@@ -1419,6 +1462,40 @@ pub struct ActionForm {
     to: Option<String>,
 }
 
+/// Each account's Spam and Trash folders, by what they're called.
+fn bins(app: &App) -> std::collections::HashMap<i64, &'static str> {
+    let mut out = std::collections::HashMap::new();
+    for a in app.accounts() {
+        for (special, label) in [("\\Junk", "Spam"), ("\\Trash", "Trash")] {
+            if let Some(f) = app.mail.special_folder(&a.id, special) {
+                out.insert(f, label);
+            }
+        }
+    }
+    out
+}
+
+/// Out of each account's Spam, into its inbox. Returns how many moved (those
+/// not in Spam stay).
+fn not_spam(app: &App, msgs: &[(i64, Mailbox)]) -> anyhow::Result<usize> {
+    let bins = bins(app);
+    let boxes = app.mail.mailboxes();
+    let mut to_inbox: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
+    for (src, folder) in msgs {
+        if bins.get(&folder.id) != Some(&"Spam") {
+            continue;
+        }
+        if let Some(inbox) = boxes.iter().find(|b| b.account.is_some() && b.account == folder.account && b.is_inbox()) {
+            to_inbox.entry(inbox.id).or_default().push(*src);
+        }
+    }
+    let moved = to_inbox.values().map(Vec::len).sum();
+    for (inbox, ids) in to_inbox {
+        app.mail.copy(&ids, inbox, true)?;
+    }
+    Ok(moved)
+}
+
 /// To each account's Trash, like mail apps do; from the Trash itself, for
 /// good. Returns how many went to a Trash.
 fn delete(app: &App, msgs: &[(i64, Mailbox)]) -> anyhow::Result<usize> {
@@ -1500,6 +1577,10 @@ pub async fn bulk(State(app): St, headers: HeaderMap, Path(id): Path<i64>, body:
         "unseen" => app.mail.store(&ids, &StoreMode::Remove, &["\\Seen".into()]).map(|_| format!("Marked {} unread.", plural(n))),
         "delete" => delete(&app, &msgs).map(|moved| if moved == n { format!("Moved {} to the Trash.", plural(n)) } else { format!("Deleted {}.", plural(n)) }),
         "archive" => archive(&app, &msgs).await.map(|_| format!("Archived {}.", plural(n))),
+        "notspam" => not_spam(&app, &msgs).and_then(|moved| match moved {
+            0 => Err(anyhow::anyhow!("None of them is in Spam.")),
+            m => Ok(format!("Moved {} to the inbox.", plural(m))),
+        }),
         _ => return back(&list, None, Some("Unknown action.")),
     };
     let accounts: std::collections::BTreeSet<String> = msgs.iter().filter_map(|(_, f)| f.account.clone()).collect();
@@ -1548,6 +1629,11 @@ pub async fn action(State(app): St, headers: HeaderMap, Path(id): Path<i64>, axu
         },
         "archive" => match archive(&app, &[(src.id, folder.clone())]).await {
             Ok(_) => Ok((list.clone(), Some("Archived."))),
+            Err(e) => Err(e),
+        },
+        "notspam" => match not_spam(&app, &[(src.id, folder.clone())]) {
+            Ok(0) => Err(anyhow::anyhow!("It isn't in Spam.")),
+            Ok(_) => Ok((list.clone(), Some("Moved to the inbox."))),
             Err(e) => Err(e),
         },
         _ => return back(&here, None, Some("Unknown action.")),
@@ -1727,6 +1813,9 @@ pub struct TreeQuery {
 }
 
 fn special_label(special: &str) -> &'static str {
+    if special == ALL_MAIL {
+        return "All mail";
+    }
     SPECIALS.iter().find(|(s, _)| *s == special).map(|(_, l)| *l).unwrap_or("")
 }
 
@@ -1764,7 +1853,8 @@ pub async fn tree_page(State(app): St, headers: HeaderMap, Query(q): Query<TreeQ
                             button.step name="action" value="rename" title="Rename" { "Rename" }
                             span.muted.small {
                                 @if !n.special.is_empty() { span.tag { (special_label(&n.special)) } }
-                                (n.members.len()) @if n.members.len() == 1 { " folder" } @else { " folders" }
+                                @if b.is_all_mail() { "every folder" }
+                                @else { (n.members.len()) @if n.members.len() == 1 { " folder" } @else { " folders" } }
                             }
                         }
                         form method="post" action={"/tree/" (n.id)} {
@@ -1774,12 +1864,20 @@ pub async fn tree_page(State(app): St, headers: HeaderMap, Query(q): Query<TreeQ
                             button.step name="action" value="outdent" title="Out of its parent" aria-label="Out of its parent" { "←" }
                         }
                     }
-                    a.small href={"/tree?node=" (n.id) "#edit"} { "Choose folders" }
+                    @if !b.is_all_mail() { a.small href={"/tree?node=" (n.id) "#edit"} { "Choose folders" } }
                     a.small href={"/box/" (b.id)} { "Open" }
                 }
             }
         }
-        @if let Some((n, b)) = selected {
+        @if let Some((n, b)) = selected.filter(|(_, b)| b.is_all_mail()) {
+            h2 #edit { (place_name(b)) }
+            p.card.small { "It shows the mail of every folder of every account, Spam and Trash too: there are no folders to choose. "
+                "Mail can't be moved into it." }
+            form.card method="post" action={"/tree/" (n.id)} onsubmit="return confirm('Delete All mail? The mail stays in its folders; Reset to the default tree brings it back.')" {
+                button.plain name="action" value="delete" { "Delete" }
+            }
+        }
+        @if let Some((n, b)) = selected.filter(|(_, b)| !b.is_all_mail()) {
             h2 #edit { (place_name(b)) }
             form.card.members method="post" action={"/tree/" (n.id)} {
                 input type="hidden" name="action" value="members";
@@ -2388,8 +2486,8 @@ pub struct RefreshQuery {
 
 /// Checks every account for new mail now: wakes their syncs and answers
 /// once each has been through its inbox and the real folders of `folder`
-/// (with none given, through all its folders), or has failed, or after 30
-/// seconds. Says which failed, and which it stopped waiting for.
+/// (with none given, or All mail, through all its folders), or has failed,
+/// or after 30 seconds. Says which failed, and which it stopped waiting for.
 pub async fn refresh(State(app): St, headers: HeaderMap, Query(q): Query<RefreshQuery>) -> Response {
     if !authed(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "logged out" }))).into_response();
@@ -2404,7 +2502,7 @@ pub async fn refresh(State(app): St, headers: HeaderMap, Query(q): Query<Refresh
             app.mail.hurry(&account, [remote]);
         }
     }
-    let whole = q.folder.is_none();
+    let whole = q.folder.is_none() || q.folder.and_then(|id| app.mail.mailbox(id)).is_some_and(|b| b.is_all_mail());
     let mut passed = app.mail.passed();
     // A pass started after this is one that started later than any had
     // started now (and took the folders asked for).

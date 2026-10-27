@@ -9,6 +9,8 @@
 //! the other folders, those with the same path in several accounts together.
 //! An account's folders are placed so when it is first synced; folders that
 //! appear later wait under `Accounts/` until added from the tree editor.
+//! Among the special folders, *All mail* (`\All`) gathers no folder in
+//! particular: every account folder's mail, Spam and Trash too.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,6 +22,13 @@ use super::{ACCOUNTS, ALL_INBOXES, MailStore, Mailbox, boxes};
 
 /// The special uses a node can have, with the default tree's label for each.
 pub const SPECIALS: &[(&str, &str)] = &[("\\Drafts", "Drafts"), ("\\Sent", "Sent"), ("\\Archive", "Archive"), ("\\Junk", "Spam"), ("\\Trash", "Trash")];
+
+/// The special use of the node with every account folder's mail.
+pub const ALL_MAIL: &str = "\\All";
+const ALL_MAIL_LABEL: &str = "All mail";
+
+/// The default tree's top, after INBOX: the special folders in this order.
+const TOP: &[&str] = &["\\Drafts", "\\Sent", "\\Archive", ALL_MAIL, "\\Junk", "\\Trash"];
 
 /// Folder names that mean a special use when the provider doesn't flag any.
 const SPECIAL_NAMES: &[(&str, &[&str])] = &[
@@ -63,6 +72,11 @@ pub enum Shift {
 
 fn inbox_id(c: &Connection) -> rusqlite::Result<i64> {
     c.query_row("SELECT id FROM mailboxes WHERE name = ?1", [ALL_INBOXES], |r| r.get(0))
+}
+
+/// The All mail node, if the tree has one.
+pub(super) fn all_mail(c: &Connection) -> rusqlite::Result<Option<i64>> {
+    c.prepare_cached("SELECT mailbox FROM tree WHERE special = ?1")?.query_row([ALL_MAIL], |r| r.get(0)).optional()
 }
 
 /// The nodes gathering a real folder.
@@ -244,6 +258,41 @@ fn free_label(places: &[Place], parent: Option<i64>, wanted: &str) -> String {
     label
 }
 
+/// Where a new top folder of special use `special` goes: after INBOX and the
+/// special folders before it in [`TOP`]'s order. `specials`: the nodes' (use → node).
+fn top_place(places: &[Place], specials: &HashMap<String, i64>, inbox: i64, special: &str) -> usize {
+    let order = |s: &str| TOP.iter().position(|x| *x == s);
+    let mine = order(special);
+    let node_special = |id: i64| specials.iter().find(|(_, v)| **v == id).map(|(k, _)| k.as_str());
+    places
+        .iter()
+        .position(|p| p.parent.is_none() && p.id != inbox && node_special(p.id).and_then(order).is_none_or(|o| Some(o) > mine))
+        .unwrap_or(places.len())
+}
+
+/// Makes the All mail node, among the special folders, with a link row for
+/// every account folder's message.
+fn make_all_mail(c: &Connection) -> Result<i64> {
+    let nodes = load(c)?;
+    let mut places = places_of(&nodes);
+    let specials: HashMap<String, i64> = nodes.iter().filter(|n| !n.special.is_empty()).map(|n| (n.special.clone(), n.id)).collect();
+    let label = free_label(&places, None, ALL_MAIL_LABEL);
+    let id = insert_node(c, None, &label, ALL_MAIL)?;
+    places.insert(top_place(&places, &specials, inbox_id(c)?, ALL_MAIL), Place { id, parent: None, label });
+    arrange(c, &places)?;
+    let rows: Vec<(i64, String, String, i64, i64, String)> = {
+        let mut st = c.prepare(
+            "SELECT m.id, m.blob, m.flags, m.date, m.size, m.message_id FROM messages m JOIN mailboxes b ON b.id = m.mailbox
+             WHERE m.link IS NULL AND b.account IS NOT NULL ORDER BY m.date, m.id",
+        )?;
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<rusqlite::Result<_>>()?
+    };
+    for (row, blob, flags, date, size, mid) in rows {
+        MailStore::insert_row(c, id, &blob, &flags, date, size as usize, &mid, None, Some(row))?;
+    }
+    Ok(id)
+}
+
 /// Puts real folders in the tree by the default tree's rules. Returns the
 /// node each joined.
 fn place(c: &Connection, folders: &[Mailbox]) -> Result<Vec<i64>> {
@@ -280,15 +329,7 @@ fn place(c: &Connection, folders: &[Mailbox]) -> Result<Vec<i64>> {
                         None => {
                             let label = free_label(&places, None, label);
                             let n = insert_node(c, None, &label, special)?;
-                            // After INBOX and the special folders before it in SPECIALS' order.
-                            let order = |s: &str| SPECIALS.iter().position(|(x, _)| *x == s);
-                            let mine = order(special);
-                            let node_special = |id: i64| specials.iter().find(|(_, v)| **v == id).map(|(k, _)| k.as_str());
-                            let at = places
-                                .iter()
-                                .position(|p| p.parent.is_none() && p.id != inbox && node_special(p.id).and_then(order).is_none_or(|o| Some(o) > mine))
-                                .unwrap_or(places.len());
-                            places.insert(at, Place { id: n, parent: None, label });
+                            places.insert(top_place(&places, &specials, inbox, special), Place { id: n, parent: None, label });
                             n
                         }
                     };
@@ -336,12 +377,25 @@ fn unplaced_in(c: &Connection) -> Vec<Mailbox> {
     boxes(c).into_iter().filter(|b| !b.is_node() && nodes_of(c, b.id).is_ok_and(|n| n.is_empty())).collect()
 }
 
-/// Moves real folders under `Accounts/` and builds the tree from them, once.
+/// Moves real folders under `Accounts/` and builds the tree from them, once;
+/// gives it All mail, once (it stays deleted if the user deletes it).
 pub(super) fn migrate(c: &Connection) -> Result<()> {
-    let done: Option<i64> = c.query_row("SELECT value FROM meta WHERE key = 'tree'", [], |r| r.get(0)).optional()?;
-    if done.is_some() {
-        return Ok(());
+    let done = |key: &str| c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get::<_, i64>(0)).optional();
+    if done("tree")?.is_none() {
+        migrate_tree(c)?;
     }
+    if done("all_mail")?.is_none() {
+        let tx = c.unchecked_transaction()?;
+        if all_mail(&tx)?.is_none() {
+            make_all_mail(&tx)?;
+        }
+        tx.execute("INSERT INTO meta (key, value) VALUES ('all_mail', 1)", [])?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn migrate_tree(c: &Connection) -> Result<()> {
     let tx = c.unchecked_transaction()?;
     tx.execute("UPDATE mailboxes SET name = ?1 || '/' || name WHERE account IS NOT NULL", [ACCOUNTS])?;
     let inbox = inbox_id(&tx)?;
@@ -395,6 +449,11 @@ impl MailStore {
         };
         self.notify();
         Ok(out)
+    }
+
+    /// The All mail node, if the tree has one.
+    pub fn all_mail(&self) -> Option<i64> {
+        all_mail(&self.db()).ok().flatten()
     }
 
     /// Every node, depth first.
@@ -461,6 +520,7 @@ impl MailStore {
     pub fn set_members(&self, node: i64, members: &[i64]) -> Result<()> {
         self.in_tx(|c| {
             ensure!(load(c)?.iter().any(|n| n.id == node), "no such folder");
+            ensure!(all_mail(c)? != Some(node), "All mail gathers every folder by itself");
             set_members_in(c, node, members)
         })
     }
@@ -492,6 +552,7 @@ impl MailStore {
         ensure!(special.is_empty() || SPECIALS.iter().any(|(s, _)| *s == special), "unknown special use");
         self.in_tx(|c| {
             ensure!(node != inbox_id(c)?, "INBOX is the inbox");
+            ensure!(all_mail(c)? != Some(node), "All mail is all the mail");
             ensure!(c.execute("UPDATE tree SET special = special WHERE mailbox = ?1", [node])? == 1, "no such folder");
             if !special.is_empty() {
                 c.execute("UPDATE tree SET special = '' WHERE special = ?1", [special])?;
@@ -537,6 +598,7 @@ impl MailStore {
             let inboxes: Vec<i64> = boxes(c).iter().filter(|b| !b.is_node() && b.is_inbox()).map(|b| b.id).collect();
             set_members_in(c, inbox, &inboxes)?;
             place(c, &unplaced_in(c))?;
+            make_all_mail(c)?;
             Ok(())
         })
     }
@@ -591,7 +653,7 @@ mod tests {
         folder(&s, "i", "Clients", "Clients", "");
         s.place_account("g").unwrap();
         s.place_account("i").unwrap();
-        assert_eq!(names(&s), ["INBOX", "Sent", "Spam", "Trash", "Projects", "Projects/2026", "Clients"]);
+        assert_eq!(names(&s), ["INBOX", "Sent", "All mail", "Spam", "Trash", "Projects", "Projects/2026", "Clients"]);
         let node = |name: &str| s.node(by_name(&s, name)).unwrap();
         assert_eq!(node("INBOX").members, [g_in, i_in]);
         assert_eq!((node("Spam").members, node("Spam").special), (vec![g_spam, i_junk], "\\Junk".to_string()));
@@ -617,7 +679,7 @@ mod tests {
         // Reset: the same tree, made again (new ids, same shape).
         s.rename_node(by_name(&s, "Projects"), "Work").unwrap();
         s.reset_tree().unwrap();
-        assert_eq!(names(&s), ["INBOX", "Drafts", "Sent", "Spam", "Trash", "Clients", "Misc", "Projects", "Projects/2026"]);
+        assert_eq!(names(&s), ["INBOX", "Drafts", "Sent", "All mail", "Spam", "Trash", "Clients", "Misc", "Projects", "Projects/2026"]);
     }
 
     #[test]
@@ -701,6 +763,7 @@ mod tests {
     #[test]
     fn arranging_checks_the_tree() {
         let s = store();
+        s.delete_node(s.all_mail().unwrap()).unwrap();
         let work = s.create_node(None, "Work").unwrap();
         let clients = s.create_node(Some(work), "Clients").unwrap();
         let acme = s.create_node(Some(clients), "Acme").unwrap();
@@ -760,8 +823,9 @@ mod tests {
         .unwrap();
         let s = MailStore::with(c).unwrap();
         assert_eq!(s.mailbox(2).unwrap().name, "Accounts/Gmail/Inbox");
-        assert_eq!(names(&s), ["INBOX", "Spam", "Work"]);
+        assert_eq!(names(&s), ["INBOX", "All mail", "Spam", "Work"]);
         assert_eq!(s.messages(1).len(), 1, "INBOX's rows stay as they were");
+        assert_eq!(s.count(by_name(&s, "All mail")), (3, 2), "every account folder's mail");
         assert_eq!(s.node(1).unwrap().members, [2, 4]);
         let spam = by_name(&s, "Spam");
         assert_eq!(s.count(spam), (2, 1));
@@ -769,9 +833,59 @@ mod tests {
         // Twice is once.
         migrate(&s.db()).unwrap();
         assert_eq!(s.mailbox(2).unwrap().name, "Accounts/Gmail/Inbox");
-        assert_eq!(names(&s), ["INBOX", "Spam", "Work"]);
+        assert_eq!(names(&s), ["INBOX", "All mail", "Spam", "Work"]);
         // New mail in a gathered folder shows in its node.
         s.add_fetched(5, &raw("n", "x@y.z"), &[], 0, 2).unwrap();
         assert_eq!(s.count(spam).0, 3);
+        assert_eq!(s.count(by_name(&s, "All mail")).0, 4);
+    }
+
+    #[test]
+    fn all_mail_has_every_folders_mail() {
+        let s = store();
+        let g_in = folder(&s, "g", "Inbox", "INBOX", "");
+        let g_spam = folder(&s, "g", "Spam", "[Gmail]/Spam", "\\Junk");
+        let i_trash = folder(&s, "i", "Trash", "Trash", "\\Trash");
+        let i_work = folder(&s, "i", "Work", "Work", "");
+        s.add_fetched(g_in, &raw("a", "x@y.z"), &[], 10, 1).unwrap();
+        s.place_account("g").unwrap();
+        s.place_account("i").unwrap();
+        let all = s.all_mail().unwrap();
+        assert_eq!(names(&s), ["INBOX", "All mail", "Spam", "Trash", "Work"]);
+        assert_eq!(s.mailbox(all).unwrap().special, ALL_MAIL);
+        assert!(s.mailbox(all).unwrap().is_all_mail());
+        let (spam, _) = s.add_fetched(g_spam, &raw("b", "x@y.z"), &[], 20, 1).unwrap();
+        s.add_fetched(i_trash, &raw("c", "x@y.z"), &["\\Seen".into()], 30, 1).unwrap();
+        let (work, _) = s.add_fetched(i_work, &raw("d", "x@y.z"), &[], 40, 1).unwrap();
+        assert_eq!(s.count(all), (4, 3), "Spam and Trash too");
+        assert!(s.node(all).unwrap().members.is_empty(), "no folder chosen: they all are");
+
+        // Out of Spam: still there, once.
+        s.copy(&[spam], g_in, true).unwrap();
+        assert_eq!(s.count(all).0, 4);
+        s.expunge(&[s.row_in(all, work).unwrap()]).unwrap();
+        assert!(s.messages(i_work).is_empty() && s.count(all).0 == 3, "expunged from All mail: from its folder");
+
+        // Not a place of its own.
+        let one = s.messages(g_in)[0].id;
+        assert!(s.copy(&[one], all, false).is_err() && s.append(all, &raw("e", "me@gmail.com"), &[], 0).is_err());
+        assert!(s.set_members(all, &[g_in]).is_err() && s.set_special(all, "").is_err());
+        assert_eq!(s.count(all).0, 3);
+
+        // Specials made later go around it; a folder made later is still waiting to be added.
+        let g_archive = folder(&s, "g", "Archive", "Archive", "\\Archive");
+        folder(&s, "g", "Later", "Later", "");
+        assert_eq!(s.unplaced().len(), 2);
+        s.place_folder(g_archive).unwrap();
+        assert_eq!(names(&s)[..3], ["INBOX", "Archive", "All mail"]);
+
+        // Deleted, it stays so; the default tree has it again, with all the mail.
+        s.delete_node(all).unwrap();
+        migrate(&s.db()).unwrap();
+        assert!(s.all_mail().is_none());
+        s.add_fetched(g_in, &raw("f", "x@y.z"), &[], 50, 2).unwrap();
+        s.reset_tree().unwrap();
+        assert_eq!(s.count(s.all_mail().unwrap()).0, 4);
+        assert_eq!(names(&s)[..4], ["INBOX", "Archive", "All mail", "Spam"]);
     }
 }

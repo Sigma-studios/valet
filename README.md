@@ -22,8 +22,9 @@ the native apps of every device.
 - **Webmail** on valet's own site, from any browser: your tree of folders
   (and every account's own folders), search, a Filter menu (read or unread,
   starred, from or to someone, suggested from the folder's mail as you type,
-  with attachments, invitations, a date range; the filters on show as chips
-  under the search, each removed with its ✕), reading, and writing with
+  with attachments, invitations, a date range; in *All mail*, hiding Spam and
+  Trash; the filters on show as chips under the search, each removed with its
+  ✕), reading, *Not spam* (back to the account's inbox), and writing with
   formatting (reply, reply all, forward, attachments). What you write is saved
   as a draft in the account's Drafts folder every few seconds, so it carries on
   from another device or app. Folders can be created, renamed and deleted, here
@@ -33,8 +34,8 @@ the native apps of every device.
   senders you opened a message) stay blocked until asked for. An open list
   follows the mail by itself: what comes in, or is read, flagged or deleted
   from any app, shows without reloading. *Refresh* asks the providers now,
-  the folder shown first, for what they don't push (folders other than
-  inboxes), and says what came of it.
+  the folder shown first (from *All mail*, every folder), for what they don't
+  push (folders other than inboxes), and says what came of it.
 
 ## Folders
 
@@ -48,7 +49,15 @@ folders go in the tree:
 2. *Drafts*, *Sent*, *Archive*, *Spam*, *Trash*: the folders the provider
    flags for that use (or, if it flags none, named like it: `Junk`, `Sent
    Items`, `Corbeille`…). Mail apps see these as their special folders;
-3. the other folders, nested as they are; folders with the same path in
+3. *All mail*, between *Archive* and *Spam*: the mail of every folder of every
+   account, Spam and Trash too, to find what was filed where you didn't
+   expect. It chooses no folders, so folders made later are in it too, and
+   mail can't be moved or saved into it. In the webmail, a message kept in
+   several folders of its account shows once, Spam and Trash are tagged on
+   their rows (the Filter menu can hide them), and it has no unread count:
+   the inbox has one. Mail apps see it as their All Mail (`\All`), each copy
+   listed. Deleted, it stays so until *Reset to the default tree*;
+4. the other folders, nested as they are; folders with the same path in
    several accounts together.
 
 The webmail's *Edit folders* page changes it: create, rename, nest (drag and
@@ -183,7 +192,7 @@ before saving, so a wrong password is caught there. Each account has:
 
 Gmail needs an app password (myaccount.google.com/apppasswords, with 2-step
 verification on). Its "All Mail", "Important" and "Starred" views are left out:
-they only repeat other folders.
+they only repeat other folders (valet's own *All mail* shows everything).
 
 **Microsoft 365** only accepts OAuth. The preset uses Thunderbird's public
 client (organisations that allow Thunderbird allow it), whose redirect URI is
