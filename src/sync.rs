@@ -103,8 +103,10 @@ async fn session(app: &Arc<App>, acc: &Account) -> Result<std::convert::Infallib
     // At most one extra pass in a row for the inbox before IDLE, whatever
     // the provider says.
     let mut again = false;
+    // Older mail fetched in this session.
+    let mut older_total = 0;
     loop {
-        app.mail.pass(&acc.id, Pass::Start);
+        let number = app.mail.pass(&acc.id, Pass::Start);
         let hurry = app.mail.hurried(&acc.id);
         replay(app, acc, &mut s, has_move, has_uidplus).await?;
         let mut folders = folders(app, acc, &mut s).await?;
@@ -112,10 +114,11 @@ async fn session(app: &Arc<App>, acc: &Account) -> Result<std::convert::Infallib
         folders.sort_by_key(|f| (f.remote != "INBOX", !hurry.contains(&f.remote)));
         let ahead = folders.iter().take_while(|f| f.remote == "INBOX" || hurry.contains(&f.remote)).count();
         let mut fetched = 0;
+        let mut back = Older::default();
         let first = app.mail.status(&acc.id).is_none_or(|(ok, _, _)| !ok);
         for (i, f) in folders.iter().enumerate() {
             if i == ahead {
-                app.mail.pass(&acc.id, Pass::Ahead);
+                app.mail.pass(&acc.id, Pass::Ahead(number));
             }
             if first {
                 let name = mutf7::decode(&f.remote);
@@ -126,15 +129,32 @@ async fn session(app: &Arc<App>, acc: &Account) -> Result<std::convert::Infallib
             fetched += added;
             if let Some(now) = now {
                 seen.insert(f.remote.clone(), now);
+                let o = older(app, acc, &mut s, f).await?;
+                back.fetched += o.fetched;
+                back.more |= o.more;
+                back.paused |= o.paused;
             }
         }
+        older_total += back.fetched;
         if ahead == folders.len() {
-            app.mail.pass(&acc.id, Pass::Ahead);
+            app.mail.pass(&acc.id, Pass::Ahead(number));
         }
-        app.mail.set_status(&acc.id, true, &format!("{} folders in sync{}", folders.len(), if fetched > 0 { format!(", {fetched} new") } else { String::new() }));
-        app.mail.pass(&acc.id, Pass::Finish);
-        // Ops queued while syncing go out before waiting.
-        if !app.mail.ops(&acc.id).is_empty() {
+        let older_note = if back.more {
+            format!("; fetching older mail, {older_total} so far")
+        } else if back.paused {
+            format!("; older mail continues tomorrow (the provider's daily download limit), {older_total} fetched")
+        } else {
+            String::new()
+        };
+        app.mail.set_status(
+            &acc.id,
+            true,
+            &format!("{} folders in sync{}{older_note}", folders.len(), if fetched > 0 { format!(", {fetched} new") } else { String::new() }),
+        );
+        app.mail.pass(&acc.id, Pass::Finish(number));
+        // Ops queued while syncing go out before waiting; older mail left
+        // comes in the next pass.
+        if !app.mail.ops(&acc.id).is_empty() || back.more {
             continue;
         }
         if !has_idle {
@@ -251,9 +271,12 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder, co
     // A first fetch brings old mail: nothing to tell of. (A folder empty
     // until now has `last` 0 too, but what comes into it is new.)
     let first = known != Some(validity);
-    let mut new_uids: Vec<u32> = if last == 0 {
-        let since = util::imap_date(now() - acc.history_days as i64 * 86400);
-        s.uid_search(format!("SINCE {since}")).await?.into_iter().collect()
+    // A folder's first sync: its recent mail, to show soon; older mail
+    // follows (`older`).
+    let window = last == 0;
+    let mut new_uids: Vec<u32> = if window {
+        let since = (now() - FIRST_DAYS * 86400).max(acc.mail_from().unwrap_or(0));
+        s.uid_search(format!("SINCE {}", util::imap_date(since))).await?.into_iter().collect()
     } else if mb.uid_next.is_some_and(|n| n <= last + 1) {
         Vec::new()
     } else {
@@ -269,7 +292,8 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder, co
             let (Some(uid), Some(body)) = (m.uid, m.body()) else { continue };
             let flags: Vec<String> = m.flags().filter_map(|f| flag_text(&f)).collect();
             let date = m.internal_date().map(|d| d.timestamp()).unwrap_or_else(now);
-            let (id, new) = app.mail.add_fetched(f.mailbox, body, &flags, date, uid)?;
+            let kept = slim(acc, body, date);
+            let (id, new) = app.mail.add_fetched(f.mailbox, &kept, &flags, date, uid)?;
             if new {
                 added += 1;
                 if f.remote == "INBOX" {
@@ -284,7 +308,11 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder, co
         app.mail.set_remote_state(f.mailbox, validity, last)?;
         notify::arrived(app, &arrived);
     }
-    if new_uids.is_empty() {
+    // Whatever is older is for `older`, as far as the folder goes now.
+    if window {
+        last = last.max(mb.uid_next.unwrap_or(1).saturating_sub(1));
+    }
+    if new_uids.is_empty() || window {
         app.mail.set_remote_state(f.mailbox, validity, last)?;
     }
 
@@ -330,6 +358,120 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder, co
         }
     }
     Ok((added, Some(now)))
+}
+
+/// How far back a folder's first sync goes; the rest comes after.
+const FIRST_DAYS: i64 = 30;
+/// Older mail fetched per folder and pass, so new mail isn't kept waiting.
+const OLDER_PER_PASS: usize = 500;
+/// Older mail fetched per account and day (Gmail allows about 2.5 GB a
+/// day through IMAP, and stops the account's IMAP for the day past it).
+const OLDER_PER_DAY: u64 = 1_500_000_000;
+
+/// Per account: (day, bytes of older mail fetched that day).
+static SPENT: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (i64, u64)>>> = std::sync::LazyLock::new(Default::default);
+
+fn spent(acc: &Account, more: u64) -> u64 {
+    let mut s = SPENT.lock().unwrap();
+    let today = now() / 86400;
+    let e = s.entry(acc.id.clone()).or_insert((today, 0));
+    if e.0 != today {
+        *e = (today, 0);
+    }
+    e.1 += more;
+    e.1
+}
+
+/// The message as kept: without its attachments if it is from before the
+/// account keeps them.
+fn slim<'a>(acc: &Account, raw: &'a [u8], date: i64) -> std::borrow::Cow<'a, [u8]> {
+    match acc.attachments_from().filter(|&t| date < t).and_then(|_| crate::mime::strip(raw)) {
+        Some(s) => std::borrow::Cow::Owned(s),
+        None => std::borrow::Cow::Borrowed(raw),
+    }
+}
+
+/// What `older` did in a folder.
+#[derive(Default)]
+struct Older {
+    fetched: usize,
+    /// Left for another pass.
+    more: bool,
+    /// Stopped for the day.
+    paused: bool,
+}
+
+/// In the folder just synced (still selected): the attachments asked back
+/// (kept without them, but now from after the account keeps them), then
+/// the older mail since the account keeps it, newest first, a batch per
+/// pass. Done once the folder has it all.
+async fn older(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder) -> Result<Older> {
+    let mut out = Older::default();
+    let since = acc.mail_from().unwrap_or(0);
+    let budget_left = || spent(acc, 0) < OLDER_PER_DAY;
+    let restore = match acc.attachments_from() {
+        Some(t) => app.mail.stripped_rows(f.mailbox, t.max(since)),
+        None => app.mail.stripped_rows(f.mailbox, since),
+    };
+    let filled = app.mail.filled_since(f.mailbox).is_some_and(|d| d <= since);
+    if restore.is_empty() && filled {
+        return Ok(out);
+    }
+    if !budget_left() {
+        out.paused = true;
+        return Ok(out);
+    }
+    let rows: HashMap<u32, i64> = restore.iter().map(|(id, uid)| (*uid, *id)).collect();
+    for chunk in restore.chunks(25) {
+        if !budget_left() || out.fetched >= OLDER_PER_PASS {
+            out.more = budget_left();
+            out.paused = !budget_left();
+            return Ok(out);
+        }
+        let set: Vec<String> = chunk.iter().map(|(_, u)| u.to_string()).collect();
+        let fetches: Vec<_> = s.uid_fetch(set.join(","), "(UID BODY.PEEK[])").await?.try_collect().await?;
+        for m in &fetches {
+            let (Some(uid), Some(body)) = (m.uid, m.body()) else { continue };
+            let Some(&id) = rows.get(&uid) else { continue };
+            spent(acc, body.len() as u64);
+            app.mail.set_content(id, body)?;
+            out.fetched += 1;
+        }
+    }
+    if !restore.is_empty() {
+        app.mail.gc_blobs();
+    }
+    if filled {
+        return Ok(out);
+    }
+    let (_, last) = app.mail.remote_state(f.mailbox);
+    let query = if since > 0 { format!("SINCE {}", util::imap_date(since)) } else { "ALL".into() };
+    let known: std::collections::HashSet<u32> = app.mail.remote_rows(f.mailbox).into_iter().map(|r| r.1).collect();
+    let mut missing: Vec<u32> = s.uid_search(query).await?.into_iter().filter(|u| *u <= last && !known.contains(u)).collect();
+    missing.sort_unstable_by(|a, b| b.cmp(a));
+    for chunk in missing.chunks(25) {
+        if !budget_left() || out.fetched >= OLDER_PER_PASS {
+            out.more = budget_left();
+            out.paused = !budget_left();
+            return Ok(out);
+        }
+        let set: Vec<String> = chunk.iter().map(u32::to_string).collect();
+        let fetches: Vec<_> = s.uid_fetch(set.join(","), "(UID FLAGS INTERNALDATE BODY.PEEK[])").await?.try_collect().await?;
+        for m in &fetches {
+            let (Some(uid), Some(body)) = (m.uid, m.body()) else { continue };
+            spent(acc, body.len() as u64);
+            let flags: Vec<String> = m.flags().filter_map(|f| flag_text(&f)).collect();
+            let date = m.internal_date().map(|d| d.timestamp()).unwrap_or_else(now);
+            let (_, new) = app.mail.add_fetched(f.mailbox, &slim(acc, body, date), &flags, date, uid)?;
+            // Invitations in it too, for events still to come.
+            if new && f.remote == "INBOX" {
+                invites::from_mail(app, acc, body);
+            }
+            out.fetched += 1;
+        }
+    }
+    app.mail.set_filled_since(f.mailbox, since)?;
+    Ok(out)
 }
 
 fn is_refusal(e: &async_imap::error::Error) -> bool {

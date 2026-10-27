@@ -79,6 +79,11 @@ fn handle(app: &App, acc: &Account, text: &str, message: &str) -> Result<()> {
     if !recurring && dtstart.get(..8).is_some_and(|d| d < crate::util::today().as_str()) {
         return Ok(());
     }
+    // Mail can come in out of order (older mail is fetched newest first):
+    // what a later version or a cancellation already said stands.
+    if app.mail.invite_superseded(&acc.id, &uid, &method, sequence) {
+        return Ok(());
+    }
     let summary = ev.value("SUMMARY").unwrap_or("").to_string();
     let organizer = ev.value("ORGANIZER").map(mailto).unwrap_or_default();
     if !app.mail.add_invite(&acc.id, &uid, &method, sequence, &summary, &organizer, &dtstart, text, message)? {

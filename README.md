@@ -188,8 +188,21 @@ before saving, so a wrong password is caught there. Each account has:
 | address, other addresses | what the account may send as |
 | IMAP, SMTP servers | `host:port`; IMAP is SSL/TLS; SMTP port 465 is SSL/TLS, others STARTTLS |
 | login | if it isn't the address |
-| days of mail | how far back the first sync of each folder goes (default 90) |
+| mail since | the day valet keeps its mail from (empty, the default: all of it) |
+| attachments since | the day valet keeps attachments from; older mail is kept without them, their names still shown (empty, the default: all of them) |
 | folders to leave out | provider folders, by name |
+
+A folder's first sync brings its last 30 days, to show soon; its older mail
+follows, newest first, at most 1.5 GB a day per account (Gmail stops an
+account's IMAP for the day past about 2.5 GB). The Mail page tells how far it
+has got, and what each account's mail takes here. Mail is kept compressed
+(about a fourth of its size for text; attachments, already compressed, lose
+the third their encoding adds).
+
+A later *mail since* or *attachments since* date removes what it leaves out
+from valet, once confirmed: the page says how many messages and attachments
+go, and the room it frees. It all stays at the provider: an earlier date
+fetches it again.
 
 Gmail needs an app password (myaccount.google.com/apppasswords, with 2-step
 verification on). Its "All Mail", "Important" and "Starred" views are left out:

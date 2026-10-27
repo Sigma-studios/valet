@@ -386,7 +386,8 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .reader iframe { width:100%; border:0; background:#fff; border-radius:6px; min-height:200px; display:block; }
 .reader pre { white-space:pre-wrap; word-wrap:break-word; font:inherit; margin:0; }
 .atts { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
-.atts a { border:1px solid var(--line); border-radius:6px; padding:4px 10px; background:var(--card); }
+.atts a, .atts .removed { border:1px solid var(--line); border-radius:6px; padding:4px 10px; background:var(--card); }
+.atts .removed { border-style:dashed; color:var(--muted); cursor:help; }
 .notice { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:13px; margin-bottom:8px; }
 .pager { display:flex; justify-content:space-between; margin-top:10px; }
 form.write { display:flex; flex-direction:column; gap:10px; }
@@ -869,6 +870,11 @@ const FILTER_SCRIPT: &str = r#"
   menu.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !e.defaultPrevented) { menu.open = false; menu.querySelector('summary').focus(); }
   });
+  // The search: on Enter (the form has several fields and no button, so
+  // Enter wouldn't send it), or when emptied with its ✕.
+  const search = form.elements.q;
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+  search.addEventListener('search', () => { if (!search.value) apply(); });
   const when = form.elements.when;
   when.addEventListener('change', () => { if (when.value === 'custom') form.elements.since.focus(); });
   form.addEventListener('formdata', (e) => {
@@ -1240,13 +1246,18 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
     // Deleting it from the Trash (or from an account without one) is for good.
     let for_good = folder.account.as_deref().and_then(|a| app.mail.special_folder(a, "\\Trash")).is_none_or(|t| t == folder.id);
     let account_folders: Vec<Mailbox> = app.mail.mailboxes().into_iter().filter(|b| b.account == folder.account && b.id != folder.id).collect();
-    let attachments: Vec<(usize, String, usize)> = m
+    // (index, name, size, kept: false when removed here to save room).
+    let attachments: Vec<(usize, String, usize, bool)> = m
         .attachments()
         .enumerate()
-        .filter(|(_, a)| shown_attachment(a, html_body))
+        .filter(|(_, a)| shown_attachment(a, html_body) || removed_size(a).is_some())
         .map(|(i, a)| {
             use mail_parser::MimeHeaders;
-            (i, a.attachment_name().unwrap_or("attachment").to_string(), a.contents().len())
+            let name = a.attachment_name().unwrap_or("attachment").to_string();
+            match removed_size(a) {
+                Some(n) => (i, name, n, false),
+                None => (i, name, a.contents().len(), true),
+            }
         })
         .collect();
     let flagged = has_flag(&src, "\\Flagged");
@@ -1313,8 +1324,14 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
             }
             @if !attachments.is_empty() {
                 div.atts {
-                    @for (i, name, size) in &attachments {
-                        a href={"/msg/" (id) "/att/" (i)} { "📎 " (name) span.muted.small { " " (human_size(*size)) } }
+                    @for (i, name, size, kept) in &attachments {
+                        @if *kept {
+                            a href={"/msg/" (id) "/att/" (i)} { "📎 " (name) span.muted.small { " " (human_size(*size)) } }
+                        } @else {
+                            span.removed title="Not kept in valet, to save room (the account keeps attachments from a later date): it's still at the provider." {
+                                "📎 " (name) span.muted.small { " " (human_size(*size)) ", not kept" }
+                            }
+                        }
                     }
                 }
             }
@@ -1343,6 +1360,11 @@ fn human_size(n: usize) -> String {
 /// mail-parser turns a text-only message into HTML too: only real HTML goes in the frame.
 fn has_html_body(m: &mail_parser::Message) -> bool {
     m.html_body.first().and_then(|&i| m.part(i)).is_some_and(|p| p.is_text_html())
+}
+
+/// The size an attachment had, if valet removed it (see `mime::strip`).
+fn removed_size(p: &mail_parser::MessagePart) -> Option<usize> {
+    p.headers.iter().find(|h| h.name.as_str().eq_ignore_ascii_case(crate::mime::REMOVED)).and_then(|h| h.value.as_text()?.trim().parse().ok())
 }
 
 /// Listed under the message: not an image its HTML shows.

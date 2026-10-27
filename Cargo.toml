@@ -33,3 +33,4 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.28.0", features = ["v4"] }
 webpki-roots = "1.0.10"
+zstd = "0.13"

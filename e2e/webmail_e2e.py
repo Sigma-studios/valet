@@ -231,6 +231,7 @@ def main():
         else:
             print("(no Chrome: the Filter menu's browser checks skipped)")
     all_mail(s, inbox)
+    keeping(s, inbox)
     retiring(s, inbox)
 
 
@@ -290,6 +291,58 @@ def all_mail(s, inbox):
     check(flash(bulk("delete", "spam-test"))[0] == "Deleted 1 message.", "deleted from All mail, out of the Trash: for good")
     wait(lambda: "spam-test" not in gm_subjects("test", "Trash"), "gone from Test's Trash at GreenMail")
     check("spam-test" not in listed(), "and from All mail")
+
+
+def keeping(s, inbox):
+    """What an account keeps: its older mail is fetched; attachments, then
+    mail, from before a date are removed once confirmed, and fetched again
+    when the date goes."""
+    import base64
+    pdf = os.urandom(30000)
+    old = (
+        b"From: a@b.c\r\nTo: test@local.test\r\nSubject: keep-old\r\nMessage-ID: <keep-old@e2e>\r\nMIME-Version: 1.0\r\n"
+        b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nold text\r\n"
+        b"--b\r\nContent-Type: application/pdf; name=old.pdf\r\nContent-Disposition: attachment; filename=old.pdf\r\n"
+        b"Content-Transfer-Encoding: base64\r\n\r\n" + base64.encodebytes(pdf).replace(b"\n", b"\r\n") + b"--b--\r\n"
+    )
+    g = gm_imap("test")
+    g.append("INBOX", None, imaplib.Time2Internaldate(datetime(2015, 3, 1, 10, tzinfo=timezone.utc)), old)
+    g.logout()
+    s.post(f"{WEB}/mail/refresh")
+    wait(lambda: "keep-old" in rows(s, inbox), "mail from 2015 comes in")
+    view = lambda: s.get(f"{WEB}/msg/{rows(s, inbox)['keep-old']}").text
+    att = lambda: re.search(r'href="(/msg/\d+/att/\d+)">📎 old.pdf', view())
+    check(att() and s.get(f"{WEB}{att().group(1)}").content == pdf, "with its attachment")
+    check('action="/mail/accounts/test/keep"' in s.get(f"{WEB}/mail/accounts/test").text, "the account's page says what it keeps")
+    check(re.search(r"\d+ messages kept here \(\d+ (KB|MB)\)", s.get(f"{WEB}/mail/status").json()["test"]), "and the Mail page what it takes")
+
+    keep = lambda **f: s.post(f"{WEB}/mail/accounts/test/keep", data={"mail_since": "", "attachments_since": "", **f})
+    r = keep(attachments_since="2016-01-01")
+    check("Remove from valet?" in r.text and "<b>1 attachment</b> of 1 message from before 2016-01-01" in r.text and re.search(r"freeing about <b>3\d KB</b>", r.text),
+          f"attachments from before a date: what goes is said first {r.text[-1500:]}")
+    check("2016-01-01" not in s.get(f"{WEB}/mail/accounts/test").text, "nothing saved yet")
+    r = keep(attachments_since="2016-01-01", confirm="1")
+    check(flash(r)[0] == "Saved what Test keeps: what it no longer keeps is being removed.", f"confirmed: {flash(r)}")
+    wait(lambda: "old.pdf" in view() and ", not kept" in view() and not att(), "the attachment is gone, its name stays")
+    check("old text" in view(), "the text stays")
+    check("attachments since 2016-01-01" in s.get(f"{WEB}/mail/status").json()["test"], "the Mail page says so")
+    r = keep(attachments_since="2016-01-01")
+    check("Remove from valet?" not in r.text and flash(r)[0] == "Saved what Test keeps.", "nothing more to remove: saved without asking")
+
+    r = keep()
+    check(flash(r)[0] == "Saved what Test keeps: what's missing is being fetched (see its status below).", f"all attachments again: {flash(r)}")
+    wait(lambda: att() and s.get(f"{WEB}{att().group(1)}").content == pdf, "the attachment is fetched again, whole")
+
+    r = keep(mail_since="2016-01-01")
+    check("<b>1 message</b> from before 2016-01-01 will be removed from valet" in r.text, "mail from before a date: said first")
+    keep(mail_since="2016-01-01", confirm="1")
+    wait(lambda: "keep-old" not in rows(s, inbox), "it leaves valet")
+    check("keep-old" in gm_subjects("test", "INBOX"), "not the provider")
+    check("filt-old" in rows(s, inbox), "mail since then stays")
+    keep()
+    wait(lambda: "keep-old" in rows(s, inbox), "all the mail again: it comes back")
+    check(att() and s.get(f"{WEB}{att().group(1)}").content == pdf, "whole")
+    check(flash(keep(mail_since="2016-13-45"))[1] == "2016-13-45 isn't a date.", "a wrong date is refused")
 
 
 def retiring(s, inbox):
@@ -408,6 +461,12 @@ def invitation_filters(out):
     b.js("document.querySelector('input[name=status][value=all]').click()")
     until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\"]'", "All applies at once")
     check(b.js("window.samePage && document.querySelector('details.filter').open"), "in place, the menu still open")
+    b.js("{ const i = document.querySelector('input[name=q]'); i.focus(); i.value = 'retro'; i.dispatchEvent(new Event('input', { bubbles: true })) }")
+    until(f"location.search === '?q=retro&status=all' && {cards} === '[\"Retro\"]' && !document.querySelector('[data-swap=clear-search]').hidden",
+          "the search applies as it's typed, no other filter changed")
+    b.js("{ const i = document.querySelector('input[name=q]'); i.value = ''; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })) }")
+    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\"]'", "emptied, with Enter: at once")
+    check(b.js("window.samePage === true"), "still in place")
     check(b.js("document.querySelector('form[action^=\"/invites/\"] input[name=back]').value") == "/invitations?status=all", "an answer comes back here")
     b.js("{ const i = document.getElementById('filter-from'); i.focus(); i.value = 'nobody'; i.dispatchEvent(new Event('input', { bubbles: true })) }")
     until(f"{cards} === '[]' && document.body.textContent.includes('No invitation matches')", "an organizer typed applies after a pause")
@@ -440,6 +499,12 @@ def filter_menu(s, inbox, out):
     b.js("document.querySelector('details.filter > summary').click()")
     check(b.js("document.querySelector('.filter .panel').checkVisibility() && getComputedStyle(document.querySelector('.filter .panel')).position === 'absolute'"), "Filter opens its menu")
     b.js("window.samePage = true")
+    b.js("{ const i = document.querySelector('input[name=q]'); i.value = 'ahead'; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })) }")
+    until("new URLSearchParams(location.search).get('q') === 'ahead' && JSON.stringify([...document.querySelectorAll('.list .subject')].map(e => e.textContent)) === '[\"ahead\"]'",
+          "the search applies on Enter")
+    check(b.js("window.samePage === true"), "in place")
+    b.js("{ const i = document.querySelector('input[name=q]'); i.value = ''; i.dispatchEvent(new Event('search')) }")
+    until("!location.search.includes('q=') && document.querySelectorAll('.list .subject').length > 1", "emptied with its ✕: everything again")
     b.js("document.querySelector('input[name=read][value=unread]').click()")
     until("new URLSearchParams(location.search).get('read') === 'unread' && ![...document.querySelectorAll('.list .subject')].some(e => e.textContent === 'ahead')",
           "Unread applies at once, without Apply")
