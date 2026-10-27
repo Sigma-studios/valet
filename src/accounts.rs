@@ -36,9 +36,13 @@ pub struct Account {
     pub password: Option<String>,
     #[serde(default)]
     pub oauth: Option<OAuth>,
-    /// How far back the first sync of a folder goes.
-    #[serde(default = "default_days")]
-    pub history_days: u32,
+    /// The day (`2020-01-01`) its mail is kept from; all of it when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_since: Option<String>,
+    /// The day its mail is kept with its attachments from (before, without
+    /// them); always with them when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments_since: Option<String>,
     /// Provider folders to leave out (their names as the provider lists them, decoded).
     #[serde(default)]
     pub skip: Vec<String>,
@@ -49,10 +53,6 @@ pub struct Account {
     /// no longer logs in or sends, and changes to its mail stay in valet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired: Option<i64>,
-}
-
-fn default_days() -> u32 {
-    90
 }
 
 fn yes() -> bool {
@@ -83,7 +83,22 @@ fn default_scopes() -> String {
     "offline_access https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send".into()
 }
 
+/// A day (`2020-01-01`) as Unix seconds, at its start (UTC, as IMAP dates).
+pub fn day_start(day: &str) -> Option<i64> {
+    chrono::NaiveDate::parse_from_str(day.trim(), "%Y-%m-%d").ok().and_then(|d| d.and_hms_opt(0, 0, 0)).map(|t| t.and_utc().timestamp())
+}
+
 impl Account {
+    /// Since when its mail is kept (Unix seconds); all of it when None.
+    pub fn mail_from(&self) -> Option<i64> {
+        self.mail_since.as_deref().and_then(day_start)
+    }
+
+    /// Since when its mail is kept with attachments; always when None.
+    pub fn attachments_from(&self) -> Option<i64> {
+        self.attachments_since.as_deref().and_then(day_start)
+    }
+
     pub fn login(&self) -> &str {
         self.user.as_deref().unwrap_or(&self.address)
     }
@@ -391,7 +406,9 @@ mod tests {
             {"id":"study","name":"Epitech","address":"s@e.eu","imap":"outlook.office365.com:993","smtp":"smtp.office365.com:587",
              "oauth":{"client_id":"abc","redirect_uri":"https://localhost"}}]"#;
         let a: Vec<Account> = serde_json::from_str(json).unwrap();
-        assert_eq!(a[0].history_days, 90);
+        assert_eq!((a[0].mail_from(), a[0].attachments_from()), (None, None), "all the mail, with attachments");
+        let old: Account = serde_json::from_str(r#"{"id":"w","name":"W","address":"a@b.fr","imap":"i:993","smtp":"s:465","history_days":90,"mail_since":"2020-01-02"}"#).unwrap();
+        assert_eq!(old.mail_from(), Some(1577923200), "a setting no longer used is ignored");
         assert_eq!(a[1].oauth.as_ref().unwrap().tenant, "common");
         assert!(a[0].sends_as("A@B.fr"));
         let (verifier, url) = authorize_url(&a[1], "https://localhost", "st").unwrap();

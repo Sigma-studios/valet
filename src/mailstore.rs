@@ -113,12 +113,35 @@ pub struct MailStore {
     hurry: Mutex<HashMap<String, HashSet<String>>>,
 }
 
-/// Counts of an account's sync passes, for Refresh to know when it's done.
+/// What keeping less of an account's mail would remove.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Trim {
+    pub messages: u64,
+    /// Freed: what only those messages use.
+    pub message_bytes: u64,
+    /// Messages that would lose attachments, how many, and about what they weigh.
+    pub with_attachments: u64,
+    pub attachments: u64,
+    pub attachment_bytes: u64,
+}
+
+impl Trim {
+    pub fn is_empty(&self) -> bool {
+        self.messages == 0 && self.with_attachments == 0
+    }
+}
+
+/// An account's sync passes, numbered as they start, for Refresh to know
+/// when one that started after it is done. (A pass cut short, the sync
+/// restarted with new settings, never finishes: counting finished passes
+/// would then fall behind for good.)
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Passes {
+    /// The number of the latest pass started.
     pub started: u64,
-    /// Passes through the inbox and the folders asked for first.
+    /// The latest through the inbox and the folders asked for first.
     pub ahead: u64,
+    /// The latest finished.
     pub finished: u64,
     /// Sessions ended by an error.
     pub failed: u64,
@@ -126,18 +149,19 @@ pub struct Passes {
 
 pub enum Pass {
     Start,
-    Ahead,
-    Finish,
+    /// Of the pass with that number.
+    Ahead(u64),
+    Finish(u64),
     Fail,
 }
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL, atts INTEGER, att_bytes INTEGER, removed INTEGER);
 CREATE TABLE IF NOT EXISTS mailboxes (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, account TEXT, remote TEXT,
     special TEXT NOT NULL DEFAULT '', uidvalidity INTEGER NOT NULL, uidnext INTEGER NOT NULL DEFAULT 1,
-    remote_validity INTEGER, remote_last INTEGER NOT NULL DEFAULT 0);
+    remote_validity INTEGER, remote_last INTEGER NOT NULL DEFAULT 0, filled_since INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_remote ON mailboxes (account, remote);
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY, mailbox INTEGER NOT NULL, uid INTEGER NOT NULL, blob TEXT NOT NULL,
@@ -216,6 +240,21 @@ fn join_flags(f: &[String]) -> String {
     f.join(" ")
 }
 
+/// How every compressed message starts; a message as received never does.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+fn pack(raw: &[u8]) -> Vec<u8> {
+    zstd::bulk::compress(raw, 6).unwrap_or_else(|_| raw.to_vec())
+}
+
+fn unpack(data: Vec<u8>) -> Vec<u8> {
+    if data.starts_with(&ZSTD_MAGIC) {
+        zstd::decode_all(data.as_slice()).unwrap_or(data)
+    } else {
+        data
+    }
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -252,10 +291,20 @@ impl MailStore {
                 params![ALL_INBOXES, now() as u32],
             )?;
             tree::migrate(&c)?;
-            // Added later: the Message-ID of the mail an invitation came in.
-            let has_message: bool = c.query_row("SELECT COUNT(*) FROM pragma_table_info('invites') WHERE name = 'message'", [], |r| r.get(0))?;
-            if !has_message {
-                c.execute_batch("ALTER TABLE invites ADD COLUMN message TEXT NOT NULL DEFAULT '';")?;
+            // Added later: the Message-ID of the mail an invitation came in;
+            // what a message's attachments weigh; how far back a folder's
+            // older mail has been fetched.
+            for (table, column, decl) in [
+                ("invites", "message", "TEXT NOT NULL DEFAULT ''"),
+                ("blobs", "atts", "INTEGER"),
+                ("blobs", "att_bytes", "INTEGER"),
+                ("blobs", "removed", "INTEGER"),
+                ("mailboxes", "filled_since", "INTEGER"),
+            ] {
+                let has: bool = c.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"), [], |r| r.get(0))?;
+                if !has {
+                    c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+                }
             }
         }
         Ok(store)
@@ -283,19 +332,32 @@ impl MailStore {
         self.wake.lock().unwrap().entry(account.to_string()).or_default().clone()
     }
 
-    /// Counts a step of the account's sync.
-    pub fn pass(&self, account: &str, step: Pass) {
-        {
+    /// Notes a step of the account's sync; a pass started gets its number.
+    pub fn pass(&self, account: &str, step: Pass) -> u64 {
+        let n = {
             let mut p = self.passes.lock().unwrap();
             let e = p.entry(account.to_string()).or_default();
             match step {
-                Pass::Start => e.started += 1,
-                Pass::Ahead => e.ahead += 1,
-                Pass::Finish => e.finished += 1,
-                Pass::Fail => e.failed += 1,
+                Pass::Start => {
+                    e.started += 1;
+                    e.started
+                }
+                Pass::Ahead(n) => {
+                    e.ahead = e.ahead.max(n);
+                    n
+                }
+                Pass::Finish(n) => {
+                    e.finished = e.finished.max(n);
+                    n
+                }
+                Pass::Fail => {
+                    e.failed += 1;
+                    0
+                }
             }
-        }
+        };
         self.passed.send_replace(());
+        n
     }
 
     pub fn passes(&self, account: &str) -> Passes {
@@ -476,7 +538,7 @@ impl MailStore {
             c.execute("DELETE FROM messages WHERE link IN (SELECT id FROM messages WHERE mailbox = ?1)", [mailbox])?;
             c.execute("DELETE FROM messages WHERE mailbox = ?1", [mailbox])?;
             c.execute(
-                "UPDATE mailboxes SET uidvalidity = uidvalidity + 1, remote_validity = NULL, remote_last = 0 WHERE id = ?1",
+                "UPDATE mailboxes SET uidvalidity = uidvalidity + 1, remote_validity = NULL, remote_last = 0, filled_since = NULL WHERE id = ?1",
                 [mailbox],
             )?;
         }
@@ -487,14 +549,101 @@ impl MailStore {
     // Messages
 
     pub fn blob(&self, hash: &str) -> Option<Vec<u8>> {
-        let c = self.db();
-        c.query_row("SELECT data FROM blobs WHERE hash = ?1", [hash], |r| r.get(0)).optional().unwrap()
+        let data: Vec<u8> = {
+            let c = self.db();
+            c.query_row("SELECT data FROM blobs WHERE hash = ?1", [hash], |r| r.get(0)).optional().unwrap()?
+        };
+        Some(unpack(data))
     }
 
+    /// Kept compressed, under the hash of the message as it is.
     fn put_blob(c: &Connection, raw: &[u8]) -> rusqlite::Result<String> {
         let hash = hex::encode(Sha256::digest(raw));
-        c.execute("INSERT OR IGNORE INTO blobs (hash, data) VALUES (?1, ?2)", params![hash, raw])?;
+        if c.query_row("SELECT 1 FROM blobs WHERE hash = ?1", [&hash], |_| Ok(())).optional()?.is_none() {
+            let a = crate::mime::attachments(raw);
+            c.execute(
+                "INSERT INTO blobs (hash, data, atts, att_bytes, removed) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![hash, pack(raw), a.count, a.bytes as i64, a.removed],
+            )?;
+        }
         Ok(hash)
+    }
+
+    /// Once: compresses the messages kept before valet compressed them, and
+    /// notes what their attachments weigh, a few at a time (the store stays
+    /// usable meanwhile); then drops what no message uses any more, and
+    /// gives the room back to the disk.
+    pub fn compact(&self) {
+        if self.db().query_row("SELECT 1 FROM meta WHERE key = 'compacted'", [], |_| Ok(())).optional().ok().flatten().is_some() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let (mut after, mut packed, mut before, mut now_bytes) = (0i64, 0u64, 0u64, 0u64);
+        loop {
+            let rows: Vec<(i64, Vec<u8>)> = {
+                let c = self.db();
+                let mut st = c
+                    .prepare("SELECT rowid, data FROM blobs WHERE rowid > ?1 AND (atts IS NULL OR substr(data, 1, 4) != ?2) ORDER BY rowid LIMIT 100")
+                    .unwrap();
+                st.query_map(params![after, ZSTD_MAGIC.as_slice()], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().filter_map(Result::ok).collect()
+            };
+            let Some(last) = rows.last().map(|r| r.0) else { break };
+            after = last;
+            let done: Vec<(i64, Option<Vec<u8>>, crate::mime::Attachments)> = rows
+                .into_iter()
+                .map(|(id, data)| {
+                    let was = data.len() as u64;
+                    let compressed = data.starts_with(&ZSTD_MAGIC);
+                    let raw = unpack(data);
+                    let a = crate::mime::attachments(&raw);
+                    let new = (!compressed).then(|| pack(&raw));
+                    before += was;
+                    now_bytes += new.as_ref().map_or(was, |n| n.len() as u64);
+                    (id, new, a)
+                })
+                .collect();
+            let c = self.db();
+            for (id, new, a) in done {
+                packed += new.is_some() as u64;
+                let _ = c.execute(
+                    "UPDATE blobs SET data = COALESCE(?2, data), atts = ?3, att_bytes = ?4, removed = ?5 WHERE rowid = ?1",
+                    params![id, new, a.count, a.bytes as i64, a.removed],
+                );
+            }
+        }
+        let gone = self.gc_blobs();
+        tracing::info!(
+            "compressed {packed} messages, {} MB to {} MB; {gone} no longer used dropped; {:.0?}",
+            before / 1_000_000,
+            now_bytes / 1_000_000,
+            started.elapsed()
+        );
+        let c = self.db();
+        // The file shrinks only by rewriting it, once; afterwards, as space is freed.
+        let mode: i64 = c.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap_or(0);
+        if mode != 2 {
+            let t = std::time::Instant::now();
+            match c.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;") {
+                Ok(()) => tracing::info!("mail.db rewritten in {:.0?}", t.elapsed()),
+                Err(e) => tracing::warn!("mail.db not rewritten: {e}"),
+            }
+        }
+        let _ = c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('compacted', 1)", []);
+    }
+
+    /// Drops what no message, waiting change or doomed copy uses; frees the
+    /// room on disk. Returns how many went.
+    pub fn gc_blobs(&self) -> usize {
+        let c = self.db();
+        let n = c
+            .execute(
+                "DELETE FROM blobs WHERE hash NOT IN (SELECT blob FROM messages) AND hash NOT IN (SELECT blob FROM doomed)
+                 AND NOT EXISTS (SELECT 1 FROM ops WHERE instr(ops.op, blobs.hash) > 0)",
+                [],
+            )
+            .unwrap_or(0);
+        let _ = c.execute_batch("PRAGMA incremental_vacuum;");
+        n
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -626,6 +775,152 @@ impl MailStore {
         }
         self.notify();
         Ok(())
+    }
+
+    // What is kept of an account's mail: since when, with attachments since when.
+
+    /// Since when (Unix seconds, 0 for all of it) the folder's older mail has
+    /// all been fetched; None until it has.
+    pub fn filled_since(&self, mailbox: i64) -> Option<i64> {
+        let c = self.db();
+        c.query_row("SELECT filled_since FROM mailboxes WHERE id = ?1", [mailbox], |r| r.get(0)).optional().ok().flatten().flatten()
+    }
+
+    pub fn set_filled_since(&self, mailbox: i64, since: i64) -> Result<()> {
+        self.db().execute("UPDATE mailboxes SET filled_since = ?2 WHERE id = ?1", params![mailbox, since])?;
+        Ok(())
+    }
+
+    /// What the account's mail before `mail` (Unix seconds), and its
+    /// attachments before `attachments`, weigh here: what keeping less would
+    /// remove. A message in several of its folders counts once.
+    pub fn trim_plan(&self, account: &str, mail: Option<i64>, attachments: Option<i64>) -> Trim {
+        let c = self.db();
+        let mail = mail.unwrap_or(i64::MIN);
+        let rows = "SELECT m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account = ?1";
+        let (messages, message_bytes): (i64, i64) = c
+            .query_row(
+                &format!(
+                    "SELECT (SELECT COUNT(DISTINCT x.blob) FROM ({rows} AND m.date < ?2) x),
+                     (SELECT COALESCE(SUM(length(data)), 0) FROM blobs WHERE hash IN ({rows} AND m.date < ?2)
+                      AND hash NOT IN (SELECT m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox
+                                       WHERE m.link IS NULL AND NOT (b.account IS NOT NULL AND b.account = ?1 AND m.date < ?2)))"
+                ),
+                params![account, mail],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+        let (with_attachments, count, bytes): (i64, i64, i64) = match attachments {
+            Some(before) if before > mail => c
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*), COALESCE(SUM(atts), 0), COALESCE(SUM(att_bytes), 0) FROM blobs
+                         WHERE atts > 0 AND hash IN ({rows} AND m.date >= ?2 AND m.date < ?3)"
+                    ),
+                    params![account, mail, before],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap_or((0, 0, 0)),
+            _ => (0, 0, 0),
+        };
+        Trim {
+            messages: messages as u64,
+            message_bytes: message_bytes as u64,
+            with_attachments: with_attachments as u64,
+            attachments: count as u64,
+            attachment_bytes: bytes as u64,
+        }
+    }
+
+    /// Forgets the account's mail from before `before` (it stays at the
+    /// provider); returns how many rows went.
+    pub fn drop_mail_before(&self, account: &str, before: i64) -> Result<usize> {
+        let n = {
+            let c = self.db();
+            let rows = "SELECT m.id FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account = ?1 AND m.date < ?2";
+            c.execute(&format!("DELETE FROM messages WHERE link IN ({rows})"), params![account, before])?;
+            let n = c.execute(&format!("DELETE FROM messages WHERE id IN ({rows})"), params![account, before])?;
+            // The folders have their mail since then only: an earlier date fetches the rest again.
+            c.execute("UPDATE mailboxes SET filled_since = MAX(filled_since, ?2) WHERE account = ?1 AND filled_since IS NOT NULL", params![account, before])?;
+            n
+        };
+        if n > 0 {
+            self.notify();
+            self.gc_blobs();
+        }
+        Ok(n)
+    }
+
+    /// Keeps the account's mail from before `before` without its
+    /// attachments; returns how many messages lost theirs.
+    pub fn strip_before(&self, account: &str, before: i64) -> Result<usize> {
+        let mut n = 0;
+        loop {
+            let rows: Vec<(i64, String)> = {
+                let c = self.db();
+                let mut st = c.prepare(
+                    "SELECT m.id, m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox JOIN blobs x ON x.hash = m.blob
+                     WHERE b.account = ?1 AND m.link IS NULL AND m.date < ?2 AND (x.atts > 0 OR x.atts IS NULL) LIMIT 50",
+                )?;
+                st.query_map(params![account, before], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(Result::ok).collect()
+            };
+            if rows.is_empty() {
+                break;
+            }
+            for (id, blob) in rows {
+                let slim = self.blob(&blob).and_then(|raw| crate::mime::strip(&raw));
+                match slim {
+                    Some(slim) => {
+                        self.set_content(id, &slim)?;
+                        n += 1;
+                    }
+                    // Nothing to remove (or not counted yet, and none): not asked again.
+                    None => {
+                        self.db().execute("UPDATE blobs SET atts = 0, att_bytes = 0, removed = COALESCE(removed, 0) WHERE hash = ?1", [&blob])?;
+                    }
+                }
+            }
+        }
+        if n > 0 {
+            self.notify();
+            self.gc_blobs();
+        }
+        Ok(n)
+    }
+
+    /// The folder's messages kept without their attachments, since `since`:
+    /// (row, remote UID), to fetch whole again.
+    pub fn stripped_rows(&self, mailbox: i64, since: i64) -> Vec<(i64, u32)> {
+        let c = self.db();
+        let mut st = c
+            .prepare(
+                "SELECT m.id, m.remote_uid FROM messages m JOIN blobs x ON x.hash = m.blob
+                 WHERE m.mailbox = ?1 AND m.remote_uid IS NOT NULL AND m.date >= ?2 AND x.removed > 0",
+            )
+            .unwrap();
+        st.query_map(params![mailbox, since], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().filter_map(Result::ok).collect()
+    }
+
+    /// The message (and its rows in the tree) is now `raw`: the same mail,
+    /// with or without its attachments.
+    pub fn set_content(&self, id: i64, raw: &[u8]) -> Result<()> {
+        let c = self.db();
+        let blob = Self::put_blob(&c, raw)?;
+        c.execute("UPDATE messages SET blob = ?2, size = ?3 WHERE id = ?1 OR link = ?1", params![id, blob, raw.len() as i64])?;
+        Ok(())
+    }
+
+    /// What the account's mail takes here, compressed (a message in
+    /// several of its folders counts once).
+    pub fn account_bytes(&self, account: &str) -> u64 {
+        let c = self.db();
+        c.query_row(
+            "SELECT COALESCE(SUM(length(data)), 0) FROM blobs WHERE hash IN
+             (SELECT m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account = ?1)",
+            [account],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as u64
     }
 
     /// Rows mirroring the provider, by remote UID.
@@ -976,6 +1271,21 @@ impl MailStore {
         Ok(n == 1)
     }
 
+    /// Whether a later version of the event (or, for an invitation, its
+    /// cancellation) is already recorded.
+    pub fn invite_superseded(&self, account: &str, uid: &str, method: &str, sequence: i64) -> bool {
+        let c = self.db();
+        c.query_row(
+            "SELECT 1 FROM invites WHERE account = ?1 AND uid = ?2 AND (sequence > ?3 OR (?4 = 'REQUEST' AND method = 'CANCEL' AND sequence = ?3))",
+            params![account, uid, sequence, method],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
     pub fn invites(&self) -> Vec<Invite> {
         let c = self.db();
         let mut st = c
@@ -1187,5 +1497,92 @@ mod tests {
         let kept = s.messages(gmail)[0].id;
         let empty = s.create_node(None, "Empty").unwrap();
         assert!(s.copy(&[kept], empty, false).is_err(), "no folder of that account in it");
+    }
+
+    #[test]
+    fn mail_kept_compressed_and_trimmed() {
+        let s = MailStore::memory();
+        let inbox = s.remote_mailbox("work", "INBOX", "Work/Inbox", "").unwrap();
+        let label = s.remote_mailbox("work", "Label", "Work/Label", "").unwrap();
+        let home = s.remote_mailbox("home", "INBOX", "Home/Inbox", "").unwrap();
+        let pdf = "A".repeat(40_000);
+        let with_file = |id: &str| {
+            format!(
+                "From: a@x.fr\r\nSubject: {id}\r\nMessage-ID: <{id}@x>\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\n{}\r\n--b\r\nContent-Type: application/pdf; name=f.pdf\r\nContent-Disposition: attachment; filename=f.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n--b--\r\n",
+                "words ".repeat(500)
+            )
+            .into_bytes()
+        };
+        // Old (2001), in two folders; middle (2011); new (2021); another account's old one.
+        let (old, _) = s.add_fetched(inbox, &with_file("old"), &[], 1_000_000_000, 1).unwrap();
+        s.add_fetched(label, &with_file("old"), &[], 1_000_000_000, 1).unwrap();
+        let (mid, _) = s.add_fetched(inbox, &with_file("mid"), &[], 1_300_000_000, 2).unwrap();
+        let (new, _) = s.add_fetched(inbox, &with_file("new"), &[], 1_600_000_000, 3).unwrap();
+        s.add_fetched(home, &with_file("old"), &[], 1_000_000_000, 1).unwrap();
+        let stored = |h: &str| s.db().query_row("SELECT length(data) FROM blobs WHERE hash = ?1", [h], |r| r.get::<_, i64>(0)).unwrap();
+        let m = s.message(mid).unwrap();
+        assert_eq!(s.blob(&m.blob).unwrap(), with_file("mid"), "read back as it came");
+        assert!((stored(&m.blob) as u64) < m.size as u64 / 10, "kept compressed: {} of {}", stored(&m.blob), m.size);
+
+        let plan = s.trim_plan("work", Some(1_100_000_000), Some(1_400_000_000));
+        assert_eq!((plan.messages, plan.with_attachments, plan.attachments), (1, 1, 1), "{plan:?}: the old one once, the middle one's file");
+        assert_eq!(plan.attachment_bytes, 30_000);
+        assert_eq!(plan.message_bytes, 0, "the old one is the home account's too: nothing freed");
+        assert!(s.trim_plan("work", None, None).is_empty());
+
+        s.set_filled_since(inbox, 0).unwrap();
+        assert_eq!(s.drop_mail_before("work", 1_100_000_000).unwrap(), 2);
+        assert_eq!((s.filled_since(inbox), s.filled_since(label)), (Some(1_100_000_000), None), "the inbox has its mail since then only");
+        assert!(s.message(old).is_none() && s.messages(label).is_empty() && s.messages(home).len() == 1, "only work's old mail went");
+        assert_eq!(s.strip_before("work", 1_400_000_000).unwrap(), 1);
+        let slim = s.message(mid).unwrap();
+        let text = String::from_utf8(s.blob(&slim.blob).unwrap()).unwrap();
+        assert!(text.contains("X-Valet-Removed: 30000") && !text.contains("AAAA") && text.contains("words"), "the file went, the text stayed");
+        assert_eq!(slim.size as usize, text.len());
+        assert_eq!(s.blob(&s.message(new).unwrap().blob).unwrap(), with_file("new"), "the new one kept whole");
+        assert!(s.db().query_row("SELECT 1 FROM blobs WHERE hash = ?1", [&m.blob], |_| Ok(())).optional().unwrap().is_none(), "the whole copy is gone");
+        assert!(s.trim_plan("work", Some(1_100_000_000), Some(1_400_000_000)).is_empty(), "nothing left to remove");
+
+        // Asked back: fetched whole again.
+        assert_eq!(s.stripped_rows(inbox, 1_200_000_000), [(mid, 2)]);
+        assert!(s.stripped_rows(inbox, 1_350_000_000).is_empty());
+        s.set_content(mid, &with_file("mid")).unwrap();
+        assert!(s.stripped_rows(inbox, 0).is_empty());
+        assert_eq!(s.blob(&s.message(mid).unwrap().blob).unwrap(), with_file("mid"));
+        assert_eq!(s.gc_blobs(), 1, "the slim copy, no longer used");
+    }
+
+    #[test]
+    fn mail_kept_before_compression_is_compressed_once() {
+        let s = MailStore::memory();
+        let inbox = s.remote_mailbox("work", "INBOX", "Work/Inbox", "").unwrap();
+        let body = format!("Subject: old\r\nMessage-ID: <o@x>\r\n\r\n{}", "hello ".repeat(5000)).into_bytes();
+        let (id, _) = s.add_fetched(inbox, &body, &[], 0, 1).unwrap();
+        let hash = s.message(id).unwrap().blob;
+        // As an older valet left it: as received, without its facts; and one no message uses.
+        s.db().execute("UPDATE blobs SET data = ?2, atts = NULL WHERE hash = ?1", params![hash, body]).unwrap();
+        s.db().execute("INSERT INTO blobs (hash, data) VALUES ('orphan', x'00')", []).unwrap();
+        assert_eq!(s.blob(&hash).unwrap(), body, "read as it is");
+        s.compact();
+        let (len, atts): (i64, Option<i64>) = s.db().query_row("SELECT length(data), atts FROM blobs WHERE hash = ?1", [&hash], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert!((len as usize) < body.len() / 10 && atts == Some(0), "compressed, facts noted");
+        assert_eq!(s.blob(&hash).unwrap(), body);
+        assert_eq!(s.db().query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get::<_, i64>(0)).unwrap(), 1, "the unused one went");
+        s.db().execute("UPDATE blobs SET data = ?2 WHERE hash = ?1", params![hash, body]).unwrap();
+        s.compact();
+        assert_eq!(s.db().query_row("SELECT length(data) FROM blobs", [], |r| r.get::<_, i64>(0)).unwrap() as usize, body.len(), "only once");
+    }
+
+    #[test]
+    fn invitations_out_of_order() {
+        let s = MailStore::memory();
+        s.add_invite("w", "u", "REQUEST", 2, "", "", "", "", "").unwrap();
+        assert!(s.invite_superseded("w", "u", "REQUEST", 1), "an older version");
+        assert!(!s.invite_superseded("w", "u", "REQUEST", 2) && !s.invite_superseded("w", "u", "REQUEST", 3));
+        assert!(!s.invite_superseded("x", "u", "REQUEST", 1), "another account's");
+        s.add_invite("w", "u", "CANCEL", 3, "", "", "", "", "").unwrap();
+        assert!(s.invite_superseded("w", "u", "REQUEST", 3), "cancelled");
+        assert!(!s.invite_superseded("w", "u", "REQUEST", 4), "invited again");
+        assert!(s.invite_superseded("w", "u", "CANCEL", 1));
     }
 }

@@ -56,6 +56,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/mail/accounts/new", get(new_account_page).post(create_account))
         .route("/mail/accounts/{id}", get(edit_account_page).post(update_account))
         .route("/mail/accounts/{id}/retire", post(retire_account))
+        .route("/mail/accounts/{id}/keep", post(keep_account))
         .route("/mail/accounts/{id}/delete", post(delete_account))
         .route("/mail/oauth/{account}/start", post(oauth_start))
         .route("/mail/oauth", get(oauth_callback))
@@ -1019,6 +1020,19 @@ async fn connect_page(State(app): St, headers: HeaderMap) -> Response {
 // Mail
 
 /// An account's sync status and counts, in an element the Mail page refreshes.
+/// What an account's mail takes here, worked out at most every minute (the
+/// Mail page asks every few seconds).
+fn stored(app: &App, account: &str) -> u64 {
+    static KNOWN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (i64, u64)>>> = std::sync::LazyLock::new(Default::default);
+    let t = crate::mailstore::now();
+    if let Some((_, n)) = KNOWN.lock().unwrap().get(account).copied().filter(|(at, _)| t - at < 60) {
+        return n;
+    }
+    let n = app.mail.account_bytes(account);
+    KNOWN.lock().unwrap().insert(account.to_string(), (t, n));
+    n
+}
+
 fn account_status(app: &App, a: &crate::accounts::Account, boxes: &[crate::mailstore::Mailbox]) -> Markup {
     html! { div id={"status-" (a.id)} { (account_status_inner(app, a, boxes)) } }
 }
@@ -1029,7 +1043,7 @@ fn account_status_inner(app: &App, a: &crate::accounts::Account, boxes: &[crate:
     let count: u32 = folders.iter().map(|b| app.mail.count(b.id).0).sum();
     if let Some(t) = a.retired {
         return html! {
-            p.muted { "Not synced since " (at(t)) ": " (folders.len()) " folders, " (count) " messages kept here." }
+            p.muted { "Not synced since " (at(t)) ": " (folders.len()) " folders, " (count) " messages kept here (" (megabytes(stored(app, &a.id))) ")." }
             p.small.muted { "Its mail reads as before, here and in your mail apps. valet no longer logs in to it or sends from it: "
                 "what you change in its mail (read, flagged, moved, deleted) stays in valet." }
         };
@@ -1040,7 +1054,9 @@ fn account_status_inner(app: &App, a: &crate::accounts::Account, boxes: &[crate:
             Some((false, msg, t)) => p.err { "● " (msg) span.muted.small { " · " (at(t)) } },
             None => p.muted { "Connecting…" },
         }
-        p.small.muted { (folders.len()) " folders, " (count) " messages kept here"
+        p.small.muted { (folders.len()) " folders, " (count) " messages kept here (" (megabytes(stored(app, &a.id))) ")"
+            @if let Some(d) = &a.mail_since { ", since " (d) }
+            @if let Some(d) = &a.attachments_since { ", attachments since " (d) }
             @if ops > 0 { " · " (ops) " changes waiting to reach the provider" } }
         @if let Some(e) = op_error { p.small.err { "Last refused change: " (e) } }
     }
@@ -1262,13 +1278,21 @@ const INVITES_SCRIPT: &str = r#"
       }
     } catch (_) { location = url; }
   };
+  // Typed (the search, the organizer): after a pause, or at once on Enter
+  // (the form has several fields and no button: Enter wouldn't send it).
   let typing = null;
   const panel = menu.querySelector('.panel');
   panel.addEventListener('change', apply);
-  panel.addEventListener('input', (e) => {
-    if (e.target.type !== 'text') return;
+  form.addEventListener('input', (e) => {
+    if (e.target.type !== 'text' && e.target.type !== 'search') return;
     clearTimeout(typing);
-    typing = setTimeout(apply, 400);
+    typing = setTimeout(apply, 300);
+  });
+  form.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || (e.target.type !== 'text' && e.target.type !== 'search')) return;
+    e.preventDefault();
+    clearTimeout(typing);
+    apply();
   });
   document.addEventListener('click', (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; });
   menu.addEventListener('keydown', (e) => {
@@ -1372,7 +1396,7 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(mut q): Quer
         (flash(&Msg { ok: q.ok.clone(), err: q.err.clone(), relogin: None }))
         form.toolbar method="get" action="/invitations" {
             input type="search" name="q" value=(q.q) placeholder="Search invitations";
-            a.button href=(q.link(&["q"], &[])) hidden[q.q.is_empty()] title="Clear the search (the filters stay)" { "Clear" }
+            a.button href=(q.link(&["q"], &[])) hidden[q.q.is_empty()] title="Clear the search (the filters stay)" data-swap="clear-search" { "Clear" }
             details.filter {
                 summary.on[!chips.is_empty()] title="Filter the invitations listed" data-swap="filter-summary" {
                     (PreEscaped(webmail::FUNNEL)) "Filter"
@@ -1543,7 +1567,8 @@ fn blank_account(p: Option<&Preset>) -> Account {
             redirect_uri: Some("https://localhost".into()),
             scopes: "offline_access https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send".into(),
         }),
-        history_days: 90,
+        mail_since: None,
+        attachments_since: None,
         skip: Vec::new(),
         tls: true,
         retired: None,
@@ -1587,13 +1612,19 @@ fn account_view(draft: &Account, existing: bool, preset_key: &str, err: Option<&
                     label { "IMAP server (host:port, SSL/TLS)" input name="imap" required value=(draft.imap) placeholder="imap.example.com:993"; }
                     label { "SMTP server (host:port; 465 is SSL/TLS, others STARTTLS)" input name="smtp" required value=(draft.smtp) placeholder="smtp.example.com:465"; }
                     label { "Login, if it isn't the address" input name="user" value=(draft.user.clone().unwrap_or_default()); }
-                    label { "Days of mail to fetch on the first sync" input name="history_days" type="number" min="1" value=(draft.history_days); }
                     label { "Provider folders to leave out (comma-separated)" input name="skip" value=(join(&draft.skip)); }
                 }
             }
+            @if !existing { (keep_fields(draft)) }
             div { button type="submit" { @if existing { "Save" } @else { "Add" } } }
             p.small.muted { @if draft.oauth.is_some() { "Microsoft accounts log in with Microsoft, from the Mail page, once saved." }
                 @else { "valet logs in to both servers before saving, so a wrong password shows up here." } }
+        }
+        @if existing {
+            form.card method="post" action={"/mail/accounts/" (draft.id) "/keep"} style="display:flex; flex-direction:column; gap:10px; max-width:520px" {
+                (keep_fields(draft))
+                div { button type="submit" { "Save" } }
+            }
         }
         @if existing {
             form method="post" action={"/mail/accounts/" (draft.id) "/delete"}
@@ -1602,6 +1633,116 @@ fn account_view(draft: &Account, existing: bool, preset_key: &str, err: Option<&
             }
         }
     })
+}
+
+/// Since when the account's mail is kept here, and with attachments since when.
+fn keep_fields(a: &Account) -> Markup {
+    html! {
+        fieldset style="border:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px" {
+            legend style="padding:0; margin-bottom:6px" { b { "What valet keeps" } }
+            label { "Mail since (empty: all of it)" input name="mail_since" type="date" value=(a.mail_since.clone().unwrap_or_default()); }
+            label { "Attachments since (empty: all of them)" input name="attachments_since" type="date" value=(a.attachments_since.clone().unwrap_or_default()); }
+            p.small.muted style="margin:0" {
+                "Older mail stays at the provider. Mail from before the second date is kept without its attachments (files and pictures), "
+                "their names still shown. An earlier date fetches what's missing again; a later one removes it from valet, after asking."
+            }
+        }
+    }
+}
+
+/// A date typed in (`2020-01-31`), or None when left empty; Err when not a date.
+fn day_field(v: &str) -> Result<Option<String>, String> {
+    let v = v.trim();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    crate::accounts::day_start(v).map(|_| Some(v.to_string())).ok_or_else(|| format!("{v} isn't a date."))
+}
+
+#[derive(Deserialize)]
+struct KeepForm {
+    #[serde(default)]
+    mail_since: String,
+    #[serde(default)]
+    attachments_since: String,
+    /// Removing what that takes away was confirmed.
+    #[serde(default)]
+    confirm: String,
+}
+
+fn plural(n: u64, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+fn megabytes(n: u64) -> String {
+    match n {
+        n if n < 1_000_000 => format!("{} KB", n.div_ceil(1000)),
+        n if n < 1_000_000_000 => format!("{} MB", n / 1_000_000),
+        n => format!("{:.1} GB", n as f64 / 1e9),
+    }
+}
+
+/// Saves since when the account's mail (and its attachments) is kept. What
+/// that removes is said first, to confirm; it goes in the background.
+async fn keep_account(State(app): St, headers: HeaderMap, Path(id): Path<String>, Form(f): Form<KeepForm>) -> Response {
+    guard!(app, headers);
+    let Some(mut acc) = app.account(&id) else { return StatusCode::NOT_FOUND.into_response() };
+    let edit = format!("/mail/accounts/{id}");
+    let (mail_since, attachments_since) = match (day_field(&f.mail_since), day_field(&f.attachments_since)) {
+        (Ok(m), Ok(a)) => (m, a),
+        (Err(e), _) | (_, Err(e)) => return back("/mail", None, Some(&e)),
+    };
+    let was = (acc.mail_from(), acc.attachments_from());
+    acc.mail_since = mail_since;
+    acc.attachments_since = attachments_since;
+    let (mail, atts) = (acc.mail_from(), acc.attachments_from());
+    let plan = app.mail.trim_plan(&id, mail, atts);
+    if !plan.is_empty() && f.confirm != "1" {
+        let day = |d: &Option<String>| d.clone().unwrap_or_default();
+        return page(&acc.name, "/mail", html! {
+            p.small { a href=(edit) { "← " (acc.name) } }
+            h1 { "Remove from valet?" }
+            div.card style="max-width:560px" {
+                @if plan.messages > 0 {
+                    p { b { (plural(plan.messages, "message")) } " from before " (day(&acc.mail_since)) " will be removed from valet, and your mail apps through it, "
+                        "freeing about " b { (megabytes(plan.message_bytes)) } "." }
+                }
+                @if plan.with_attachments > 0 {
+                    p { b { (plural(plan.attachments, "attachment")) } " of " (plural(plan.with_attachments, "message")) " from before " (day(&acc.attachments_since))
+                        " will be removed (the messages stay, with the attachments' names), freeing about " b { (megabytes(plan.attachment_bytes)) } "." }
+                }
+                p.small.muted { "It all stays at the provider: an earlier date later fetches it again." }
+                form method="post" action={"/mail/accounts/" (id) "/keep"} style="display:flex; gap:8px; align-items:center" {
+                    input type="hidden" name="mail_since" value=(day(&acc.mail_since));
+                    input type="hidden" name="attachments_since" value=(day(&acc.attachments_since));
+                    input type="hidden" name="confirm" value="1";
+                    button.danger type="submit" { "Remove and save" }
+                    a href=(edit) { "Cancel" }
+                }
+            }
+        });
+    }
+    if let Err(e) = app.save_account(acc.clone()) {
+        return back("/mail", None, Some(&format!("{e:#}")));
+    }
+    // What's no longer kept goes in the background (attachments take a while).
+    if !plan.is_empty() {
+        let (app, id) = (app.clone(), id.clone());
+        tokio::task::spawn_blocking(move || {
+            let dropped = mail.map(|t| app.mail.drop_mail_before(&id, t));
+            let stripped = atts.map(|t| app.mail.strip_before(&id, t));
+            tracing::info!(account = %id, ?dropped, ?stripped, "kept less mail");
+        });
+    }
+    let earlier = |now: Option<i64>, before: Option<i64>| now.unwrap_or(0) < before.unwrap_or(0);
+    let mut said = vec![format!("Saved what {} keeps", acc.name)];
+    if !plan.is_empty() {
+        said.push("what it no longer keeps is being removed".into());
+    }
+    if acc.retired.is_none() && (earlier(mail, was.0) || earlier(atts, was.1)) {
+        said.push("what's missing is being fetched (see its status below)".into());
+    }
+    back("/mail", Some(&format!("{}.", said.join(": "))), None)
 }
 
 #[derive(Deserialize)]
@@ -1638,8 +1779,11 @@ struct AccountForm {
     smtp: String,
     #[serde(default)]
     user: String,
+    /// Only on the form adding an account (`keep_account` changes them later).
     #[serde(default)]
-    history_days: String,
+    mail_since: Option<String>,
+    #[serde(default)]
+    attachments_since: Option<String>,
     #[serde(default)]
     skip: String,
 }
@@ -1661,7 +1805,12 @@ fn apply_form(base: &Account, f: &AccountForm) -> Account {
     a.imap = f.imap.trim().to_string();
     a.smtp = f.smtp.trim().to_string();
     a.user = Some(f.user.trim().to_string()).filter(|u| !u.is_empty());
-    a.history_days = f.history_days.trim().parse().unwrap_or(a.history_days).max(1);
+    if let Some(d) = &f.mail_since {
+        a.mail_since = day_field(d).unwrap_or(None);
+    }
+    if let Some(d) = &f.attachments_since {
+        a.attachments_since = day_field(d).unwrap_or(None);
+    }
     a.skip = list(&f.skip);
     a
 }
@@ -1790,7 +1939,8 @@ mod tests {
             imap: "imap.gmail.com:993".into(),
             smtp: "smtp.gmail.com:465".into(),
             user: String::new(),
-            history_days: String::new(),
+            mail_since: None,
+            attachments_since: None,
             skip: String::new(),
         };
         let base = blank_account(preset("gmail"));

@@ -444,6 +444,87 @@ pub fn section(raw: &[u8], root: &Part, section: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The field a removed attachment keeps in its header, with its size.
+pub const REMOVED: &str = "X-Valet-Removed";
+
+/// What a message's attachments weigh: how many there are, their size once
+/// decoded (what they cost stored compressed), and how many were removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Attachments {
+    pub count: u32,
+    pub bytes: u64,
+    pub removed: u32,
+}
+
+/// The parts a message's attachments are: the files and pictures, not its
+/// text, nor an invitation's calendar, nor what was removed already. In a
+/// message attached, its own attachments, not its text.
+fn attachment_parts<'a>(raw: &[u8], p: &'a Part, out: &mut Vec<&'a Part>, removed: &mut u32) {
+    if p.is_multipart() {
+        for c in &p.children {
+            attachment_parts(raw, c, out, removed);
+        }
+        return;
+    }
+    if let Some(m) = &p.message {
+        attachment_parts(raw, m, out, removed);
+        return;
+    }
+    if p.header(raw, REMOVED).is_some() {
+        *removed += 1;
+        return;
+    }
+    let attached = p.header(raw, "Content-Disposition").is_some_and(|d| parse_params(&d).0.eq_ignore_ascii_case("attachment"));
+    let text = p.mtype == "text" && matches!(p.subtype.as_str(), "plain" | "html" | "enriched") && !attached;
+    let calendar = (p.mtype == "text" && p.subtype == "calendar") || (p.mtype == "application" && p.subtype == "ics");
+    if text || calendar || p.mtype == "message" || p.body_start >= p.end {
+        return;
+    }
+    out.push(p);
+}
+
+/// About the size of a part's content once decoded.
+fn decoded_size(raw: &[u8], p: &Part) -> u64 {
+    let n = (p.end - p.body_start.min(p.end)) as u64;
+    let base64 = p.header(raw, "Content-Transfer-Encoding").is_some_and(|e| e.trim().eq_ignore_ascii_case("base64"));
+    if base64 { n * 3 / 4 } else { n }
+}
+
+pub fn attachments(raw: &[u8]) -> Attachments {
+    let root = parse(raw);
+    let (mut parts, mut removed) = (Vec::new(), 0);
+    attachment_parts(raw, &root, &mut parts, &mut removed);
+    Attachments { count: parts.len() as u32, bytes: parts.iter().map(|p| decoded_size(raw, p)).sum(), removed }
+}
+
+/// The message without its attachments' content (None if it has none):
+/// each keeps its header (name, type), with `X-Valet-Removed: <size>`, and
+/// an empty body. The structure stays as it was.
+pub fn strip(raw: &[u8]) -> Option<Vec<u8>> {
+    let root = parse(raw);
+    let (mut parts, mut removed) = (Vec::new(), 0);
+    attachment_parts(raw, &root, &mut parts, &mut removed);
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort_by_key(|p| p.start);
+    let mut out = Vec::with_capacity(raw.len() / 4);
+    let mut at = 0;
+    for p in parts {
+        // At the end of its header, before the empty line.
+        let header_end = p.fields.last().map_or(p.start, |f| f.2);
+        out.extend_from_slice(&raw[at..header_end]);
+        if !out.is_empty() && !out.ends_with(b"\n") {
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(format!("{REMOVED}: {}\r\n", decoded_size(raw, p)).as_bytes());
+        out.extend_from_slice(&raw[header_end..p.body_start.min(p.end)]);
+        at = p.end;
+    }
+    out.extend_from_slice(&raw[at..]);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +573,29 @@ mod tests {
         assert_eq!(addresses("Team: x@y.z;").len(), 1);
         assert_eq!(istr("é"), "{2}\r\né");
         assert_eq!(istr("a\"b"), "\"a\\\"b\"");
+    }
+
+    #[test]
+    fn attachments_removed() {
+        let raw = MSG.as_bytes();
+        assert_eq!(attachments(raw), Attachments { count: 1, bytes: 3, removed: 0 });
+        let slim = strip(raw).unwrap();
+        let text = String::from_utf8(slim.clone()).unwrap();
+        assert!(text.contains("Content-Transfer-Encoding: base64\r\nX-Valet-Removed: 3\r\n\r\n\r\n--XX--"), "{text}");
+        assert!(text.contains("Hello\r\nworld") && text.contains("inner body"), "the text stays");
+        assert_eq!(attachments(&slim), Attachments { count: 0, bytes: 0, removed: 1 });
+        assert_eq!(strip(&slim), None, "nothing more to remove");
+        let p = parse(&slim);
+        assert_eq!(p.children.len(), 3, "same structure");
+        assert_eq!(section(&slim, &p, "3").unwrap(), b"");
+        // An invitation's calendar stays; a file alone, the whole message, goes.
+        let invite = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\n--b\r\nContent-Type: image/png\r\nContent-Disposition: inline\r\n\r\niVBO\r\n--b--\r\n";
+        assert_eq!(attachments(invite).count, 1);
+        assert!(String::from_utf8(strip(invite).unwrap()).unwrap().contains("BEGIN:VCALENDAR"));
+        let lone = b"Subject: scan\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4 ...";
+        assert_eq!(strip(lone).unwrap(), b"Subject: scan\r\nContent-Type: application/pdf\r\nX-Valet-Removed: 12\r\n\r\n");
+        let attached_text = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b\r\nContent-Type: text/plain; name=notes.txt\r\nContent-Disposition: attachment; filename=notes.txt\r\n\r\nnotes\r\n--b--\r\n";
+        assert_eq!(attachments(attached_text).count, 1, "a text file attached is an attachment");
+        assert_eq!(attachments(b"Subject: x\r\n\r\njust text"), Attachments::default());
     }
 }
