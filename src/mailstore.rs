@@ -179,6 +179,11 @@ pub enum Pass {
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, data BLOB NOT NULL, atts INTEGER, att_bytes INTEGER, removed INTEGER, text_bytes INTEGER, len INTEGER);
+-- What each kept message weighs, apart from it (reading a column after a
+-- message's data means reading all of it).
+CREATE TABLE IF NOT EXISTS facts (
+    hash TEXT PRIMARY KEY, len INTEGER NOT NULL, atts INTEGER NOT NULL, att_bytes INTEGER NOT NULL,
+    removed INTEGER NOT NULL, text_bytes INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS mailboxes (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, account TEXT, remote TEXT,
     special TEXT NOT NULL DEFAULT '', uidvalidity INTEGER NOT NULL, uidnext INTEGER NOT NULL DEFAULT 1,
@@ -278,6 +283,15 @@ impl Packed {
         let data = pack(raw);
         Packed { hash: hex::encode(Sha256::digest(raw)), atts: crate::mime::attachments(raw), text_bytes: text_bytes(raw, data.len()), data }
     }
+}
+
+/// Notes what a kept message weighs (`len`: kept, compressed).
+fn put_facts(c: &Connection, hash: &str, len: usize, a: crate::mime::Attachments, text_bytes: u64) -> rusqlite::Result<usize> {
+    c.execute(
+        "INSERT INTO facts (hash, len, atts, att_bytes, removed, text_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (hash) DO UPDATE SET len = ?2, atts = ?3, att_bytes = ?4, removed = ?5, text_bytes = ?6",
+        params![hash, len as i64, a.count, a.bytes as i64, a.removed, text_bytes as i64],
+    )
 }
 
 /// What the message takes kept without its attachments (`stored`: kept with them).
@@ -470,6 +484,7 @@ impl MailStore {
              AND NOT EXISTS (SELECT 1 FROM ops WHERE instr(ops.op, blobs.hash) > 0)",
             [],
         )?;
+        c.execute("DELETE FROM facts WHERE hash NOT IN (SELECT hash FROM blobs)", [])?;
         Ok(())
     }
 
@@ -609,6 +624,7 @@ impl MailStore {
             "INSERT OR IGNORE INTO blobs (hash, data, atts, att_bytes, removed, text_bytes, len) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![p.hash, p.data, p.atts.count, p.atts.bytes as i64, p.atts.removed, p.text_bytes as i64, p.data.len() as i64],
         )?;
+        put_facts(c, &p.hash, p.data.len(), p.atts, p.text_bytes)?;
         Ok(p.hash.clone())
     }
 
@@ -674,40 +690,43 @@ impl MailStore {
         let _ = c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('compacted', 1)", []);
     }
 
-    /// Once for the messages kept before it was noted: what each takes
-    /// without its attachments, a few at a time.
+    /// Once for the messages kept before they were: what each weighs (see
+    /// `facts`), a few at a time, worked out without holding the store.
     pub fn measure(&self) {
-        // Their size as kept, so what they take is told without reading them.
+        let (mut after, mut n) = (0i64, 0);
         loop {
-            let n = self
-                .db()
-                .execute("UPDATE blobs SET len = length(data) WHERE rowid IN (SELECT rowid FROM blobs WHERE len IS NULL LIMIT 200)", [])
-                .unwrap_or(0);
-            if n == 0 {
-                break;
+            let rows: Vec<(i64, String, Vec<u8>)> = {
+                let c = self.db();
+                let mut st = c
+                    .prepare(
+                        "SELECT b.rowid, b.hash, b.data FROM blobs b WHERE b.rowid > ?1
+                         AND NOT EXISTS (SELECT 1 FROM facts f WHERE f.hash = b.hash) ORDER BY b.rowid LIMIT 50",
+                    )
+                    .unwrap();
+                st.query_map([after], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().filter_map(Result::ok).collect()
+            };
+            let Some(last) = rows.last().map(|r| r.0) else { break };
+            after = last;
+            let measured: Vec<(String, usize, crate::mime::Attachments, u64)> = rows
+                .into_iter()
+                .map(|(_, hash, data)| {
+                    let len = data.len();
+                    let raw = unpack(data);
+                    (hash, len, crate::mime::attachments(&raw), text_bytes(&raw, len))
+                })
+                .collect();
+            {
+                let c = self.db();
+                for (hash, len, a, t) in &measured {
+                    let _ = put_facts(&c, hash, *len, *a, *t);
+                    n += 1;
+                }
             }
             // Pages waiting for the store get it in between.
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let mut after = 0i64;
-        let mut n = 0;
-        loop {
-            let rows: Vec<(i64, Vec<u8>)> = {
-                let c = self.db();
-                let mut st = c.prepare("SELECT rowid, data FROM blobs WHERE rowid > ?1 AND text_bytes IS NULL ORDER BY rowid LIMIT 100").unwrap();
-                st.query_map([after], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().filter_map(Result::ok).collect()
-            };
-            let Some(last) = rows.last().map(|r| r.0) else { break };
-            after = last;
-            let sizes: Vec<(i64, u64)> = rows.into_iter().map(|(id, data)| (id, text_bytes(&unpack(data.clone()), data.len()))).collect();
-            let c = self.db();
-            for (id, t) in sizes {
-                let _ = c.execute("UPDATE blobs SET text_bytes = ?2 WHERE rowid = ?1", params![id, t as i64]);
-                n += 1;
-            }
-        }
         if n > 0 {
-            tracing::info!("measured {n} messages without their attachments");
+            tracing::info!("measured {n} messages");
         }
     }
 
@@ -722,6 +741,7 @@ impl MailStore {
                 [],
             )
             .unwrap_or(0);
+        let _ = c.execute("DELETE FROM facts WHERE hash NOT IN (SELECT hash FROM blobs)", []);
         let _ = c.execute_batch("PRAGMA incremental_vacuum;");
         n
     }
@@ -887,7 +907,7 @@ impl MailStore {
             .query_row(
                 &format!(
                     "SELECT (SELECT COUNT(DISTINCT x.blob) FROM ({rows} AND m.date < ?2) x),
-                     (SELECT COALESCE(SUM(length(data)), 0) FROM blobs WHERE hash IN ({rows} AND m.date < ?2)
+                     (SELECT COALESCE(SUM(len), 0) FROM facts WHERE hash IN ({rows} AND m.date < ?2)
                       AND hash NOT IN (SELECT m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox
                                        WHERE m.link IS NULL AND NOT (b.account IS NOT NULL AND b.account = ?1 AND m.date < ?2)))"
                 ),
@@ -899,7 +919,7 @@ impl MailStore {
             Some(before) if before > mail => c
                 .query_row(
                     &format!(
-                        "SELECT COUNT(*), COALESCE(SUM(atts), 0), COALESCE(SUM(att_bytes), 0) FROM blobs
+                        "SELECT COUNT(*), COALESCE(SUM(atts), 0), COALESCE(SUM(att_bytes), 0) FROM facts
                          WHERE atts > 0 AND hash IN ({rows} AND m.date >= ?2 AND m.date < ?3)"
                     ),
                     params![account, mail, before],
@@ -944,8 +964,8 @@ impl MailStore {
             let rows: Vec<(i64, String)> = {
                 let c = self.db();
                 let mut st = c.prepare(
-                    "SELECT m.id, m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox JOIN blobs x ON x.hash = m.blob
-                     WHERE b.account = ?1 AND m.link IS NULL AND m.date < ?2 AND (x.atts > 0 OR x.atts IS NULL) LIMIT 50",
+                    "SELECT m.id, m.blob FROM messages m JOIN mailboxes b ON b.id = m.mailbox LEFT JOIN facts x ON x.hash = m.blob
+                     WHERE b.account = ?1 AND m.link IS NULL AND m.date < ?2 AND (x.atts > 0 OR x.hash IS NULL) LIMIT 50",
                 )?;
                 st.query_map(params![account, before], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(Result::ok).collect()
             };
@@ -953,15 +973,16 @@ impl MailStore {
                 break;
             }
             for (id, blob) in rows {
-                let slim = self.blob(&blob).and_then(|raw| crate::mime::strip(&raw));
-                match slim {
+                let raw = self.blob(&blob).unwrap_or_default();
+                match crate::mime::strip(&raw) {
                     Some(slim) => {
                         self.set_content(id, &slim)?;
                         n += 1;
                     }
-                    // Nothing to remove (or not counted yet, and none): not asked again.
+                    // Nothing to remove (or not measured yet, and none): noted, not asked again.
                     None => {
-                        self.db().execute("UPDATE blobs SET atts = 0, att_bytes = 0, removed = COALESCE(removed, 0) WHERE hash = ?1", [&blob])?;
+                        let len = pack(&raw).len();
+                        put_facts(&self.db(), &blob, len, crate::mime::attachments(&raw), len as u64)?;
                     }
                 }
             }
@@ -979,7 +1000,7 @@ impl MailStore {
         let c = self.db();
         let mut st = c
             .prepare(
-                "SELECT m.id, m.remote_uid FROM messages m JOIN blobs x ON x.hash = m.blob
+                "SELECT m.id, m.remote_uid FROM messages m JOIN facts x ON x.hash = m.blob
                  WHERE m.mailbox = ?1 AND m.remote_uid IS NOT NULL AND m.date >= ?2 AND x.removed > 0",
             )
             .unwrap();
@@ -1005,10 +1026,8 @@ impl MailStore {
             .prepare(
                 r"WITH r AS (SELECT b.account, m.blob, MIN(CASE WHEN lower(b.special) IN ('\junk', '\trash') THEN 1 ELSE 0 END) AS bin
                              FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE b.account IS NOT NULL GROUP BY b.account, m.blob),
-                  y AS (SELECT r.account, r.bin, COALESCE(b.len, 0) AS len, b.atts, b.removed, b.text_bytes, b.att_bytes
-                        FROM r JOIN blobs b ON b.hash = r.blob),
-                  -- Without its attachments; until measured, from their size.
-                  x AS (SELECT account, bin, len, atts, removed, COALESCE(min(text_bytes, len), len - min(COALESCE(att_bytes, 0), len)) AS text FROM y)
+                  x AS (SELECT r.account, r.bin, f.len, f.atts, f.removed, min(f.text_bytes, f.len) AS text
+                        FROM r JOIN facts f ON f.hash = r.blob)
                   SELECT account, COUNT(*),
                          COALESCE(SUM(CASE WHEN bin = 0 THEN text END), 0),
                          COALESCE(SUM(CASE WHEN bin = 0 THEN len - text END), 0),
