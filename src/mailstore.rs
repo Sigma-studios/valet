@@ -213,6 +213,10 @@ CREATE TABLE IF NOT EXISTS invites (
 CREATE TABLE IF NOT EXISTS arrivals (seq INTEGER PRIMARY KEY AUTOINCREMENT, message INTEGER NOT NULL, at INTEGER NOT NULL);
 ";
 
+/// Arrivals (`a`) whose message is still unread in its account's inbox.
+const STILL_NEW: &str = "arrivals a JOIN messages m ON m.id = a.message JOIN mailboxes b ON b.id = m.mailbox
+    WHERE b.account IS NOT NULL AND b.remote = 'INBOX' COLLATE NOCASE AND ' ' || m.flags || ' ' NOT LIKE '% \\Seen %'";
+
 /// Mailboxes, with a node's special use taken from the tree.
 const MBOX_SELECT: &str = "SELECT m.id, m.name, m.account, m.remote, CASE WHEN m.account IS NULL THEN COALESCE(t.special, '') ELSE m.special END,
     m.uidvalidity, m.uidnext FROM mailboxes m LEFT JOIN tree t ON t.mailbox = m.id";
@@ -1117,11 +1121,12 @@ impl MailStore {
 
     // Arrivals: messages just come in, to tell of (see `crate::notify`).
 
-    /// Notes messages (real rows) as just come in; forgets those of more than three days ago.
+    /// Notes messages (real rows) as just come in; forgets those of more
+    /// than three days ago, but for those still new (see `badge`).
     pub fn add_arrivals(&self, ids: &[i64]) -> Result<()> {
         let c = self.db();
         let t = now();
-        c.execute("DELETE FROM arrivals WHERE at < ?1", [t - 3 * 86400])?;
+        c.execute(&format!("DELETE FROM arrivals WHERE at < ?1 AND message NOT IN (SELECT a.message FROM {STILL_NEW})"), [t - 3 * 86400])?;
         for id in ids {
             c.execute("INSERT INTO arrivals (message, at) VALUES (?1, ?2)", params![id, t])?;
         }
@@ -1132,6 +1137,13 @@ impl MailStore {
     pub fn last_arrival(&self) -> i64 {
         let c = self.db();
         c.query_row("SELECT seq FROM sqlite_sequence WHERE name = 'arrivals'", [], |r| r.get(0)).optional().ok().flatten().unwrap_or(0)
+    }
+
+    /// The app's badge: messages come in as new mail and still new (unread,
+    /// in their inbox), so that old unread mail doesn't count.
+    pub fn badge(&self) -> u32 {
+        let c = self.db();
+        c.query_row(&format!("SELECT COUNT(DISTINCT a.message) FROM {STILL_NEW}"), [], |r| r.get(0)).unwrap_or(0)
     }
 
     /// The messages come in after arrival `seq`, in order.
@@ -1581,6 +1593,28 @@ mod tests {
         assert_eq!(s.invites()[0].message, mid);
         assert!(!s.invites_without_mail());
         assert!(s.first_time("k") && !s.first_time("k"));
+    }
+
+    #[test]
+    fn the_badge_counts_new_mail_still_unread_in_its_inbox() {
+        let s = MailStore::memory();
+        let inbox = s.remote_mailbox("work", "INBOX", "Work/Inbox", "").unwrap();
+        let keep = s.remote_mailbox("work", "Keep", "Work/Keep", "").unwrap();
+        s.add_fetched(inbox, &raw("old"), &[], 0, 1).unwrap();
+        let ids: Vec<i64> = (2..6).map(|uid| s.add_fetched(inbox, &raw(&uid.to_string()), &[], 0, uid).unwrap().0).collect();
+        assert_eq!(s.badge(), 0, "old unread mail doesn't count");
+        s.add_arrivals(&ids).unwrap();
+        s.add_arrivals(&ids[..1]).unwrap();
+        assert_eq!(s.badge(), 4, "each message once");
+        s.store(&[ids[0]], &StoreMode::Add, &["\\Seen".into()]).unwrap();
+        s.copy(&[ids[1]], keep, true).unwrap();
+        s.expunge(&[ids[2]]).unwrap();
+        assert_eq!(s.badge(), 1, "read, filed or deleted: no longer new");
+        // Days later, those still new are kept for the badge.
+        s.db().execute("UPDATE arrivals SET at = 0", []).unwrap();
+        s.add_arrivals(&[]).unwrap();
+        assert_eq!(s.badge(), 1);
+        assert_eq!(s.db().query_row("SELECT COUNT(*) FROM arrivals", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
 
     #[test]

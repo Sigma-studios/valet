@@ -1,6 +1,7 @@
 // valet's service worker: pages and calendar months seen online stay
 // readable offline (as they were then). Nothing is sent or changed offline.
-// Where notifications are on, it shows new mail valet pushes.
+// Where notifications are on, it shows new mail valet pushes, and the app's
+// badge counts it until read.
 const VERSION = '__VERSION__';
 const SHELL = `valet-shell-${VERSION}`;
 const PAGES = 'valet-pages';
@@ -21,6 +22,16 @@ self.addEventListener('activate', (e) => {
 });
 
 const forget = () => Promise.all([caches.delete(PAGES), caches.delete(DATA)]);
+
+// The app's badge (a Mac's Dock): new mail still unread, as valet counts it.
+const badge = (n) => {
+  const nav = self.navigator;
+  if (!nav.setAppBadge) return Promise.resolve();
+  return (n > 0 ? nav.setAppBadge(n) : nav.clearAppBadge()).catch(() => {});
+};
+const recount = () => fetch('/mail/badge.json', { cache: 'no-store' })
+  .then((r) => (r.ok ? r.json().then((j) => badge(j.badge)) : r.status === 401 && badge(0)))
+  .catch(() => {});
 
 const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
@@ -79,7 +90,7 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return;
   if (req.method !== 'GET') {
     // Logging out forgets what this device kept.
-    if (url.pathname === '/logout') e.respondWith(Promise.all([forget(), unsubscribe().catch(() => {})]).then(() => fetch(req)));
+    if (url.pathname === '/logout') e.respondWith(Promise.all([forget(), unsubscribe().catch(() => {}), badge(0)]).then(() => fetch(req)));
     return;
   }
   if (NEVER.some((r) => r.test(url.pathname))) return;
@@ -104,7 +115,10 @@ self.addEventListener('push', (e) => {
   try { n = e.data ? e.data.json() : {}; } catch (_) {}
   const opts = { body: n.body || '', tag: n.tag || 'mail', icon: ICON, timestamp: Date.now(), data: { url: n.url || '/inbox', message: n.message } };
   if (n.message) opts.actions = [{ action: 'read', title: 'Mark as read' }];
-  e.waitUntil(self.registration.showNotification(n.account ? `${n.title || 'valet'} · ${n.account}` : n.title || 'valet', opts));
+  e.waitUntil(Promise.all([
+    self.registration.showNotification(n.account ? `${n.title || 'valet'} · ${n.account}` : n.title || 'valet', opts),
+    typeof n.badge === 'number' ? badge(n.badge) : null,
+  ]));
 });
 
 // Opens the message in valet's window if there is one, else in a new one.
@@ -112,7 +126,7 @@ self.addEventListener('notificationclick', (e) => {
   const n = e.notification, d = n.data || {};
   n.close();
   if (e.action === 'read') {
-    e.waitUntil(fetch(`/msg/${d.message}/seen`, { method: 'POST' }).catch(() => {}));
+    e.waitUntil(fetch(`/msg/${d.message}/seen`, { method: 'POST' }).catch(() => {}).then(recount));
     return;
   }
   e.waitUntil((async () => {

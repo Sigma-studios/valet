@@ -35,6 +35,9 @@ pub struct Note {
     pub url: String,
     /// The message (its real row, to mark read), none for several.
     pub message: Option<i64>,
+    /// The app's badge after it (see `MailStore::badge`), in pushes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub badge: Option<u32>,
 }
 
 /// Tells of messages just come into an inbox (real rows): noted for the
@@ -50,7 +53,8 @@ pub fn arrived(app: &Arc<App>, ids: &[i64]) {
     if pushes.is_empty() {
         return;
     }
-    let notes = notes(app, ids);
+    let badge = app.mail.badge();
+    let notes: Vec<Note> = notes(app, ids).into_iter().map(|n| Note { badge: Some(badge), ..n }).collect();
     let app = app.clone();
     tokio::spawn(async move {
         futures::future::join_all(pushes.iter().map(|p| async {
@@ -79,6 +83,7 @@ pub fn notes(app: &App, ids: &[i64]) -> Vec<Note> {
                 account: a.account,
                 url: a.url,
                 message: Some(a.id),
+                badge: None,
             })
             .collect();
     }
@@ -86,7 +91,7 @@ pub fn notes(app: &App, ids: &[i64]) -> Vec<Note> {
     if all.len() > 5 {
         body.push(format!("…and {} more", all.len() - 5));
     }
-    vec![Note { tag: "mail".into(), title: format!("{} new messages", all.len()), body: body.join("\n"), account: String::new(), url: "/inbox".into(), message: None }]
+    vec![Note { tag: "mail".into(), title: format!("{} new messages", all.len()), body: body.join("\n"), account: String::new(), url: "/inbox".into(), message: None, badge: None }]
 }
 
 struct About {

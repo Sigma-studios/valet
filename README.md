@@ -126,7 +126,11 @@ connection). Logging out forgets them.
 Overview → Notifications (on an iPhone or iPad, from valet added to the Home
 Screen). Each message come into an inbox, unread, shows at once: who it's
 from, the subject and its first words, with *Mark as read*; several at once
-make one notification. They come by Web Push, encrypted for the browser
+make one notification. The app's badge (on a Mac, in the Dock) counts that
+new mail while it is unread in its inbox: read, filed or deleted, from any
+app, it no longer counts, and older unread mail never does. While valet is
+open, on any page, even in the background, it follows within a second or two;
+closed, the next push or opening valet sets it right. They come by Web Push, encrypted for the browser
 through its vendor's push service (valet makes its own VAPID key, kept in
 `valet.db`). The same page lists the devices where they're on; logging out
 on a device stops its notifications.

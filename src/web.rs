@@ -49,6 +49,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/mail", get(mail_page))
         .route("/mail/status", get(mail_status))
         .route("/mail/new.json", get(push::new_mail))
+        .route("/mail/badge.json", get(push::badge))
         .route("/push/subscribe", post(push::subscribe))
         .route("/push/unsubscribe", post(push::unsubscribe))
         .route("/push/test", post(push::test))
