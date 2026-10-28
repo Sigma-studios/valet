@@ -457,6 +457,10 @@ def filters(s, inbox):
 
     check(listed(**{"from": "ZOÉ"}) == {"filt-att"} and listed(**{"from": "acme.test"}) == {"filt-att"}, "From: part of the sender's name or address")
     check(listed(to="bob") == {"filt-att"}, "To: Cc counts")
+    # The search: words by their start, all of them, accents and case aside.
+    check(listed(q="REPO") == {"filt-att"} and listed(q="the rep") == {"filt-att"}, "a word's start; every word")
+    check(listed(q="zoe") == {"filt-att"} and listed(q="zoé@acme") == {"filt-att"}, "a sender's name, accents aside; an address")
+    check(not listed(q="eport") and not listed(q="report zzz"), "not the middle of a word; nothing without every word")
     with_files = listed(attachment="1")
     check("filt-att" in with_files and "filt-old" not in with_files and "Invitation: Planning" not in with_files, f"with attachments (an invitation's .ics isn't one): {with_files}")
     check(listed(invite="1") == {"Invitation: Planning", "Invitation: Retro", "Invitation: Standup"}, "invitations, not the answer to one")
