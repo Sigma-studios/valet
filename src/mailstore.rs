@@ -1146,6 +1146,13 @@ impl MailStore {
         c.query_row(&format!("SELECT COUNT(DISTINCT a.message) FROM {STILL_NEW}"), [], |r| r.get(0)).unwrap_or(0)
     }
 
+    /// The messages (real rows) the badge counts.
+    pub fn still_new(&self) -> std::collections::HashSet<i64> {
+        let c = self.db();
+        let mut st = c.prepare(&format!("SELECT a.message FROM {STILL_NEW}")).unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().filter_map(Result::ok).collect()
+    }
+
     /// The messages come in after arrival `seq`, in order.
     pub fn arrivals_after(&self, seq: i64) -> Vec<i64> {
         let c = self.db();
@@ -1456,6 +1463,18 @@ impl MailStore {
         self.invites().into_iter().find(|i| i.id == id)
     }
 
+    /// Records this version of an invitation as ignored if an earlier one of
+    /// the event was, in any account; says whether it did.
+    pub fn keep_ignored(&self, account: &str, uid: &str, sequence: i64) -> bool {
+        let n = self.db().execute(
+            "UPDATE invites SET response = 'IGNORED'
+             WHERE account = ?1 AND uid = ?2 AND method = 'REQUEST' AND sequence = ?3 AND response IS NULL
+               AND EXISTS (SELECT 1 FROM invites WHERE uid = ?2 AND response = 'IGNORED')",
+            params![account, uid, sequence],
+        );
+        n.is_ok_and(|n| n == 1)
+    }
+
     pub fn set_invite_response(&self, id: i64, response: &str) -> Result<()> {
         self.db().execute("UPDATE invites SET response = ?2 WHERE id = ?1", params![id, response])?;
         Ok(())
@@ -1593,6 +1612,20 @@ mod tests {
         assert_eq!(s.invites()[0].message, mid);
         assert!(!s.invites_without_mail());
         assert!(s.first_time("k") && !s.first_time("k"));
+
+        // Ignored, then a new version, or the same in another account: ignored too.
+        let response = |account: &str, sequence: i64| {
+            s.db().query_row("SELECT response FROM invites WHERE account = ?1 AND uid = 'u' AND sequence = ?2", params![account, sequence], |r| r.get::<_, Option<String>>(0)).unwrap()
+        };
+        assert!(!s.keep_ignored("work", "u", 0), "nothing ignored yet");
+        let first = s.invites()[0].id;
+        s.set_invite_response(first, "IGNORED").unwrap();
+        s.add_invite("work", "u", "REQUEST", 1, "Sync", "o@x.fr", "20991023T100000Z", "", "").unwrap();
+        s.add_invite("home", "u", "REQUEST", 0, "Sync", "o@x.fr", "20991023T100000Z", "", "").unwrap();
+        assert!(s.keep_ignored("work", "u", 1) && s.keep_ignored("home", "u", 0));
+        assert_eq!((response("work", 1), response("home", 0)), (Some("IGNORED".into()), Some("IGNORED".into())));
+        s.add_invite("work", "other", "REQUEST", 0, "Other", "o@x.fr", "20991023T100000Z", "", "").unwrap();
+        assert!(!s.keep_ignored("work", "other", 0), "another event's isn't");
     }
 
     #[test]
@@ -1610,6 +1643,7 @@ mod tests {
         s.copy(&[ids[1]], keep, true).unwrap();
         s.expunge(&[ids[2]]).unwrap();
         assert_eq!(s.badge(), 1, "read, filed or deleted: no longer new");
+        assert_eq!(s.still_new(), [ids[3]].into());
         // Days later, those still new are kept for the badge.
         s.db().execute("UPDATE arrivals SET at = 0", []).unwrap();
         s.add_arrivals(&[]).unwrap();
