@@ -255,6 +255,8 @@ def main():
     keeping(s, inbox)
     storage(s)
     retiring(s, inbox)
+    # After storage (Settings shows what's used, worked out at most every minute).
+    search_delay(s, inbox)
     if len(sys.argv) > 1 and os.access(__import__("cdp").CHROME, os.X_OK):
         scrolling(s, sys.argv[1])
 
@@ -589,6 +591,20 @@ def scrolling(s, out):
         check(not b.errors, f"no script errors: {b.errors}")
     finally:
         b.close()
+
+
+def search_delay(s, inbox):
+    """How long typing a search waits: a setting, 100 ms at first, for the mail's and the invitations' pages."""
+    delay = lambda: {re.search(r'data-delay="(\d+)"', s.get(f"{WEB}{p}").text).group(1) for p in (f"/box/{inbox}", "/invitations")}
+    check(delay() == {"100"} and 'name="delay"' in s.get(f"{WEB}/settings").text, "100 ms at first, set in Settings")
+    r = s.post(f"{WEB}/settings/search", data={"delay": "250"})
+    check(flash(r)[0] == "Search waits 250 ms after typing now." and delay() == {"250"}, "saved: both pages wait that long")
+    for bad in ("abc", "5000", "-1"):
+        r = s.post(f"{WEB}/settings/search", data={"delay": bad})
+        check(flash(r)[1] and delay() == {"250"}, f"{bad!r} refused")
+    r = s.post(f"{WEB}/settings/search", data={"delay": "0"})
+    check(flash(r)[0] == "Search follows every key now." and delay() == {"0"}, "0: every key")
+    s.post(f"{WEB}/settings/search", data={"delay": "100"})
 
 
 def filter_menu(s, inbox, out):
