@@ -618,6 +618,15 @@ def filter_menu(s, inbox, out):
     check(b.js("window.samePage === true"), "in place")
     b.js("{ const i = document.querySelector('input[name=q]'); i.value = ''; i.dispatchEvent(new Event('search')) }")
     until("!location.search.includes('q=') && document.querySelectorAll('.list .subject').length > 1", "emptied with its ✕: everything again")
+    # As it's typed, without Enter; busy meanwhile.
+    b.js("window.sawBusy = false; new MutationObserver(() => { if (document.querySelector('form.toolbar.searching') && document.querySelector('.split.searching')) window.sawBusy = true; })"
+         ".observe(document.body, { attributes: true, subtree: true, attributeFilter: ['class'] })")
+    b.js("{ const i = document.querySelector('input[name=q]'); i.focus(); i.value = 'ahe'; i.dispatchEvent(new Event('input', { bubbles: true })) }")
+    until("new URLSearchParams(location.search).get('q') === 'ahe' && JSON.stringify([...document.querySelectorAll('.list .subject')].map(e => e.textContent)) === '[\"ahead\"]'",
+          "the search applies as it's typed, after a pause (a word's start)")
+    check(b.js("window.sawBusy && !document.querySelector('.searching') && document.activeElement.name === 'q'"), "busy while searching, not after; the field keeps the focus")
+    b.js("{ const i = document.querySelector('input[name=q]'); i.value = ''; i.dispatchEvent(new Event('search')) }")
+    until("!location.search.includes('q=') && document.querySelectorAll('.list .subject').length > 1", "emptied again")
     b.js("document.querySelector('input[name=read][value=unread]').click()")
     until("new URLSearchParams(location.search).get('read') === 'unread' && ![...document.querySelectorAll('.list .subject')].some(e => e.textContent === 'ahead')",
           "Unread applies at once, without Apply")
