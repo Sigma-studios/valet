@@ -176,6 +176,13 @@ def main():
     check(not planning(), "off the Invitations calendar")
     time.sleep(2)
     check(len(gm_subjects("org", "INBOX")) == sent_before, "no answer reached the organizer")
+    # The organizer moves it: the new version stays ignored, off the calendar.
+    g = gm_imap("test")
+    g.append("INBOX", None, None, invite.replace(b"Message-ID: <ignore-me@e2e>", b"Message-ID: <ignore-me-2@e2e>")
+             .replace(b"DTSTART:20991105T100000Z\r\nDTEND:20991105T110000Z", b"DTSTART:20991105T110000Z\r\nDTEND:20991105T120000Z\r\nSEQUENCE:1"))
+    g.logout()
+    wait(lambda: len(re.findall(r">ignored<", s.get(f"{WEB}/invitations?status=answered").text)) == 2, "the update is recorded, as ignored")
+    check(not planning() and "Nothing waiting" in s.get(f"{WEB}/invitations").text, "neither on the calendar nor waiting")
 
     # Another, accepted from its event's card in the calendar.
     g = gm_imap("test")
@@ -248,6 +255,8 @@ def main():
     keeping(s, inbox)
     storage(s)
     retiring(s, inbox)
+    if len(sys.argv) > 1 and os.access(__import__("cdp").CHROME, os.X_OK):
+        scrolling(s, sys.argv[1])
 
 
 def all_mail(s, inbox):
@@ -499,13 +508,14 @@ def invitation_filters(out):
     check(b.js("document.querySelector('.filter .panel').checkVisibility() && getComputedStyle(document.querySelector('.filter .panel')).position === 'absolute'"), "Filter opens its menu, styled as the mail's")
     b.js("window.samePage = true")
     b.js("document.querySelector('input[name=status][value=all]').click()")
-    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\",\"Standup\"]'", "All applies at once")
+    # Planning twice: it and its update, ignored with it (each version is a card).
+    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Planning\",\"Retro\",\"Standup\"]'", "All applies at once")
     check(b.js("window.samePage && document.querySelector('details.filter').open"), "in place, the menu still open")
     b.js("{ const i = document.querySelector('input[name=q]'); i.focus(); i.value = 'retro'; i.dispatchEvent(new Event('input', { bubbles: true })) }")
     until(f"location.search === '?q=retro&status=all' && {cards} === '[\"Retro\"]' && !document.querySelector('[data-swap=clear-search]').hidden",
           "the search applies as it's typed, no other filter changed")
     b.js("{ const i = document.querySelector('input[name=q]'); i.value = ''; i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })) }")
-    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Retro\",\"Standup\"]'", "emptied, with Enter: at once")
+    until(f"location.search === '?status=all' && {cards} === '[\"Planning\",\"Planning\",\"Retro\",\"Standup\"]'", "emptied, with Enter: at once")
     check(b.js("window.samePage === true"), "still in place")
     check(b.js("document.querySelector('form[action^=\"/invites/\"] input[name=back]').value") == "/invitations?status=all", "an answer comes back here")
     b.js("{ const i = document.getElementById('filter-from'); i.focus(); i.value = 'nobody'; i.dispatchEvent(new Event('input', { bubbles: true })) }")
@@ -516,6 +526,65 @@ def invitation_filters(out):
     check(b.js("location.search") == "" and b.js(cards) == "[]", "Reset: back to those waiting")
     check(not b.errors, f"no script errors: {b.errors}")
     b.close()
+
+
+def scrolling(s, out):
+    """A long list grows as it is scrolled, 50 rows at a time, and its
+    address says how far: reopening it, or closing a message read from it,
+    shows as many; changes swap them all in."""
+    from cdp import Browser
+    projects = node_id(s, "Projects")
+    total = lambda: int(re.search(r"of (\d+)</span>", s.get(f"{WEB}/box/{projects}").text).group(1))
+    g = gm_imap("test")
+    for i in range(120):
+        g.append("Projects", None, imaplib.Time2Internaldate(time.time() - 86400 * (i + 1)), message(f"long-{i:03}"))
+    g.logout()
+    s.post(f"{WEB}/mail/refresh", params={"folder": projects})
+    wait(lambda: total() >= 122, "120 more in Projects")
+    n = total()
+    b = Browser(os.path.join(out, "chrome-scroll"), port=9337)
+    try:
+        b.go(f"{WEB}/login")
+        b.js(f"document.querySelector('input[name=password]').value = {os.environ['VALET_PASSWORD']!r}; document.querySelector('form').submit()")
+        b.settle(1.5)
+        # A short window: the first 50 rows don't reach its end.
+        b.call("Emulation.setDeviceMetricsOverride", width=1280, height=700, deviceScaleFactor=1, mobile=False)
+        b.go(f"{WEB}/box/{projects}", 2)
+        count = lambda: b.js("document.querySelectorAll('#bulk .list .row').length")
+        check(count() == 50 and b.js("location.search") == "", "50 rows at first")
+        b.js("window.samePage = true")
+
+        def scroll_to_end():
+            b.js("for (let e = document.querySelector('.pager'); e; e = e.parentElement) e.scrollTop = e.scrollHeight; scrollTo(0, document.body.scrollHeight)")
+            b.settle(1)
+
+        scroll_to_end()
+        check(count() == 100 and b.js("location.search") == "?page=0&n=100", f"scrolled down: 50 more, said in the address ({count()}, {b.js('location.search')})")
+        scroll_to_end()
+        ids = b.js("[...document.querySelectorAll('#bulk .list a.link')].map(a => a.dataset.id)")
+        check(len(ids) == n and len(set(ids)) == n, f"to the end: every message once ({len(ids)} of {n})")
+        check(b.js("!document.querySelector('.pager[data-more]') && !document.querySelector('.pager a')"), "nothing more, no Older link")
+        check(b.js("document.querySelector('.pager span:nth-child(2)').textContent") == f"1–{n} of {n}", "the pager counts them all")
+        check(b.js("window.samePage === true"), "in place")
+        b.js("document.querySelectorAll('#bulk .list a.link')[110].click()")
+        b.settle(1.5)
+        check(b.js("!!document.querySelector('.readcol') && location.search.startsWith('?page=0&n=150&open=')"), "a message far down opens beside the list")
+        b.js("document.querySelector('.list .row.open a.link').click()")
+        b.settle(1)
+        check(b.js("location.search") == "?page=0&n=150" and count() == n, "closed: the whole list still there")
+        g = gm_imap("test")
+        g.append("Projects", None, None, message("long-new"))
+        g.logout()
+        s.post(f"{WEB}/mail/refresh", params={"folder": projects})
+        end = time.time() + 15
+        while time.time() < end and count() != n + 1:
+            b.settle(0.5)
+        check(count() == n + 1 and b.js("document.querySelector('#bulk .list .subject').textContent") == "long-new", "new mail swaps every row in, the new one on top")
+        b.go(f"{WEB}/box/{projects}?page=0&n=150", 2)
+        check(count() == n + 1, "reopened from its address: as many rows")
+        check(not b.errors, f"no script errors: {b.errors}")
+    finally:
+        b.close()
 
 
 def filter_menu(s, inbox, out):

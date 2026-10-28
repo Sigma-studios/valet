@@ -92,6 +92,11 @@ fn handle(app: &App, acc: &Account, text: &str, message: &str) -> Result<()> {
     cal.props.retain(|p| p.name != "METHOD");
     let store = &app.store;
     let existing = store.find_uid(&uid);
+    // Ignored before (here or in another account), so off the calendar: a
+    // new version stays ignored, off it too.
+    if method == "REQUEST" && existing.is_none() && app.mail.keep_ignored(&acc.id, &uid, sequence) {
+        return Ok(());
+    }
     if method == "CANCEL" {
         if let Some(o) = existing {
             let mut stored = ical::parse(&o.data)?.pop().context("stored event")?;

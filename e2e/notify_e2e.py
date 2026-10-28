@@ -10,7 +10,7 @@ import re
 import sys
 import time
 
-from common import WEB, check, gm_imap, message, valet_imap, wait
+from common import WEB, check, gm_imap, message, node_id, valet_imap, wait
 
 
 def status(m, name):
@@ -76,6 +76,8 @@ def api(s):
     n = wait(lambda: new(s, last)["notes"], "one more")[0]
     before = badge(s)
     check(before >= 5, f"the badge counts the new mail still unread: {before}")
+    listed = re.findall(r'name="id" value="(\d+)"', s.get(f"{WEB}/box/{node_id(s, 'INBOX')}", params={"read": "new"}).text)
+    check(len(listed) == before, f"the Filter's New lists what it counts ({len(listed)})")
     check(s.post(f"{WEB}/msg/{n['message']}/seen").status_code == 204, "Mark as read (the notification's action)")
     check(badge(s) == before - 1, "read: out of the badge")
     check(new(s, last)["notes"] == [], "read since: no longer told of")

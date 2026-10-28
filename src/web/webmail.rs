@@ -16,7 +16,10 @@ use super::*;
 use crate::accounts::Account;
 use crate::mailstore::{ALL_INBOXES, ALL_MAIL, Mailbox, Msg, Node, Place, SPECIALS, Shift, StoreMode};
 
+/// Rows a list shows at first, and fetches at a time as it is scrolled.
 const PAGE: usize = 50;
+/// Rows a list grows to as it is scrolled; past them, its Older link.
+const MAX_ROWS: usize = 1000;
 
 fn parse(raw: &[u8]) -> Option<mail_parser::Message<'_>> {
     mail_parser::MessageParser::default().parse(raw)
@@ -66,14 +69,16 @@ fn time(t: i64, long: bool) -> Markup {
 const TIME_SCRIPT: &str = r#"
 // Also for parts of the page put in later (a message opened from the list).
 window.valetTimes = (root) => {
-  const { opts } = window.valetTime, day = (d) => d.toLocaleDateString('en-CA', opts());
+  // Each format made once (a list grown long has a thousand times).
+  const { opts } = window.valetTime, f = (o, locale = []) => new Intl.DateTimeFormat(locale, opts(o));
+  const day = f({}, 'en-CA'), full = f({ dateStyle: 'full', timeStyle: 'short' }), hour = f({ hour: '2-digit', minute: '2-digit' });
+  const month = f({ day: 'numeric', month: 'short' }), date = f({}), today = day.format(new Date());
   for (const el of root.querySelectorAll('time[data-t]')) {
-    const d = new Date(el.dataset.t * 1000), now = new Date();
-    el.textContent = el.dataset.long
-      ? d.toLocaleString([], opts({ dateStyle: 'full', timeStyle: 'short' }))
-      : day(d) === day(now) ? d.toLocaleTimeString([], opts({ hour: '2-digit', minute: '2-digit' }))
-      : day(d).slice(0, 4) === day(now).slice(0, 4) ? d.toLocaleDateString([], opts({ day: 'numeric', month: 'short' }))
-      : d.toLocaleDateString([], opts());
+    const d = new Date(el.dataset.t * 1000), that = day.format(d);
+    el.textContent = el.dataset.long ? full.format(d)
+      : that === today ? hour.format(d)
+      : that.slice(0, 4) === today.slice(0, 4) ? month.format(d)
+      : date.format(d);
   }
 };
 valetTimes(document);
@@ -177,6 +182,58 @@ const REFRESH_SCRIPT: &str = r#"
     return next;
   };
   window.valetList = { update };
+  // Scrolled near its end (or too short to fill the window), the list adds
+  // its next rows, and its address says so: reloading, going back to it,
+  // closing a message or acting on some shows as many. Changes swap them
+  // all in, as above.
+  // (The list comes after this script in the page.)
+  const relink = (split, old, grown) => {
+    for (const a of split.querySelectorAll('.list a.link[data-open]')) {
+      a.dataset.open = `${grown}&open=${a.dataset.id}`;
+      a.href = a.closest('.row.open') ? grown : a.dataset.open;
+    }
+    for (const el of split.querySelectorAll('[href], input[name=back]')) {
+      if (el.matches('.list a.link')) continue;
+      if (el.getAttribute('href') === old) el.setAttribute('href', grown);
+      if (el.value === old) el.value = grown;
+    }
+    const open = new URLSearchParams(location.search).get('open');
+    history.replaceState(history.state, '', open ? `${grown}&open=${open}` : grown);
+    split.dataset.list = grown;
+  };
+  const more = async () => {
+    const split = document.querySelector('.split');
+    const pager = split.querySelector('.listcol .pager[data-more]'), list = split.querySelector('#bulk .list');
+    if (!pager || !list) return;
+    const r = await fetch(pager.dataset.more, { cache: 'no-store' });
+    if (r.redirected || !r.ok) throw new Error(r.status);
+    const t = document.createElement('template');
+    t.innerHTML = await r.text();
+    // Rows moved down meanwhile (new mail above) are there already.
+    const have = new Set([...list.querySelectorAll('a.link')].map((a) => a.dataset.id));
+    const rows = [...t.content.querySelectorAll('.more > .row')].filter((row) => !have.has(row.querySelector('a.link').dataset.id));
+    valetTimes(t.content);
+    relink(split, split.dataset.list, pager.dataset.grown);
+    list.append(...rows);
+    pager.replaceWith(t.content.querySelector('.pager'));
+    document.dispatchEvent(new Event('valet:list'));
+  };
+  let growing = false, looking = false;
+  const grow = () => {
+    const pager = document.querySelector('.split .listcol .pager[data-more]');
+    // Not while the list is hidden (a message read instead, on a narrow screen).
+    if (growing || !pager || !pager.offsetParent || !navigator.onLine) return;
+    if (pager.getBoundingClientRect().top > innerHeight + 1200) return;
+    growing = true;
+    // Failing (valet away), it tries again a little later.
+    chain = chain.catch(() => {}).then(more).then(() => true, () => false).then((ok) => { growing = false; ok ? look() : setTimeout(look, 5000); });
+  };
+  const look = () => { if (!looking) { looking = true; requestAnimationFrame(() => { looking = false; grow(); }); } };
+  // Whichever scrolls: the window, or the list's column.
+  document.addEventListener('scroll', look, { capture: true, passive: true });
+  addEventListener('resize', look);
+  document.addEventListener('valet:list', look);
+  document.addEventListener('DOMContentLoaded', look);
   b.addEventListener('click', async () => {
     if (!navigator.onLine) { say("You're offline: new mail can be checked once you're back online.", true); return; }
     b.disabled = true;
@@ -488,6 +545,12 @@ pub struct ListQuery {
     /// Only that message's part of the page, not marked read (the list's
     /// script fetches it ahead, then shows it).
     fragment: Option<String>,
+    /// The rows shown from the page on (`PAGE` at first, more as the list
+    /// is scrolled), a multiple of `PAGE`.
+    n: Option<usize>,
+    /// Only the rows from that one on, and the pager (the list's script
+    /// adds them as it is scrolled).
+    more: Option<usize>,
     // The Filter menu's (see `Filter`); empty, no filtering.
     /// `unread` or `read`.
     #[serde(default)]
@@ -565,6 +628,7 @@ impl ListQuery {
         match self.read.as_str() {
             "unread" => on.push(("Unread".into(), &["read"])),
             "read" => on.push(("Read".into(), &["read"])),
+            "new" => on.push(("New".into(), &["read"])),
             _ => {}
         }
         if !self.starred.is_empty() {
@@ -615,6 +679,8 @@ fn ordered(a: Option<chrono::NaiveDate>, b: Option<chrono::NaiveDate>) -> (Optio
 #[derive(Default)]
 struct Filter {
     seen: Option<bool>,
+    /// Only those the app's badge counts (real rows; see `MailStore::badge`), for `read=new`.
+    new: Option<std::collections::HashSet<i64>>,
     starred: bool,
     /// Lowercase.
     from: String,
@@ -653,6 +719,7 @@ impl Filter {
                 "read" => Some(true),
                 _ => None,
             },
+            new: None,
             starred: !q.starred.is_empty(),
             from: q.from.trim().to_lowercase(),
             to: q.to.trim().to_lowercase(),
@@ -666,6 +733,7 @@ impl Filter {
     /// On what the list knows without opening the message: flags, date.
     fn keeps(&self, m: &Msg) -> bool {
         self.seen.is_none_or(|s| has_flag(m, "\\Seen") == s)
+            && self.new.as_ref().is_none_or(|n| n.contains(&m.link.unwrap_or(m.id)))
             && (!self.starred || has_flag(m, "\\Flagged"))
             && self.after.is_none_or(|a| m.date >= a)
             && self.before.is_none_or(|b| m.date < b)
@@ -720,6 +788,41 @@ fn facts(app: &App, blob: &str) -> Option<Arc<Facts>> {
     });
     kept().insert(blob.to_string(), f.clone());
     Some(f)
+}
+
+/// What a list's row shows of a message.
+struct Summary {
+    subject: String,
+    from: String,
+    to: String,
+    preview: String,
+}
+
+/// By blob, as `FACTS`: rows listed again (the list follows the mail, and
+/// grows as it is scrolled) aren't read and parsed again.
+static SUMMARIES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Arc<Summary>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn summary(app: &App, blob: &str) -> Arc<Summary> {
+    let kept = || SUMMARIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = kept().get(blob) {
+        return s.clone();
+    }
+    let raw = app.mail.blob(blob).unwrap_or_default();
+    let parsed = parse(&raw);
+    let s = Arc::new(Summary {
+        subject: parsed.as_ref().and_then(|p| p.subject().map(str::to_string)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "(no subject)".into()),
+        from: parsed.as_ref().map(|p| who(p.from())).unwrap_or_default(),
+        to: parsed.as_ref().map(|p| who(p.to())).unwrap_or_default(),
+        preview: parsed.as_ref().and_then(|p| p.body_text(0).map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(140).collect())).unwrap_or_default(),
+    });
+    let mut all = kept();
+    // A bound, for a server listing every folder from end to end.
+    if all.len() >= 100_000 {
+        all.clear();
+    }
+    all.insert(blob.to_string(), s.clone());
+    s
 }
 
 #[derive(Deserialize)]
@@ -784,7 +887,7 @@ pub(super) const FUNNEL: &str = r#"<svg viewBox="0 0 16 16" width="14" height="1
 /// together, with the search. `all_mail`: the list is All mail.
 fn filter_menu(id: i64, q: &ListQuery, on: usize, all_mail: bool) -> Markup {
     let today = chrono::Utc::now().with_timezone(&crate::calendar::default_zone()).format("%Y-%m-%d").to_string();
-    let read = if q.read == "unread" || q.read == "read" { q.read.as_str() } else { "" };
+    let read = if ["unread", "read", "new"].contains(&q.read.as_str()) { q.read.as_str() } else { "" };
     let person = |field: &str, label: &str, value: &str| {
         html! {
             div.person {
@@ -806,8 +909,8 @@ fn filter_menu(id: i64, q: &ListQuery, on: usize, all_mail: bool) -> Markup {
                 fieldset {
                     legend { "Status" }
                     div.segmented {
-                        @for (value, label) in [("", "All"), ("unread", "Unread"), ("read", "Read")] {
-                            label { input type="radio" name="read" value=(value) checked[read == value]; span { (label) } }
+                        @for (value, label, title) in [("", "All", ""), ("unread", "Unread", ""), ("read", "Read", ""), ("new", "New", "Come in since valet tells of new mail, still unread in their inbox: what the app's badge counts")] {
+                            label title=[(!title.is_empty()).then_some(title)] { input type="radio" name="read" value=(value) checked[read == value]; span { (label) } }
                         }
                     }
                     label.check { input type="checkbox" name="starred" value="1" checked[!q.starred.is_empty()]; "Starred only" }
@@ -947,8 +1050,11 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     guard!(app, headers);
     let Some(mbox) = app.mail.mailbox(id) else { return StatusCode::NOT_FOUND.into_response() };
     let link = |page: usize| q.link(id, page, &[]);
+    let rows = (q.n.unwrap_or(PAGE) / PAGE * PAGE).clamp(PAGE, MAX_ROWS);
+    // This list as shown, its rows scrolled through included: what closing a message, or an action, comes back to.
+    let here = if rows > PAGE { format!("{}&n={rows}", link(q.page)) } else { link(q.page) };
     if let (Some(open), Some(_)) = (q.open, &q.fragment) {
-        return match reader(&app, open, &q, Some((id, link(q.page)))) {
+        return match reader(&app, open, &q, Some((id, here.clone()))) {
             Some((subject, body)) => maud::html! { div.readcol data-subject=(subject) { (body) } }.into_response(),
             None => StatusCode::NOT_FOUND.into_response(),
         };
@@ -956,9 +1062,9 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     // The message shown beside the list (or, on narrow screens, instead of
     // it): first, so the list shows it read.
     let reading = match q.open {
-        Some(open) => match reader(&app, open, &q, Some((id, link(q.page)))) {
+        Some(open) => match reader(&app, open, &q, Some((id, here.clone()))) {
             Some(r) => Some((open, r)),
-            None => return back(&link(q.page), None, Some("That message is gone.")),
+            None => return back(&here, None, Some("That message is gone.")),
         },
         None => None,
     };
@@ -987,7 +1093,10 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         msgs.retain(|m| folder_of(m).is_none_or(|f| !bins.contains_key(&f)));
     }
     // What the message's flags and date tell first; then what opening it does.
-    let filter = Filter::of(&q);
+    let mut filter = Filter::of(&q);
+    if q.read == "new" {
+        filter.new = Some(app.mail.still_new());
+    }
     msgs.retain(|m| filter.keeps(m));
     if filter.opens() {
         msgs.retain(|m| facts(&app, &m.blob).is_some_and(|f| filter.keeps_facts(&f)));
@@ -998,7 +1107,8 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     }
     let total = msgs.len();
     let start = (q.page * PAGE).min(total);
-    let shown = &msgs[start..(start + PAGE).min(total)];
+    let end = (start + rows).min(total);
+    let shown = &msgs[start..end];
     let names: std::collections::HashMap<String, String> = app.accounts().into_iter().map(|a| (a.id, a.name)).collect();
     let account_of = |m: &Msg| {
         let src = app.mail.source(m.clone());
@@ -1009,6 +1119,46 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     let spam = mbox.special.eq_ignore_ascii_case("\\Junk") || bins.get(&id) == Some(&"Spam");
     let chips = q.chips();
     let page_title = reading.as_ref().map(|(_, (subject, _))| subject.clone()).unwrap_or_else(|| title.clone());
+    let sent = mbox.special.eq_ignore_ascii_case("\\Sent");
+    let row = |m: &Msg| {
+        let s = summary(&app, &m.blob);
+        let from = if sent { format!("To: {}", s.to) } else { s.from.clone() };
+        let is_open = reading.as_ref().is_some_and(|(o, _)| *o == m.id);
+        // The open one's row closes it.
+        let href = if drafts { format!("/compose?draft={}", m.id) } else if is_open { here.clone() } else { format!("{here}&open={}", m.id) };
+        html! {
+            div.row.unread[!has_flag(m, "\\Seen")].open[is_open] {
+                label.pick { input type="checkbox" name="id" value=(m.id) aria-label="Select"; }
+                a.link href=(href) title={(from) " — " (s.subject)} data-id=(m.id)
+                    data-open=[(!drafts).then(|| format!("{here}&open={}", m.id))] {
+                    span.star { @if has_flag(m, "\\Flagged") { "★" } }
+                    span.from { (from) }
+                    span.line {
+                        @if mbox.is_node() { @if let Some(a) = account_of(m) { span.tag { (a) } } }
+                        @if all_mail { @if let Some(b) = folder_of(m).and_then(|f| bins.get(&f)) { span.tag.bin { (b) } } }
+                        span.subject { (s.subject) }
+                        @if !s.preview.is_empty() { span.preview { " — " (s.preview) } }
+                    }
+                    span.when { (time(m.date, false)) }
+                }
+            }
+        }
+    };
+    // Scrolled near its end, the list fetches its next rows (`data-more`),
+    // and its address becomes `data-grown`; past `MAX_ROWS`, Older.
+    let grows = end < total && rows < MAX_ROWS;
+    let pager = html! {
+        div.pager.small.muted
+            data-more=[grows.then(|| format!("{}&n={}&more={rows}", link(q.page), rows + PAGE))]
+            data-grown=[grows.then(|| format!("{}&n={}", link(q.page), rows + PAGE))] {
+            span { @if q.page > 0 { a href=(link(q.page - 1)) { "← Newer" } } }
+            span { (start + 1) "–" (end) " of " (total) }
+            span { @if end < total { a href=(link(q.page + rows / PAGE)) { "Older →" } } }
+        }
+    };
+    if let Some(from) = q.more {
+        return html! { div.more { @for m in &shown[from.min(shown.len())..] { (row(m)) } (pager) } }.into_response();
+    }
     mail_page(&page_title, id, &app, html! {
         (flash_of(&q))
         form.toolbar method="get" action={"/box/" (id)} {
@@ -1021,7 +1171,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
             }
             // Shown while messages are ticked; they act on the list's form.
             span.bulk-actions {
-                label.pickall title="Select every message on this page" { input type="checkbox" #pickall; }
+                label.pickall title="Select every message listed" { input type="checkbox" #pickall; }
                 span.count {}
                 button form="bulk" name="action" value="archive" { "Archive" }
                 @if all_mail || spam { button form="bulk" name="action" value="notspam" title="Back to their inbox" { "Not spam" } }
@@ -1039,46 +1189,16 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         }
         script { (PreEscaped(FILTER_SCRIPT)) }
         script { (PreEscaped(REFRESH_SCRIPT)) }
-        div.split.reading[reading.is_some()] data-list=(link(q.page)) data-title=(title) {
+        div.split.reading[reading.is_some()] data-list=(here) data-title=(title) {
             div.listcol {
                 @if shown.is_empty() {
                     p.muted { @if q.criteria().is_empty() { "Nothing here." } @else { "No message matches." } }
                 } @else {
                     form #bulk method="post" action={"/box/" (id) "/bulk"} {
-                        input type="hidden" name="back" value=(link(q.page));
-                        div.list {
-                            @for m in shown {
-                                @let raw = app.mail.blob(&m.blob).unwrap_or_default();
-                                @let parsed = parse(&raw);
-                                @let subject = parsed.as_ref().and_then(|p| p.subject().map(str::to_string)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "(no subject)".into());
-                                @let from = parsed.as_ref().map(|p| if mbox.special.eq_ignore_ascii_case("\\Sent") { format!("To: {}", who(p.to())) } else { who(p.from()) }).unwrap_or_default();
-                                @let preview: String = parsed.as_ref().and_then(|p| p.body_text(0).map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(140).collect())).unwrap_or_default();
-                                @let is_open = reading.as_ref().is_some_and(|(o, _)| *o == m.id);
-                                // The open one's row closes it.
-                                @let href = if drafts { format!("/compose?draft={}", m.id) } else if is_open { link(q.page) } else { format!("{}&open={}", link(q.page), m.id) };
-                                div.row.unread[!has_flag(m, "\\Seen")].open[is_open] {
-                                    label.pick { input type="checkbox" name="id" value=(m.id) aria-label="Select"; }
-                                    a.link href=(href) title={(from) " — " (subject)} data-id=(m.id)
-                                        data-open=[(!drafts).then(|| format!("{}&open={}", link(q.page), m.id))] {
-                                        span.star { @if has_flag(m, "\\Flagged") { "★" } }
-                                        span.from { (from) }
-                                        span.line {
-                                            @if mbox.is_node() { @if let Some(a) = account_of(m) { span.tag { (a) } } }
-                                            @if all_mail { @if let Some(b) = folder_of(m).and_then(|f| bins.get(&f)) { span.tag.bin { (b) } } }
-                                            span.subject { (subject) }
-                                            @if !preview.is_empty() { span.preview { " — " (preview) } }
-                                        }
-                                        span.when { (time(m.date, false)) }
-                                    }
-                                }
-                            }
-                        }
+                        input type="hidden" name="back" value=(here);
+                        div.list { @for m in shown { (row(m)) } }
                     }
-                    div.pager.small.muted {
-                        span { @if q.page > 0 { a href=(link(q.page - 1)) { "← Newer" } } }
-                        span { (start + 1) "–" (start + shown.len()) " of " (total) }
-                        span { @if start + PAGE < total { a href=(link(q.page + 1)) { "Older →" } } }
-                    }
+                    (pager)
                 }
             }
             @if let Some((_, (_, body))) = &reading { div.readcol { (body) } }

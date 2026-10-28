@@ -19,10 +19,13 @@ the native apps of every device.
   which names the events each one would overlap: the organizer gets the reply
   from the account the invitation came to. It shows those not answered yet,
   for events still to come, and searches and filters them all like the mail.
+  *Ignore* takes one off the calendar without telling the organizer; its
+  later versions (the event moved), and the same invitation come to another
+  of your accounts, stay ignored.
 
 - **Webmail** on valet's own site, from any browser: your tree of folders
-  (and every account's own folders), search, a Filter menu (read or unread,
-  starred, from or to someone, suggested from the folder's mail as you type,
+  (and every account's own folders), search, a Filter menu (read, unread or
+  new: what the app's badge counts, see [The apps](#the-apps); starred, from or to someone, suggested from the folder's mail as you type,
   with attachments, invitations, a date range; in *All mail*, hiding Spam and
   Trash; the filters on show as chips under the search, each removed with its
   ✕), reading, *Not spam* (back to the account's inbox), and writing with
@@ -34,7 +37,10 @@ the native apps of every device.
   mail is shown in a frame where nothing runs, and remote images (which tell
   senders you opened a message) stay blocked until asked for. An open list
   follows the mail by itself: what comes in, or is read, flagged or deleted
-  from any app, shows without reloading. *Refresh* asks the providers now,
+  from any app, shows without reloading. It shows 50 messages, and the next
+  50 as it is scrolled down, up to 1,000 (then *Older →*); its address says
+  how far, so reloading, going back, or closing a message read from it shows
+  as many. *Refresh* asks the providers now,
   the folder shown first (from *All mail*, every folder), for what they don't
   push (folders other than inboxes), and says what came of it.
 
