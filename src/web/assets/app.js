@@ -32,9 +32,22 @@
       counting = count().finally(() => { counting = null; if (again) { again = false; recount(); } });
     };
     recount();
-    const events = window.valetEvents || new EventSource('/mail/events');
-    events.addEventListener('changed', recount);
-    events.addEventListener('open', recount);
+    let events;
+    const listen = () => {
+      events = window.valetEvents || new EventSource('/mail/events');
+      events.addEventListener('changed', recount);
+      events.addEventListener('open', recount);
+    };
+    listen();
+    // Left, even into the back-forward cache, the page lets its connection
+    // go: browsers keep only six to a site, and a seventh page would wait.
+    addEventListener('pagehide', () => events.close());
+    addEventListener('pageshow', (e) => {
+      if (!e.persisted) return;
+      // The webmail's list follows its own connection: shown again, it starts afresh.
+      if (window.valetEvents) location.reload();
+      else { listen(); recount(); }
+    });
     document.addEventListener('visibilitychange', () => { if (!document.hidden) recount(); });
   }
   const kept = document.querySelector('meta[name="valet-offline"]');
