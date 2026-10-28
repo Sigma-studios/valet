@@ -471,7 +471,16 @@ form.write textarea { min-height:320px; font:inherit; padding:8px; border:1px so
 pub(super) const FILTER_CSS: &str = r#"
 .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
 .toolbar form { display:inline; margin:0; }
-.toolbar input[type=search] { flex:1; min-width:160px; }
+.toolbar .search { flex:1; min-width:160px; display:flex; position:relative; }
+.toolbar .search input { flex:1; min-width:0; }
+/* Searching (or filtering): a spinner in the field, the list dimmed; only
+   past a moment, so quick answers don't flicker. */
+.toolbar .search::after { content:""; position:absolute; right:30px; top:50%; width:12px; height:12px; margin-top:-8px;
+  border:2px solid var(--muted); border-right-color:transparent; border-radius:50%; animation:spin .7s linear infinite;
+  opacity:0; pointer-events:none; transition:opacity .1s; }
+.toolbar.searching .search::after { opacity:1; transition-delay:.15s; }
+.split .listcol { transition:opacity .1s; }
+.split.searching .listcol { opacity:.5; transition-delay:.15s; }
 .toolbar a.button, .toolbar button { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; }
 .toolbar a.button:hover, .toolbar button:hover { background:var(--line); text-decoration:none; }
 /* The Filter button, its menu, and the filters on as chips under the toolbar. */
@@ -937,23 +946,33 @@ fn filter_menu(id: i64, q: &ListQuery, on: usize, all_mail: bool) -> Markup {
 }
 
 /// The Filter menu: each choice applies at once, the list swapped in place
-/// (names typed, after a pause), the menu staying open; closed by a click
-/// elsewhere or Escape. What's left empty stays out of the list's address.
+/// (names typed, and the search, after a pause), the menu staying open;
+/// closed by a click elsewhere or Escape. Until the list is in, the search
+/// field spins and the list is dimmed. What's left empty stays out of the list's address.
 /// People are suggested as they're typed, from the folder's mail.
 const FILTER_SCRIPT: &str = r#"
 {
   const form = document.querySelector('form.toolbar'), menu = form.querySelector('details.filter');
   // The list comes after this script in the page.
+  let typing = null, applied = 0;
   const apply = () => {
+    clearTimeout(typing);
     const split = document.querySelector('.split');
     const url = `${form.getAttribute('action')}?${new URLSearchParams([['page', '0'], ...new FormData(form)])}`;
     if (url === split.dataset.list) return;
     split.dataset.list = url;
     const open = split.querySelector('.row.open a.link')?.dataset.id;
     history.replaceState(null, '', open ? `${url}&open=${open}` : url);
-    window.valetList.update().then((r) => { if (r.gone) location = r.gone; }, () => { location = url; });
+    // Busy until the list asked for last is in.
+    const n = ++applied;
+    form.classList.add('searching');
+    split.classList.add('searching');
+    window.valetList.update().then((r) => { if (r.gone) location = r.gone; }, () => { location = url; }).finally(() => {
+      if (n !== applied) return;
+      form.classList.remove('searching');
+      split.classList.remove('searching');
+    });
   };
-  let typing = null;
   const panel = menu.querySelector('.panel');
   panel.addEventListener('change', apply);
   panel.addEventListener('input', (e) => {
@@ -965,9 +984,15 @@ const FILTER_SCRIPT: &str = r#"
   menu.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !e.defaultPrevented) { menu.open = false; menu.querySelector('summary').focus(); }
   });
-  // The search: on Enter (the form has several fields and no button, so
-  // Enter wouldn't send it), or when emptied with its ✕.
+  // The search: as it's typed, after a pause; at once on Enter (the form
+  // has several fields and no button, so Enter wouldn't send it), or when
+  // emptied with its ✕.
   const search = form.elements.q;
+  search.addEventListener('input', (e) => {
+    if (e.isComposing) return;
+    clearTimeout(typing);
+    typing = setTimeout(apply, 300);
+  });
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
   search.addEventListener('search', () => { if (!search.value) apply(); });
   const when = form.elements.when;
@@ -1162,7 +1187,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
             span.normal {
                 button.refresh type="button" data-folder=(id) title="Check every account for new mail now, this folder first" { "↻ Refresh" }
                 span.refresh-note.small.muted role="status" {}
-                input type="search" name="q" value=(q.q) placeholder={"Search " (title)};
+                span.search { input type="search" name="q" value=(q.q) placeholder={"Search " (title)}; }
                 a.button href=(q.link(id, 0, &["q"])) hidden[q.q.is_empty()] title="Clear the search (the filters stay)" data-swap="clear-search" { "Clear" }
                 (filter_menu(id, &q, chips.len(), all_mail))
             }
