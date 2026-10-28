@@ -24,7 +24,9 @@ the native apps of every device.
   of your accounts, stay ignored.
 
 - **Webmail** on valet's own site, from any browser: your tree of folders
-  (and every account's own folders), search, a Filter menu (read, unread or
+  (and every account's own folders), search (each word typed as the start
+  of one, all of them, accents and case aside: `factur` finds *Facture*,
+  `reunion` *Réunion*; in milliseconds, from an index valet keeps), a Filter menu (read, unread or
   new: what the app's badge counts, see [The apps](#the-apps); starred, from or to someone, suggested from the folder's mail as you type,
   with attachments, invitations, a date range; in *All mail*, hiding Spam and
   Trash; the filters on show as chips under the search, each removed with its

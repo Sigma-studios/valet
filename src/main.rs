@@ -243,6 +243,7 @@ async fn main() -> Result<()> {
     tokio::task::spawn_blocking(move || {
         compacting.mail.compact();
         compacting.mail.measure();
+        compacting.mail.index_search();
     });
     tracing::info!("{} mail accounts", app.accounts().len());
     let stopping = app.clone();

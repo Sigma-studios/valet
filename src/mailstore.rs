@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, ensure};
@@ -111,6 +112,8 @@ pub struct MailStore {
     passed: watch::Sender<()>,
     /// Per account: provider folders its next pass syncs right after the inbox.
     hurry: Mutex<HashMap<String, HashSet<String>>>,
+    /// Every message kept is in the search index (see `index_search`).
+    searchable: AtomicBool,
 }
 
 /// What an account's mail takes here, compressed, by kind.
@@ -211,6 +214,10 @@ CREATE TABLE IF NOT EXISTS invites (
     summary TEXT NOT NULL, organizer TEXT NOT NULL, dtstart TEXT NOT NULL, ics TEXT NOT NULL,
     response TEXT, received INTEGER NOT NULL, message TEXT NOT NULL DEFAULT '', UNIQUE (account, uid, method, sequence));
 CREATE TABLE IF NOT EXISTS arrivals (seq INTEGER PRIMARY KEY AUTOINCREMENT, message INTEGER NOT NULL, at INTEGER NOT NULL);
+-- Search: the words of each message kept (see `search_text`), by blob; the
+-- index alone is kept, not the text. Accents and case don't count.
+CREATE TABLE IF NOT EXISTS searched (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE);
+CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(text, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2');
 ";
 
 /// Arrivals (`a`) whose message is still unread in its account's inbox.
@@ -274,19 +281,76 @@ fn join_flags(f: &[String]) -> String {
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
 /// A message ready to keep: its hash, compressed, what its attachments
-/// weigh. Worked out before taking the store.
+/// weigh, what search reads in it. Worked out before taking the store.
 struct Packed {
     hash: String,
     data: Vec<u8>,
     atts: crate::mime::Attachments,
     text_bytes: u64,
+    text: String,
 }
 
 impl Packed {
     fn of(raw: &[u8]) -> Packed {
         let data = pack(raw);
-        Packed { hash: hex::encode(Sha256::digest(raw)), atts: crate::mime::attachments(raw), text_bytes: text_bytes(raw, data.len()), data }
+        Packed {
+            hash: hex::encode(Sha256::digest(raw)),
+            atts: crate::mime::attachments(raw),
+            text_bytes: text_bytes(raw, data.len()),
+            text: search_text(raw),
+            data,
+        }
     }
+}
+
+/// What search reads in a message: its subject, who it's from and to (names
+/// and addresses), and its text (an HTML message's, as text).
+pub fn search_text(raw: &[u8]) -> String {
+    let Some(m) = mail_parser::MessageParser::default().parse(raw) else { return String::new() };
+    let mut t = String::from(m.subject().unwrap_or(""));
+    for a in [m.from(), m.to(), m.cc()].into_iter().flatten() {
+        for x in a.iter() {
+            for part in [x.name(), x.address()].into_iter().flatten() {
+                t.push('\n');
+                t.push_str(part);
+            }
+        }
+    }
+    if let Some(body) = m.body_text(0) {
+        t.push('\n');
+        t.push_str(&body);
+    }
+    t
+}
+
+/// Puts a kept message's words in the search index, if not there yet.
+fn index_text(c: &Connection, hash: &str, text: &str) -> rusqlite::Result<()> {
+    if c.execute("INSERT OR IGNORE INTO searched (hash) VALUES (?1)", [hash])? == 1 {
+        c.execute("INSERT INTO search (rowid, text) VALUES (?1, ?2)", params![c.last_insert_rowid(), text])?;
+    }
+    Ok(())
+}
+
+/// Takes the messages no longer kept out of the search index.
+fn unindex_gone(c: &Connection) -> rusqlite::Result<()> {
+    c.execute("DELETE FROM search WHERE rowid IN (SELECT id FROM searched WHERE hash NOT IN (SELECT hash FROM blobs))", [])?;
+    c.execute("DELETE FROM searched WHERE hash NOT IN (SELECT hash FROM blobs)", [])?;
+    Ok(())
+}
+
+/// What is typed in the search, as the index takes it: each word (split
+/// where the index splits words: `rendez-vous`, `ann@x.fr`) a phrase whose
+/// last part may be the start of a word; all of them. None when nothing
+/// can be searched.
+fn search_query(typed: &str) -> Option<String> {
+    let phrases: Vec<String> = typed
+        .split_whitespace()
+        .filter_map(|w| {
+            let parts: Vec<&str> = w.split(|c: char| !c.is_alphanumeric()).filter(|p| !p.is_empty()).collect();
+            (!parts.is_empty()).then(|| format!("\"{}\"*", parts.join(" ")))
+        })
+        .collect();
+    (!phrases.is_empty()).then(|| phrases.join(" "))
 }
 
 /// Notes what a kept message weighs (`len`: kept, compressed).
@@ -346,7 +410,7 @@ impl MailStore {
 
     fn with(conn: Connection) -> Result<MailStore> {
         conn.execute_batch(SCHEMA)?;
-        let store = MailStore { conn: Mutex::new(conn), changed: broadcast::channel(64).0, wake: Mutex::new(HashMap::new()), passes: Mutex::new(HashMap::new()), passed: watch::channel(()).0, hurry: Mutex::new(HashMap::new()) };
+        let store = MailStore { conn: Mutex::new(conn), changed: broadcast::channel(64).0, wake: Mutex::new(HashMap::new()), passes: Mutex::new(HashMap::new()), passed: watch::channel(()).0, hurry: Mutex::new(HashMap::new()), searchable: AtomicBool::new(false) };
         {
             let c = store.db();
             c.execute(
@@ -489,6 +553,7 @@ impl MailStore {
             [],
         )?;
         c.execute("DELETE FROM facts WHERE hash NOT IN (SELECT hash FROM blobs)", [])?;
+        unindex_gone(&c)?;
         Ok(())
     }
 
@@ -629,6 +694,7 @@ impl MailStore {
             params![p.hash, p.data, p.atts.count, p.atts.bytes as i64, p.atts.removed, p.text_bytes as i64, p.data.len() as i64],
         )?;
         put_facts(c, &p.hash, p.data.len(), p.atts, p.text_bytes)?;
+        index_text(c, &p.hash, &p.text)?;
         Ok(p.hash.clone())
     }
 
@@ -734,6 +800,65 @@ impl MailStore {
         }
     }
 
+    /// Once for the messages kept before search had an index: their words,
+    /// a few at a time, read without holding the store. Search reads every
+    /// message, as it did, until it's done.
+    pub fn index_search(&self) {
+        let started = std::time::Instant::now();
+        let (mut after, mut n) = (0i64, 0);
+        loop {
+            let rows: Vec<(i64, String, Vec<u8>)> = {
+                let c = self.db();
+                let mut st = c
+                    .prepare(
+                        "SELECT b.rowid, b.hash, b.data FROM blobs b WHERE b.rowid > ?1
+                         AND NOT EXISTS (SELECT 1 FROM searched s WHERE s.hash = b.hash) ORDER BY b.rowid LIMIT 100",
+                    )
+                    .unwrap();
+                st.query_map([after], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().filter_map(Result::ok).collect()
+            };
+            let Some(last) = rows.last().map(|r| r.0) else { break };
+            after = last;
+            let texts: Vec<(String, String)> = rows.into_iter().map(|(_, hash, data)| (hash, search_text(&unpack(data)))).collect();
+            {
+                let c = self.db();
+                let done = c.unchecked_transaction().and_then(|tx| {
+                    for (hash, text) in &texts {
+                        index_text(&tx, hash, text)?;
+                    }
+                    tx.commit()
+                });
+                if let Err(e) = done {
+                    tracing::warn!("search index: {e}");
+                    return;
+                }
+                n += texts.len();
+            }
+            // Pages waiting for the store get it in between.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        self.searchable.store(true, Ordering::Relaxed);
+        if n > 0 {
+            tracing::info!("search index: {n} messages added in {:.0?}", started.elapsed());
+        }
+    }
+
+    /// The messages (their blobs) with every word typed (see
+    /// `search_query`); None until the index has them all.
+    pub fn search(&self, typed: &str) -> Option<HashSet<String>> {
+        if !self.searchable.load(Ordering::Relaxed) {
+            return None;
+        }
+        let Some(query) = search_query(typed) else { return Some(HashSet::new()) };
+        let c = self.db();
+        let mut st = c.prepare("SELECT s.hash FROM search JOIN searched s ON s.id = search.rowid WHERE search MATCH ?1").unwrap();
+        let found = st.query_map([&query], |r| r.get(0)).and_then(|rows| rows.collect::<rusqlite::Result<HashSet<String>>>());
+        Some(found.unwrap_or_else(|e| {
+            tracing::warn!("search {query:?}: {e}");
+            HashSet::new()
+        }))
+    }
+
     /// Drops what no message, waiting change or doomed copy uses; frees the
     /// room on disk. Returns how many went.
     pub fn gc_blobs(&self) -> usize {
@@ -746,6 +871,7 @@ impl MailStore {
             )
             .unwrap_or(0);
         let _ = c.execute("DELETE FROM facts WHERE hash NOT IN (SELECT hash FROM blobs)", []);
+        let _ = unindex_gone(&c);
         let _ = c.execute_batch("PRAGMA incremental_vacuum;");
         n
     }
@@ -1649,6 +1775,46 @@ mod tests {
         s.add_arrivals(&[]).unwrap();
         assert_eq!(s.badge(), 1);
         assert_eq!(s.db().query_row("SELECT COUNT(*) FROM arrivals", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn search_finds_words_by_their_start_accents_aside() {
+        let s = MailStore::memory();
+        let inbox = s.remote_mailbox("work", "INBOX", "Work/Inbox", "").unwrap();
+        let mail = |id: &str, from: &str, subject: &str, body: &str| {
+            format!("Message-ID: <{id}>\r\nFrom: {from}\r\nTo: me@x.fr\r\nSubject: {subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n").into_bytes()
+        };
+        let mut uid = 0;
+        let mut add = |raw: Vec<u8>| {
+            uid += 1;
+            let id = s.add_fetched(inbox, &raw, &[], 0, uid).unwrap().0;
+            s.message(id).unwrap().blob
+        };
+        let bill = add(mail("1", "Ann Lee <ann@shop.fr>", "Votre facture d'octobre", "Bonjour, voici la facture."));
+        let meeting = add(mail("2", "bob@x.fr", "Réunion lundi", "On a rendez-vous à 10h."));
+        let other = add(mail("3", "carl@x.fr", "Vous avez un rendez", "Pas de vous ici."));
+        assert_eq!(s.search("facture"), None, "until the index has them all: None, the list reads them");
+        s.index_search();
+        let found = |q: &str| {
+            let f = s.search(q).unwrap();
+            [(&bill, "bill"), (&meeting, "meeting"), (&other, "other")].into_iter().filter(|(h, _)| f.contains(*h)).map(|(_, n)| n).collect::<Vec<_>>()
+        };
+        assert_eq!(found("factur"), ["bill"], "the start of a word");
+        assert_eq!(found("FACTURE octobre"), ["bill"], "every word, case aside");
+        assert_eq!(found("reunion"), ["meeting"], "accents aside");
+        assert_eq!(found("rendez-vous"), ["meeting"], "a word with a hyphen, its parts together");
+        assert_eq!(found("ann@shop.fr"), ["bill"], "an address");
+        assert_eq!(found("Lee"), ["bill"], "a sender's name");
+        assert!(found("actur").is_empty(), "not the middle of a word");
+        assert!(found("!!!").is_empty() && found("facture zzz").is_empty());
+
+        let later = add(mail("4", "dan@x.fr", "Facture de novembre", ""));
+        assert!(s.search("novembre").unwrap().contains(&later), "mail kept later is searchable at once");
+        let row = s.messages(inbox).into_iter().find(|m| m.blob == later).unwrap().id;
+        s.expunge(&[row]).unwrap();
+        s.gc_blobs();
+        assert!(s.search("novembre").unwrap().is_empty(), "gone, out of the index");
+        assert_eq!(s.db().query_row("SELECT COUNT(*) FROM searched", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
     }
 
     #[test]

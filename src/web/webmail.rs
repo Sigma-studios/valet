@@ -868,16 +868,7 @@ fn flash_of(q: &ListQuery) -> Markup {
 
 /// Whether the message contains every word of the search.
 fn matches(raw: &[u8], words: &[String]) -> bool {
-    let Some(m) = parse(raw) else { return false };
-    let mut hay = String::new();
-    for part in [m.subject().unwrap_or(""), &everyone(m.from()), &everyone(m.to()), &everyone(m.cc())] {
-        hay.push_str(part);
-        hay.push('\n');
-    }
-    if let Some(t) = m.body_text(0) {
-        hay.push_str(&t);
-    }
-    let hay = hay.to_lowercase();
+    let hay = crate::mailstore::search_text(raw).to_lowercase();
     words.iter().all(|w| hay.contains(w.as_str()))
 }
 
@@ -1101,9 +1092,15 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     if filter.opens() {
         msgs.retain(|m| facts(&app, &m.blob).is_some_and(|f| filter.keeps_facts(&f)));
     }
-    let words: Vec<String> = q.q.split_whitespace().map(str::to_lowercase).collect();
-    if !words.is_empty() {
-        msgs.retain(|m| app.mail.blob(&m.blob).is_some_and(|raw| matches(&raw, &words)));
+    if !q.q.trim().is_empty() {
+        match app.mail.search(&q.q) {
+            Some(found) => msgs.retain(|m| found.contains(&m.blob)),
+            // Until the index has every message: each read.
+            None => {
+                let words: Vec<String> = q.q.split_whitespace().map(str::to_lowercase).collect();
+                msgs.retain(|m| app.mail.blob(&m.blob).is_some_and(|raw| matches(&raw, &words)));
+            }
+        }
     }
     let total = msgs.len();
     let start = (q.page * PAGE).min(total);
