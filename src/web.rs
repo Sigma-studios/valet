@@ -23,6 +23,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/", get(root).fallback(crate::fallback))
         .route("/settings", get(home))
         .route("/settings/zone", post(save_zone))
+        .route("/settings/search", post(save_search))
         .route("/invitations", get(invitations_page))
         .route("/calendar", get(calendar::page))
         .route("/calendar/month/{key}", get(calendar::month))
@@ -379,6 +380,17 @@ async fn home(State(app): St, headers: HeaderMap, Query(m): Query<Msg>) -> Respo
   const here = Intl.DateTimeFormat().resolvedOptions().timeZone, b = document.getElementById('zone-here'), z = document.getElementById('zone');
   if (here && here !== z.value) { b.hidden = false; b.textContent = `Use this device's (${here})`; b.onclick = () => { z.value = here; z.form.requestSubmit(); }; }
 }"#)) }
+        h2 { "Search" }
+        form.card.row method="post" action="/settings/search" {
+            label { "Search as you type, once typing stops for"
+                input name="delay" type="number" min="0" max=(MAX_SEARCH_DELAY) step="10" required value=(search_delay(&app)) style="width:6em";
+                "ms" }
+            button type="submit" { "Save" }
+            p.muted.small style="flex-basis:100%; margin:0" {
+                "For the mail's search and its From and To, and the Invitations page's search and organizer. "
+                "Enter searches at once; 0 searches at every key."
+            }
+        }
         h2 { "Alerts" }
         div.card {
             p { "How valet picks an event's alerts — the first that applies wins:" }
@@ -431,6 +443,32 @@ async fn save_zone(State(app): St, headers: HeaderMap, Form(f): Form<ZoneForm>) 
     }
     crate::calendar::set_default_zone(tz);
     back("/settings", Some(&format!("Times are shown in {} now.", crate::calendar::zone_label(tz))), None)
+}
+
+/// How long typing a search waits before searching, in ms (`search_delay`).
+pub const SEARCH_DELAY: u32 = 100;
+const MAX_SEARCH_DELAY: u32 = 2000;
+
+/// The setting, for the pages' search fields (their form's `data-delay`).
+pub fn search_delay(app: &App) -> u32 {
+    app.store.setting("search_delay").and_then(|d| d.parse().ok()).unwrap_or(SEARCH_DELAY).min(MAX_SEARCH_DELAY)
+}
+
+#[derive(Deserialize)]
+struct SearchForm {
+    delay: String,
+}
+
+async fn save_search(State(app): St, headers: HeaderMap, Form(f): Form<SearchForm>) -> Response {
+    guard!(app, headers);
+    let Some(delay) = f.delay.trim().parse::<u32>().ok().filter(|d| *d <= MAX_SEARCH_DELAY) else {
+        return back("/settings", None, Some(&format!("{} isn't a delay: from 0 to {MAX_SEARCH_DELAY} ms.", f.delay.trim())));
+    };
+    if let Err(e) = app.store.set_setting("search_delay", &delay.to_string()) {
+        return back("/settings", None, Some(&format!("Not saved: {e}")));
+    }
+    let say = if delay == 0 { "Search follows every key now.".to_string() } else { format!("Search waits {delay} ms after typing now.") };
+    back("/settings", Some(&say), None)
 }
 
 // Patterns
@@ -1258,6 +1296,8 @@ impl InvitesQuery {
 const INVITES_SCRIPT: &str = r#"
 {
   const form = document.querySelector('form.toolbar'), menu = form.querySelector('details.filter');
+  // How long typing waits (Settings → Overview → Search).
+  const delay = Number(form.dataset.delay ?? 100);
   let shown = location.pathname + location.search, asked = 0;
   form.addEventListener('formdata', (e) => {
     for (const [k, v] of [...e.formData]) if (!String(v).trim()) e.formData.delete(k);
@@ -1288,7 +1328,7 @@ const INVITES_SCRIPT: &str = r#"
   form.addEventListener('input', (e) => {
     if (e.target.type !== 'text' && e.target.type !== 'search') return;
     clearTimeout(typing);
-    typing = setTimeout(apply, 300);
+    typing = setTimeout(apply, delay);
   });
   form.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || (e.target.type !== 'text' && e.target.type !== 'search')) return;
@@ -1396,7 +1436,7 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(mut q): Quer
         style { (PreEscaped(webmail::FILTER_CSS)) }
         h1 { "Invitations" }
         (flash(&Msg { ok: q.ok.clone(), err: q.err.clone(), relogin: None }))
-        form.toolbar method="get" action="/invitations" {
+        form.toolbar method="get" action="/invitations" data-delay=(search_delay(&app)) {
             input type="search" name="q" value=(q.q) placeholder="Search invitations";
             a.button href=(q.link(&["q"], &[])) hidden[q.q.is_empty()] title="Clear the search (the filters stay)" data-swap="clear-search" { "Clear" }
             details.filter {

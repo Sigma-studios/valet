@@ -953,6 +953,8 @@ fn filter_menu(id: i64, q: &ListQuery, on: usize, all_mail: bool) -> Markup {
 const FILTER_SCRIPT: &str = r#"
 {
   const form = document.querySelector('form.toolbar'), menu = form.querySelector('details.filter');
+  // How long typing waits (Settings → Overview → Search).
+  const delay = Number(form.dataset.delay ?? 100);
   // The list comes after this script in the page.
   let typing = null, applied = 0;
   const apply = () => {
@@ -978,7 +980,7 @@ const FILTER_SCRIPT: &str = r#"
   panel.addEventListener('input', (e) => {
     if (!e.target.matches('[data-suggest]')) return;
     clearTimeout(typing);
-    typing = setTimeout(apply, 400);
+    typing = setTimeout(apply, delay);
   });
   document.addEventListener('click', (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; });
   menu.addEventListener('keydown', (e) => {
@@ -991,7 +993,7 @@ const FILTER_SCRIPT: &str = r#"
   search.addEventListener('input', (e) => {
     if (e.isComposing) return;
     clearTimeout(typing);
-    typing = setTimeout(apply, 300);
+    typing = setTimeout(apply, delay);
   });
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
   search.addEventListener('search', () => { if (!search.value) apply(); });
@@ -1183,7 +1185,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
     }
     mail_page(&page_title, id, &app, html! {
         (flash_of(&q))
-        form.toolbar method="get" action={"/box/" (id)} {
+        form.toolbar method="get" action={"/box/" (id)} data-delay=(super::search_delay(&app)) {
             span.normal {
                 button.refresh type="button" data-folder=(id) title="Check every account for new mail now, this folder first" { "↻ Refresh" }
                 span.refresh-note.small.muted role="status" {}
