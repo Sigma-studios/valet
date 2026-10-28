@@ -129,7 +129,8 @@ fn indent(depth: usize) -> String {
 
 /// The list follows the mail: told by `/mail/events` that something
 /// changed, it fetches itself again and swaps in place (with the unread
-/// counts), so what is ticked, scrolled to and open stays. Refresh checks the
+/// counts), so what is ticked, scrolled to and open stays. (app.js counts the
+/// badge on the same connection.) Refresh checks the
 /// accounts first (the folder shown right after the inboxes) and says what
 /// came of it beside the button.
 const REFRESH_SCRIPT: &str = r#"
@@ -204,7 +205,7 @@ const REFRESH_SCRIPT: &str = r#"
     if (document.hidden) { behind = true; return; }
     update().then((r) => { if (r.gone) events.close(); }, () => {});
   };
-  const events = new EventSource('/mail/events');
+  const events = window.valetEvents = new EventSource('/mail/events');
   events.addEventListener('changed', changed);
   // Back after a break (valet restarted, the network dropped): what changed meanwhile.
   let connected = false;
@@ -2478,8 +2479,9 @@ fn forget_draft(app: &App, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Tells an open webmail page that some mail changed (it then fetches its
-/// list again), as server-sent events; ends when valet stops.
+/// Tells an open page that some mail changed (the webmail then fetches its
+/// list again, every page the app's badge), as server-sent events; ends when
+/// valet stops.
 pub async fn events(State(app): St, headers: HeaderMap) -> Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use tokio::sync::broadcast::error::{RecvError, TryRecvError};

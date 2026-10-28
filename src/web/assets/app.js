@@ -15,6 +15,28 @@
       if (r.ok) { localStorage.setItem('valet.push', sub.endpoint); localStorage.setItem('valet.push.day', day); }
     }).catch(() => {});
   }
+  // The app's badge (a Mac's Dock): new mail still unread. Pushes set it
+  // too; an open page, on any page and even hidden, follows what is read
+  // meanwhile, from any app (told by /mail/events, the webmail's own
+  // connection where there is one).
+  if ('setAppBadge' in navigator && !window.ValetApp && !location.pathname.startsWith('/login')) {
+    const count = () => fetch('/mail/badge.json', { cache: 'no-store' }).then(async (r) => {
+      const n = r.ok ? (await r.json()).badge : r.status === 401 ? 0 : null;
+      if (n !== null) await (n > 0 ? navigator.setAppBadge(n) : navigator.clearAppBadge());
+    }).catch(() => {});
+    // One count at a time; changes told during one make one more after it.
+    let counting = null, again = false;
+    const recount = () => {
+      if (!navigator.onLine) return;
+      if (counting) { again = true; return; }
+      counting = count().finally(() => { counting = null; if (again) { again = false; recount(); } });
+    };
+    recount();
+    const events = window.valetEvents || new EventSource('/mail/events');
+    events.addEventListener('changed', recount);
+    events.addEventListener('open', recount);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) recount(); });
+  }
   const kept = document.querySelector('meta[name="valet-offline"]');
   const banner = (text) => {
     let b = document.getElementById('offline-banner');

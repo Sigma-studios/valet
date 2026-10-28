@@ -73,6 +73,7 @@ pub async fn test(State(app): St, headers: HeaderMap, Json(e): Json<Endpoint>) -
         account: String::new(),
         url: "/settings".into(),
         message: None,
+        badge: None,
     };
     match notify::send(&app, &p, &note).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -109,6 +110,14 @@ pub async fn new_mail(State(app): St, headers: HeaderMap, Query(q): Query<After>
         _ => Vec::new(),
     };
     Json(serde_json::json!({ "last": last, "notes": notes })).into_response()
+}
+
+/// The app's badge (on a Mac's Dock, a phone's icon): new mail still unread.
+pub async fn badge(State(app): St, headers: HeaderMap) -> Response {
+    if !authed(&app, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    ([(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({ "badge": app.mail.badge() }))).into_response()
 }
 
 /// The settings' part: this device, and every device where notifications are on.

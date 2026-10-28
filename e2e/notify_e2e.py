@@ -30,11 +30,19 @@ def new(s, after=None):
     return r.json()
 
 
+def badge(s):
+    r = s.get(f"{WEB}/mail/badge.json")
+    assert r.ok, r.status_code
+    return r.json()["badge"]
+
+
 def api(s):
     import requests
     check(requests.get(f"{WEB}/mail/new.json").status_code == 401, "the list of arrivals needs a login")
     first = new(s)
     check(first == {"last": 0, "notes": []}, f"the first fetch of each folder tells of nothing: {first}")
+    check(requests.get(f"{WEB}/mail/badge.json").status_code == 401, "the badge needs a login")
+    check(badge(s) == 0, "the mail there before, unread or not, isn't in the badge")
 
     deliver("lunch tomorrow?")
     s.post(f"{WEB}/mail/refresh")
@@ -66,9 +74,49 @@ def api(s):
     deliver("to be read")
     s.post(f"{WEB}/mail/refresh")
     n = wait(lambda: new(s, last)["notes"], "one more")[0]
+    before = badge(s)
+    check(before >= 5, f"the badge counts the new mail still unread: {before}")
     check(s.post(f"{WEB}/msg/{n['message']}/seen").status_code == 204, "Mark as read (the notification's action)")
+    check(badge(s) == before - 1, "read: out of the badge")
     check(new(s, last)["notes"] == [], "read since: no longer told of")
     return new(s)["last"]
+
+
+def badges(b, s):
+    """The app's badge, as pages set it: what they set is recorded (headless
+    Chrome has no Dock)."""
+    b.call("Page.addScriptToEvaluateOnNewDocument", source="""
+        window.badges = [];
+        navigator.setAppBadge = (n) => { window.badges.push(n); return Promise.resolve(); };
+        navigator.clearAppBadge = () => { window.badges.push(0); return Promise.resolve(); };""")
+    last = lambda: b.js("window.badges.at(-1) ?? null")
+
+    def unread():
+        # From the last arrivals back (four or more at once make one note without its message).
+        top = new(s)["last"]
+        return next(n["message"] for k in range(top - 1, -1, -1) for n in new(s, k)["notes"] if n["message"])
+
+    def follows(what):
+        end = time.time() + 10
+        while time.time() < end and last() != badge(s):
+            b.settle(0.5)
+        check(last() == badge(s), f"{what}: the badge follows ({last()}, valet counts {badge(s)})")
+
+    b.go(WEB + "/calendar", 2)
+    follows("a page opened")
+    check(badge(s) > 0, "with new mail unread")
+    s.post(f"{WEB}/msg/{unread()}/seen")
+    follows("on the calendar, mail read from another app")
+    b.go(WEB + "/inbox", 2)
+    b.js("Object.defineProperty(document, 'hidden', { get: () => true })")
+    s.post(f"{WEB}/msg/{unread()}/seen")
+    follows("the inbox in the background, mail read from another app")
+    before = badge(s)
+    deliver("while hidden")
+    s.post(f"{WEB}/mail/refresh")
+    wait(lambda: badge(s) > before, "new mail")
+    follows("the inbox in the background, new mail")
+    b.go(WEB + "/settings", 3)
 
 
 def chrome(s, out):
@@ -105,6 +153,7 @@ def chrome(s, out):
             b.settle(1)
             got = [n for n in shown() if n[1].startswith("pushed one")]
         check(got and got[0][0] == "Carl Mo · Test", f"new mail: pushed and shown as a notification: {got}")
+        badges(b, s)
         check(not b.errors, f"no script errors: {b.errors}")
 
         b.js("document.getElementById('push-off').click()")
