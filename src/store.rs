@@ -92,6 +92,11 @@ CREATE TABLE IF NOT EXISTS push (
     endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, agent TEXT NOT NULL, created INTEGER NOT NULL);
 ";
 
+const COLORS: &[&str] = &["#3b82f6", "#16a34a", "#e11d48", "#f59e0b", "#8b5cf6", "#0891b2", "#db2777", "#65a30d"];
+/// The same, in another order: a pattern's badge stands out on the first
+/// calendars' events.
+pub const PATTERN_COLORS: &[&str] = &["#f59e0b", "#8b5cf6", "#e11d48", "#0891b2", "#16a34a", "#db2777", "#65a30d", "#3b82f6"];
+
 const CAL_COLS: &str = "id, name, color, description, ord, default_timed, default_allday, rev";
 const OBJ_COLS: &str = "calendar, name, uid, data, etag, rev, summary, dtstart, recurring";
 
@@ -185,6 +190,15 @@ impl Store {
         if !has_ring {
             c.execute_batch("ALTER TABLE patterns ADD COLUMN ring INTEGER NOT NULL DEFAULT 0;")?;
         }
+        // Added later: patterns' colours; those made before get the palette's.
+        let has_color: bool = c.query_row("SELECT COUNT(*) FROM pragma_table_info('patterns') WHERE name = 'color'", [], |r| r.get(0))?;
+        if !has_color {
+            c.execute_batch("ALTER TABLE patterns ADD COLUMN color TEXT NOT NULL DEFAULT '';")?;
+            let ids: Vec<i64> = c.prepare("SELECT id FROM patterns ORDER BY id")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            for (i, id) in ids.iter().enumerate() {
+                c.execute("UPDATE patterns SET color = ?2 WHERE id = ?1", params![id, PATTERN_COLORS[i % PATTERN_COLORS.len()]])?;
+            }
+        }
         Ok(())
     }
 
@@ -269,7 +283,6 @@ impl Store {
     /// False if the id is taken.
     pub fn create_calendar(&self, id: &str, name: &str, color: Option<&str>) -> Result<bool> {
         // Without a colour, the next of a few that tell calendars apart.
-        const COLORS: &[&str] = &["#3b82f6", "#16a34a", "#e11d48", "#f59e0b", "#8b5cf6", "#0891b2", "#db2777", "#65a30d"];
         let c = self.db();
         let count: i64 = c.query_row("SELECT COUNT(*) FROM calendars", [], |r| r.get(0))?;
         let color = color.unwrap_or(COLORS[count as usize % COLORS.len()]);
@@ -480,20 +493,36 @@ impl Store {
 
     /// Which rule gives `o` its alarms.
     pub fn source(&self, o: &Object) -> Source {
-        let patterns = self.patterns();
-        let Ok(Parsed { cal, .. }) = parse_object(&o.data) else { return Source::Nothing };
+        self.decision(&self.patterns(), o).0
+    }
+
+    /// Which rule gives `o` its alarms, and the pattern of `patterns` they follow.
+    pub fn decision(&self, patterns: &[Pattern], o: &Object) -> (Source, Option<i64>) {
+        let Ok(Parsed { cal, .. }) = parse_object(&o.data) else { return (Source::Nothing, None) };
         let c = self.db();
-        Self::rules(&c, &patterns, &o.calendar, &o.uid).map(|r| r.source(&cal)).unwrap_or(Source::Nothing)
+        Self::rules(&c, patterns, &o.calendar, &o.uid)
+            .map(|r| {
+                let (source, p) = r.decision(&cal);
+                (source, p.map(|p| p.id))
+            })
+            .unwrap_or((Source::Nothing, None))
     }
 
     // Patterns and choices
 
     pub fn patterns(&self) -> Vec<Pattern> {
         let c = self.db();
-        let mut st = c.prepare("SELECT id, name, tag, offsets, ring FROM patterns ORDER BY name").unwrap();
+        let mut st = c.prepare("SELECT id, name, tag, offsets, ring, color FROM patterns ORDER BY name").unwrap();
         st.query_map([], |r| {
             let offsets: String = r.get(3)?;
-            Ok(Pattern { id: r.get(0)?, name: r.get(1)?, tag: r.get(2)?, offsets: serde_json::from_str(&offsets).unwrap_or_default(), ring: r.get(4)? })
+            Ok(Pattern {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                tag: r.get(2)?,
+                offsets: serde_json::from_str(&offsets).unwrap_or_default(),
+                ring: r.get(4)?,
+                color: r.get(5)?,
+            })
         })
         .unwrap()
         .filter_map(Result::ok)
@@ -506,7 +535,12 @@ impl Store {
         let result = {
             let c = self.db();
             match id {
-                None => c.execute("INSERT INTO patterns (name, tag, offsets) VALUES (?1, ?2, ?3)", params![name, tag, json]),
+                // The next colour of the palette, until one is picked.
+                None => {
+                    let count: i64 = c.query_row("SELECT COUNT(*) FROM patterns", [], |r| r.get(0))?;
+                    let color = PATTERN_COLORS[count as usize % PATTERN_COLORS.len()];
+                    c.execute("INSERT INTO patterns (name, tag, offsets, color) VALUES (?1, ?2, ?3, ?4)", params![name, tag, json, color])
+                }
                 Some(id) => c.execute(
                     "UPDATE patterns SET name = ?2, tag = ?3, offsets = ?4 WHERE id = ?1",
                     params![id, name, tag, json],
@@ -526,6 +560,12 @@ impl Store {
     /// Whether the pattern's alerts ring like an alarm (on valet's Android app).
     pub fn set_ring(&self, id: i64, ring: bool) -> Result<()> {
         self.db().execute("UPDATE patterns SET ring = ?2 WHERE id = ?1", params![id, ring])?;
+        Ok(())
+    }
+
+    /// `#rrggbb`: the pattern's badge on the calendar's events.
+    pub fn set_pattern_color(&self, id: i64, color: &str) -> Result<()> {
+        self.db().execute("UPDATE patterns SET color = ?2 WHERE id = ?1", params![id, color])?;
         Ok(())
     }
 
@@ -626,6 +666,7 @@ mod tests {
         let (changed, deleted) = s.changes("work", rev0);
         assert_eq!((changed.len(), deleted.len()), (1, 0));
         assert_eq!(s.source(&o), Source::Default("Meeting".into()));
+        assert_eq!(s.decision(&s.patterns(), &o), (Source::Default("Meeting".into()), Some(meeting)));
 
         assert!(s.save_pattern(None, "Silent", "silent", &[]).unwrap());
         let silent = s.patterns().iter().find(|p| p.tag == "silent").unwrap().id;
@@ -637,6 +678,32 @@ mod tests {
         let rev1 = s.calendar("work").unwrap().rev;
         assert!(s.delete_object("work", "e1.ics").unwrap());
         assert_eq!(s.changes("work", rev1).1, ["e1.ics"]);
+    }
+
+    #[test]
+    fn patterns_get_colors() {
+        let s = store();
+        s.save_pattern(None, "A", "a", &[-10]).unwrap();
+        s.save_pattern(None, "B", "b", &[-10]).unwrap();
+        let colors: Vec<String> = s.patterns().into_iter().map(|p| p.color).collect();
+        assert_eq!(colors, PATTERN_COLORS[..2]);
+        let a = s.patterns()[0].id;
+        s.set_pattern_color(a, "#123456").unwrap();
+        assert_eq!(s.patterns()[0].color, "#123456");
+    }
+
+    #[test]
+    fn patterns_made_before_colors_get_some() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE patterns (id INTEGER PRIMARY KEY, name TEXT NOT NULL, tag TEXT NOT NULL UNIQUE, offsets TEXT NOT NULL);
+             INSERT INTO patterns (name, tag, offsets) VALUES ('A', 'a', '[-10]'), ('B', 'b', '[]');",
+        )
+        .unwrap();
+        Store::schema(&conn).unwrap();
+        let s = Store { conn: Mutex::new(conn) };
+        let colors: Vec<String> = s.patterns().into_iter().map(|p| p.color).collect();
+        assert_eq!(colors, PATTERN_COLORS[..2]);
     }
 
     #[test]

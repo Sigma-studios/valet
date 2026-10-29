@@ -57,6 +57,12 @@ def online():
     check(len(tops) == 1, f"every standup at the same height, days of daylight saving too ({tops})")
     hover = ev_title(b, "Standup (team)")
     check("Paris time (Europe/Paris, " in hover and "On this device (New York time)" in hover, f"an event's hover names the zone, and the device's time: {hover!r}")
+    # The pattern an event follows: a bell in its color, said on hover.
+    badge = b.js("(() => { const a = [...document.querySelectorAll('.cal-week .ev')].find(e => e.textContent.includes('Deep work'))?.querySelector('.alert'); return a ? [a.title, getComputedStyle(a, '::before').backgroundColor] : null })()")
+    check(badge and badge[0].startswith("Alerts: Focus (5 min before), by the #tag") and badge[1] == "rgb(124, 58, 237)", f"Deep work's badge, in Focus's color: {badge}")
+    check("Alerts: Focus" in ev_title(b, "Deep work"), "the event's hover names its alerts too")
+    check(not b.js("[...document.querySelectorAll('.cal-week .ev')].find(e => e.textContent.includes('Standup (team)')).querySelector('.alert')"), "no badge without a pattern")
+    check(b.js("[...document.querySelectorAll('.cal-patterns > span')].map(s => s.textContent).join(',')") == "Focus,Odd,Wake", "the patterns' colors explained by the calendars")
     b.shot(f"{shots}/week.png")
     b.js(f"location.hash = 'month/{day}'")
     wait(b, "document.querySelectorAll('.cal-month .cell').length >= 28", "the month view is drawn")
@@ -100,9 +106,9 @@ def online():
     b.go(f"{WEB}/calendar#week/{day}", 2)
     wait(b, "document.querySelector('.cal-zone')?.textContent === 'New York time'", "the calendar follows it")
     wait(b, "!!document.querySelector('.cal-week .ev')", "the week is drawn again")
-    # The week's first standup (its Monday), in New York: 5 or 6 hours earlier, as daylight saving goes.
-    monday = date.fromisoformat(day) - timedelta(days=date.fromisoformat(day).weekday())
-    ny = datetime.combine(monday, datetime.min.time().replace(hour=9, minute=30), ZoneInfo("Europe/Paris")).astimezone(ZoneInfo("America/New_York")).strftime("%H:%M")
+    # The week's first standup (its Monday, or the series' first day), in New York: 5 or 6 hours earlier, as daylight saving goes.
+    first = max(date.fromisoformat(day) - timedelta(days=date.fromisoformat(day).weekday()), date.fromisoformat(day))
+    ny = datetime.combine(first, datetime.min.time().replace(hour=9, minute=30), ZoneInfo("Europe/Paris")).astimezone(ZoneInfo("America/New_York")).strftime("%H:%M")
     check(ev_text(b, "Standup (team)").startswith(ny), f"09:30 in Paris is {ny} in New York ({ev_text(b, 'Standup (team)')!r})")
     check("On this device" not in ev_title(b, "Standup (team)"), "no second time when the device is in the zone shown")
     b.go(f"{WEB}/settings")
@@ -162,7 +168,7 @@ def online():
 
     # The pattern editor: rows, not a typed list.
     b.go(f"{WEB}/patterns")
-    href = b.js("document.querySelector('td a[href^=\"/patterns/\"]').getAttribute('href')")
+    href = b.js("[...document.querySelectorAll('td a[href^=\"/patterns/\"]')].find(a => a.textContent === 'Wake').getAttribute('href')")
     b.go(WEB + href)
     wait(b, "document.querySelectorAll('.alert-row').length === 2", "the Wake pattern shows two alert rows")
     b.js("[...document.querySelectorAll('.alert-add button')][0].click()")

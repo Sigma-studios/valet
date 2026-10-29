@@ -54,6 +54,12 @@ pub struct Instance {
     /// The mail that invitation came in, to open from its card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mail: Option<i64>,
+    /// The alert pattern it follows, for its badge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alert: Option<i64>,
+    /// Why: `tag`, `chosen` or `default`.
+    #[serde(rename = "alertBy", skip_serializing_if = "Option::is_none")]
+    pub alert_by: Option<&'static str>,
 }
 
 /// The zone of the settings until one is picked.
@@ -367,6 +373,8 @@ fn instances_where(o: &Object, from: i64, to: i64, me: &[String], keep: impl Fn(
             unanswered: unanswered(e, master, me),
             invite: None,
             mail: None,
+            alert: None,
+            alert_by: None,
         })
         .collect()
 }

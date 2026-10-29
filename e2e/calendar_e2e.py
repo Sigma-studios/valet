@@ -65,6 +65,25 @@ def main():
     h = next(e for e in feed["events"] if e["title"] == "Holidays")
     check(h["allDay"] and h["start"] == soon.isoformat() and h["end"] == (soon + timedelta(days=3)).isoformat(), "all-day: days, end excluded")
     check({c["id"] for c in feed["calendars"]} >= {"personal", "work"} and any(p["ring"] for p in feed["patterns"]), "calendars and patterns come along")
+    check(d.get("alert") == wake and d.get("alertBy") == "chosen", f"an event says the pattern it follows, and why: {d}")
+    check("alert" not in h, "one without a pattern says none")
+    p = next(p for p in feed["patterns"] if p["id"] == wake)
+    check(re.fullmatch(r"#[0-9a-f]{6}", p["color"]) and p["timed"] == ["6 h before", "2 h before"] and p["allDay"][0] == "18:00 the day before", f"patterns come with their color and alerts said: {p}")
+
+    # A pattern's color, picked; an event following it by its tag (it stays, for the browser's badge).
+    r = s.post(f"{WEB}/patterns", data={"name": "Focus", "tag": "focus", "alerts": "5m", "color": "#0d9488"})
+    check(flash(r)[0] == "Created Focus.", "pattern Focus, teal")
+    check(s.post(f"{WEB}/patterns", data={"name": "Odd", "tag": "odd", "alerts": "5m", "color": "red"}).ok, "a color that isn't one is ignored")
+    s.post(f"{WEB}/calendar/event", data={**form, "title": "Deep work #focus", "start_time": "14:00", "end_time": "16:00", "pattern": "", "location": "", "notes": ""})
+    feed = s.get(f"{WEB}/calendar/month/{month}").json()
+    focus = next(p for p in feed["patterns"] if p["tag"] == "focus")
+    odd = next(p for p in feed["patterns"] if p["tag"] == "odd")
+    deep = next(e for e in feed["events"] if e["title"] == "Deep work #focus")
+    check(focus["color"] == "#0d9488" and odd["color"].startswith("#") and deep["alert"] == focus["id"] and deep["alertBy"] == "tag", f"the tag's pattern, in its color: {deep}")
+    page = s.get(f"{WEB}/patterns/{focus['id']}").text
+    check('type="color" name="color" value="#0d9488"' in page, "its form keeps the color")
+    s.post(f"{WEB}/patterns/{focus['id']}", data={"name": "Focus", "tag": "focus", "alerts": "5m", "color": "#7c3aed"})
+    check(next(p for p in s.get(f"{WEB}/calendar/month/{month}").json()["patterns"] if p["tag"] == "focus")["color"] == "#7c3aed", "and saves a new one")
 
     one = s.get(f"{WEB}/calendar/event", params={"calendar": "personal", "name": standup}).json()
     check(one["repeat"] == "weekly" and one["pattern"] is None, "the series opens for editing")

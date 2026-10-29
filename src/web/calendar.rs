@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::*;
+use crate::alarms::{Source, describe_all_day, describe_offset};
 use crate::calendar::{self, Edit, Repeat};
 use crate::store::{PutError, name_for_uid};
 
@@ -71,6 +72,7 @@ pub async fn month(State(app): St, headers: HeaderMap, Path(key): Path<String>) 
         }
     }
     let mut mails: HashMap<String, Option<i64>> = HashMap::new();
+    let patterns = app.store.patterns();
     let events: Vec<calendar::Instance> = app
         .store
         .all_objects()
@@ -78,15 +80,35 @@ pub async fn month(State(app): St, headers: HeaderMap, Path(key): Path<String>) 
         .flat_map(|o| {
             let inv = invites.get(&o.uid);
             let mail = inv.and_then(|inv| *mails.entry(o.uid.clone()).or_insert_with(|| app.mail.message_with_id(&inv.account, &inv.message)));
-            calendar::instances(o, from, to, &me).into_iter().map(move |mut i| {
+            let mut found = calendar::instances(o, from, to, &me);
+            // The pattern its alerts follow (only for events in the month).
+            let (source, alert) = if found.is_empty() { (Source::Nothing, None) } else { app.store.decision(&patterns, o) };
+            let alert_by = match source {
+                Source::Tag(_) => Some("tag"),
+                Source::Chosen(_) => Some("chosen"),
+                Source::Default(_) => Some("default"),
+                Source::Manual | Source::Nothing => None,
+            };
+            for i in &mut found {
                 i.invite = i.unanswered.then(|| inv.map(|inv| inv.id)).flatten();
                 i.mail = mail;
-                i
-            })
+                (i.alert, i.alert_by) = (alert, alert_by);
+            }
+            found
         })
         .collect();
     let calendars: Vec<_> = app.store.calendars().into_iter().map(|c| json!({ "id": c.id, "name": c.name, "color": c.color })).collect();
-    let patterns: Vec<_> = app.store.patterns().into_iter().map(|p| json!({ "id": p.id, "name": p.name, "tag": p.tag, "ring": p.ring })).collect();
+    // Its alerts said for timed and all-day events, for the badges' hover.
+    let patterns: Vec<_> = patterns
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.id, "name": p.name, "tag": p.tag, "ring": p.ring, "color": p.color,
+                "timed": p.offsets.iter().map(|m| describe_offset(*m)).collect::<Vec<_>>(),
+                "allDay": p.offsets.iter().map(|m| describe_all_day(*m)).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     axum::Json(json!({ "month": key, "at": crate::mailstore::now(), "calendars": calendars, "patterns": patterns, "events": events })).into_response()
 }
 

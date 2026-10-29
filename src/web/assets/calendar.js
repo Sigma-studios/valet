@@ -74,6 +74,25 @@
   const color = (id) => (calendars.find((c) => c.id === id) || {}).color || '#3b82f6';
   const calName = (id) => (calendars.find((c) => c.id === id) || {}).name || id;
 
+  // The alert pattern an event follows: a bell in the pattern's color (on
+  // its color when it rings like an alarm, struck out when silent).
+  const patternOf = (e) => e.alert != null && patterns.find((p) => p.id === e.alert);
+  const alertsText = (p, allDay) => {
+    const list = allDay ? p.allDay : p.timed;
+    return (list && list.length ? list.join(', ') : 'no alert') + (p.ring ? ', ringing like an alarm' : '');
+  };
+  const alertWhy = (e) => e.alertBy === 'tag' ? 'by the #tag in its title'
+    : e.alertBy === 'chosen' ? 'chosen for this event' : `${calName(e.calendar)}'s default`;
+  const alertNote = (e) => {
+    const p = patternOf(e);
+    return p ? `Alerts: ${p.name} (${alertsText(p, e.allDay)}), ${alertWhy(e)}` : '';
+  };
+  const badge = (p, title) => el('span', {
+    class: 'alert' + (p.ring ? ' ring' : '') + (p.timed && !p.timed.length ? ' silent' : ''),
+    style: `--a:${p.color}`, title, 'aria-label': title, role: 'img',
+  });
+  const alertBadge = (e) => { const p = patternOf(e); return p ? badge(p, alertNote(e)) : null; };
+
   // The events overlapping [from, to), from the months covering it.
   async function eventsIn(from, to) {
     const keys = [];
@@ -123,7 +142,10 @@
         localStorage.setItem('valet.cal.hidden', JSON.stringify([...hidden]));
         render();
       } }),
-      el('span', { class: 'dot', style: `background:${c.color}` }), c.name)));
+      el('span', { class: 'dot', style: `background:${c.color}` }), c.name)),
+      // What the badges' colors stand for.
+      patterns.length ? el('a', { class: 'cal-patterns', href: '/patterns', title: 'Alert patterns: change their colors' },
+        patterns.map((p) => el('span', {}, badge(p, `${p.name}: ${alertsText(p, false)}`), p.name))) : null);
   }
 
   function note(status) {
@@ -135,7 +157,8 @@
   }
 
   // An event's hover: its title, and for timed ones when, in which zone.
-  const hover = (e) => (e.allDay ? e.title : `${e.title}\n${T.note(e.start * 1000)}`) + (e.unanswered ? '\nNot answered yet' : '');
+  const hover = (e) => (e.allDay ? e.title : `${e.title}\n${T.note(e.start * 1000)}`) + (e.unanswered ? '\nNot answered yet' : '')
+    + (patternOf(e) ? `\n${alertNote(e)}` : '');
 
   // Invitations not answered yet are drawn hollow, in their calendar's color.
   function chip(e, day) {
@@ -145,7 +168,7 @@
       style: `--c:${color(e.calendar)}`,
       title: hover(e),
       onclick: (ev) => { ev.stopPropagation(); show(e); },
-    }, e.allDay ? null : el('span', { class: 'd' }), startsHere ? el('span', { class: 't' }, fTime.format(e.s)) : null, e.title || '(no title)');
+    }, e.allDay ? null : el('span', { class: 'd' }), startsHere ? el('span', { class: 't' }, fTime.format(e.s)) : null, alertBadge(e), e.title || '(no title)');
   }
 
   async function month() {
@@ -230,7 +253,7 @@
           style: `top:${p.top}px; height:${p.height - 2}px; left:calc(${p.col * w}% + 1px); width:calc(${w}% - 3px); --c:${color(p.e.calendar)}`,
           title: hover(p.e),
           onclick: (ev) => { ev.stopPropagation(); show(p.e); },
-        }, el('div', {}, p.e.title || '(no title)'), el('div', { class: 't' }, `${fTime.format(p.e.s)} – ${fTime.format(p.e.f)}`)));
+        }, el('div', {}, alertBadge(p.e), p.e.title || '(no title)'), el('div', { class: 't' }, `${fTime.format(p.e.s)} – ${fTime.format(p.e.f)}`)));
       }
       if (sameDay(d, today())) {
         const n = T.wall(Date.now());
@@ -286,6 +309,7 @@
         e.allDay ? null : [' · ', el('span', { 'data-zone': '', title: T.note(e.start * 1000) }, T.label)],
         e.repeats ? ' · repeats' : '', el('br'),
         el('span', { class: 'dot', style: `display:inline-block;width:9px;height:9px;border-radius:50%;background:${color(e.calendar)};margin-right:5px` }), calName(e.calendar),
+        patternOf(e) ? [el('br'), alertBadge(e), alertNote(e)] : null,
         e.location ? [el('br'), '📍 ', e.location] : null,
         e.mail ? [el('br'), '✉️ ', el('a', { href: `/msg/${e.mail}` }, 'The invitation mail')] : null),
       e.unanswered ? answering(e, online) : null,
