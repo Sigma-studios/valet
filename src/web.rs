@@ -480,6 +480,8 @@ struct PatternForm {
     alerts: String,
     #[serde(default)]
     ring: Option<String>,
+    #[serde(default)]
+    color: String,
 }
 
 fn spec_of(p: &Pattern) -> String {
@@ -509,10 +511,12 @@ fn spec_of(p: &Pattern) -> String {
         .join(", ")
 }
 
-fn pattern_fields(p: Option<&Pattern>) -> Markup {
+/// `color`: the pattern's, or for a new one the next of the palette.
+fn pattern_fields(p: Option<&Pattern>, color: &str) -> Markup {
     html! {
         label { "Name" input name="name" required value=[p.map(|p| &p.name)] placeholder="Meeting"; }
         label { "Tag (for titles)" input name="tag" required value=[p.map(|p| &p.tag)] placeholder="meeting" pattern="[A-Za-z0-9_\\-]+"; }
+        label title="Its badge on the calendar's events" { "Color" input type="color" name="color" value=(color); }
         div.alerts-box data-alerts=(serde_json::to_string(&p.map(|p| p.offsets.clone()).unwrap_or_else(|| vec![-10])).unwrap_or_default()) {
             label { "Alerts" input name="alerts" value=[p.map(spec_of)] placeholder="12m, 2m" size="24"; }
         }
@@ -525,6 +529,12 @@ fn pattern_fields(p: Option<&Pattern>) -> Markup {
 
 const SPEC_HELP: &str = "Alerts before or after the start are for events at a time; alerts at a time of day are for all-day events \
     (which start at midnight: 9:00 the same day, 18:00 the day before). A pattern with no alert keeps events silent (#silent).";
+
+/// The form's colour, when it is one (`#rrggbb`).
+fn color_of(f: &PatternForm) -> Option<&str> {
+    let c = f.color.trim();
+    (c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|x| x.is_ascii_hexdigit())).then_some(c)
+}
 
 fn check_pattern(f: &PatternForm) -> Result<(String, String, Vec<i64>), String> {
     let name = f.name.trim().to_string();
@@ -549,7 +559,7 @@ async fn patterns_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>)
                 tr { th { "Pattern" } th { "Tag" } th { "Alerts" } th { "On all-day events" } th {} }
                 @for p in &patterns {
                     tr {
-                        td { a href={"/patterns/" (p.id)} { (p.name) } }
+                        td { span style={"color:" (p.color)} { "● " } a href={"/patterns/" (p.id)} { (p.name) } }
                         td { code { "#" (p.tag) } }
                         td { (pattern_alerts(p)) @if p.ring { br; span.small { "⏰ rings on the Android app" } } }
                         td.muted.small { @for (i, m) in p.offsets.iter().enumerate() { @if i > 0 { ", " } (describe_all_day(*m)) } }
@@ -562,7 +572,7 @@ async fn patterns_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>)
         }
         h2 { "New pattern" }
         form.card.row method="post" action="/patterns" {
-            (pattern_fields(None))
+            (pattern_fields(None, crate::store::PATTERN_COLORS[patterns.len() % crate::store::PATTERN_COLORS.len()]))
             button type="submit" { "Create" }
         }
         p.muted.small { (SPEC_HELP) }
@@ -580,6 +590,9 @@ async fn create_pattern(State(app): St, headers: HeaderMap, Form(f): Form<Patter
         Ok(true) => {
             if let Some(p) = app.store.patterns().into_iter().find(|p| p.tag == tag) {
                 let _ = app.store.set_ring(p.id, f.ring.is_some());
+                if let Some(color) = color_of(&f) {
+                    let _ = app.store.set_pattern_color(p.id, color);
+                }
             }
             back("/patterns", Some(&format!("Created {name}.")), None)
         }
@@ -596,7 +609,7 @@ async fn edit_pattern_page(State(app): St, headers: HeaderMap, Path(id): Path<i6
         h1 { "Edit " (p.name) }
         (flash(&m))
         form.card.row method="post" action={"/patterns/" (p.id)} {
-            (pattern_fields(Some(p)))
+            (pattern_fields(Some(p), &p.color))
             button type="submit" { "Save" }
         }
         p.muted.small { (SPEC_HELP) " Saving updates the alerts of every event using this pattern, on all your devices." }
@@ -614,6 +627,9 @@ async fn save_pattern(State(app): St, headers: HeaderMap, Path(id): Path<i64>, F
     match app.store.save_pattern(Some(id), &name, &tag, &offsets) {
         Ok(true) => {
             let _ = app.store.set_ring(id, f.ring.is_some());
+            if let Some(color) = color_of(&f) {
+                let _ = app.store.set_pattern_color(id, color);
+            }
             back("/patterns", Some(&format!("Saved {name}.")), None)
         }
         Ok(false) => back(&here, None, Some(&format!("Another pattern already uses #{tag}."))),
@@ -2002,7 +2018,7 @@ mod tests {
         assert!(starts(&ics(";TZID=America/New_York:20261023T100000")).into_string().contains("23/10/2026 16:00"));
         assert_eq!(starts(&ics(";VALUE=DATE:20261023")).into_string(), "23/10/2026, all day");
         assert_eq!(today().len(), 8);
-        let p = Pattern { id: 1, name: "x".into(), tag: "x".into(), offsets: vec![-1620, -12, 540], ring: false };
+        let p = Pattern { id: 1, name: "x".into(), tag: "x".into(), offsets: vec![-1620, -12, 540], ring: false, color: String::new() };
         assert_eq!(spec_of(&p), "1d 3h, 12m, 09:00");
         assert_eq!(alarms::parse_spec(&spec_of(&p)).unwrap(), vec![-1620, -12, 540]);
     }

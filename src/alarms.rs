@@ -21,6 +21,8 @@ pub struct Pattern {
     pub offsets: Vec<i64>,
     /// Its alerts ring like an alarm on valet's Android app.
     pub ring: bool,
+    /// `#rrggbb`: its badge on the calendar's events.
+    pub color: String,
 }
 
 pub struct Rules<'a> {
@@ -96,9 +98,10 @@ impl Rules<'_> {
         !self.patterns.iter().any(|p| sorted(p.offsets.iter().map(|m| m * 60).collect()) == triggers)
     }
 
-    /// What applies to the event, for display: its first VEVENT decides.
-    pub fn source(&self, cal: &Component) -> Source {
-        cal.children.iter().find(|c| c.name == "VEVENT").map(|ev| self.decide(ev).0).unwrap_or(Source::Nothing)
+    /// What applies to the event, and the pattern it follows, for display:
+    /// its first VEVENT decides.
+    pub fn decision(&self, cal: &Component) -> (Source, Option<&Pattern>) {
+        cal.children.iter().find(|c| c.name == "VEVENT").map(|ev| self.decide(ev)).unwrap_or((Source::Nothing, None))
     }
 
     /// Rewrites the alarms of every VEVENT in `cal`; true if anything changed.
@@ -253,10 +256,10 @@ mod tests {
 
     fn patterns() -> Vec<Pattern> {
         vec![
-            Pattern { id: 1, name: "Meeting".into(), tag: "meeting".into(), offsets: vec![-12, -2], ring: false },
-            Pattern { id: 2, name: "Flight".into(), tag: "flight".into(), offsets: vec![-1440, -180], ring: true },
-            Pattern { id: 3, name: "Morning".into(), tag: "morning".into(), offsets: vec![540], ring: false },
-            Pattern { id: 4, name: "Silent".into(), tag: "silent".into(), offsets: vec![], ring: false },
+            Pattern { id: 1, name: "Meeting".into(), tag: "meeting".into(), offsets: vec![-12, -2], ring: false, color: String::new() },
+            Pattern { id: 2, name: "Flight".into(), tag: "flight".into(), offsets: vec![-1440, -180], ring: true, color: String::new() },
+            Pattern { id: 3, name: "Morning".into(), tag: "morning".into(), offsets: vec![540], ring: false, color: String::new() },
+            Pattern { id: 4, name: "Silent".into(), tag: "silent".into(), offsets: vec![], ring: false, color: String::new() },
         ]
     }
 
@@ -284,7 +287,7 @@ mod tests {
         let mut cal = event("Standup", "DTSTART:20261023T080000Z", &[]);
         assert!(r.apply(&mut cal));
         assert_eq!(triggers(&cal), ["-PT12M", "-PT2M"]);
-        assert_eq!(r.source(&cal), Source::Default("Meeting".into()));
+        assert_eq!(r.decision(&cal).0, Source::Default("Meeting".into()));
         assert!(!r.apply(&mut cal), "applying twice changes nothing");
 
         let mut day = event("Birthday", "DTSTART;VALUE=DATE:20261023", &[]);
@@ -299,7 +302,7 @@ mod tests {
         let mut cal = event("Dentist", "DTSTART:20261023T080000Z", &["-PT1H"]);
         assert!(!r.apply(&mut cal));
         assert_eq!(triggers(&cal), ["-PT1H"]);
-        assert_eq!(r.source(&cal), Source::Manual);
+        assert_eq!(r.decision(&cal).0, Source::Manual);
     }
 
     #[test]
@@ -329,12 +332,12 @@ mod tests {
         let r = rules(&p, Some(4));
         assert!(r.apply(&mut cal));
         assert_eq!(triggers(&cal), ["-P1D", "-PT3H"]);
-        assert_eq!(r.source(&cal), Source::Tag("Flight".into()));
+        assert_eq!(r.decision(&cal).0, Source::Tag("Flight".into()));
 
         let mut cal = event("Lyon", "DTSTART:20261023T080000Z", &["-PT1H"]);
         assert!(r.apply(&mut cal));
         assert!(triggers(&cal).is_empty(), "the chosen Silent pattern removes the manual alarm");
-        assert_eq!(r.source(&cal), Source::Chosen("Silent".into()));
+        assert_eq!(r.decision(&cal).0, Source::Chosen("Silent".into()));
     }
 
     #[test]
