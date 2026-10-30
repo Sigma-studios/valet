@@ -88,7 +88,7 @@ and deleted at the provider.
 
 ### Mail rules
 
-*Mail rules* in the webmail's sidebar send new inbox mail from a sender
+*Mail rules* in Settings send new inbox mail from a sender
 (`someone@acme.com`, or `@acme.com` for a domain and its subdomains) straight
 to a folder of the tree: an address's own rule first, then the closest
 domain's. The move happens at the provider too, and a rule covers every
@@ -133,7 +133,7 @@ search waits once typing stops (100 ms unless changed), mail accounts
 (an address out of service can *stop syncing, keep the mail*: its mail
 stays readable everywhere, in the combined folders too, while valet no
 longer logs in to it or sends from it, and changes to its mail stay in
-valet; *Sync again* undoes it), calendars and their default patterns, alert patterns, the alerts of each
+valet; *Sync again* undoes it), [mail rules](#mail-rules), calendars and their default patterns, alert patterns, the alerts of each
 event, `.ics` import (Google, Outlook, IONOS exports; importing again updates
 instead of duplicating), and how to connect each app.
 
