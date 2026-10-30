@@ -16,6 +16,16 @@ pub struct Rule {
     pub node: Option<i64>,
 }
 
+/// What a message's reader offers, by its From address.
+pub struct Offer {
+    pub address: String,
+    /// The rule it follows now.
+    pub rule: Option<Rule>,
+    /// What a new rule could go by: its address, its domain, those free. None
+    /// if the address has its own rule.
+    pub senders: Vec<String>,
+}
+
 /// What was typed as a rule's sender, as kept: an address (`Name <a@b.c>` will
 /// do) or a domain (`@b.c`, `b.c`), in lower case.
 fn sender_key(typed: &str) -> Result<String> {
@@ -42,6 +52,13 @@ fn closest<'a>(rules: &'a [Rule], mailbox: &str, host: &str) -> Option<&'a Rule>
         None => r.sender == address,
     };
     rules.iter().filter(applies).max_by_key(|r| (!r.sender.starts_with('@'), r.sender.len()))
+}
+
+/// (mailbox, host) of a message's From address.
+fn from_of(raw: &[u8]) -> Option<(String, String)> {
+    let p = crate::mime::parse(raw);
+    let (_, mailbox, host) = crate::mime::addresses(&p.header(raw, "From")?).into_iter().next()?;
+    (!host.is_empty()).then_some((mailbox, host))
 }
 
 impl MailStore {
@@ -82,9 +99,21 @@ impl MailStore {
 
     /// The node this message's rule files it into, if any: by its From address.
     pub fn rule_for(&self, raw: &[u8]) -> Option<i64> {
-        let p = crate::mime::parse(raw);
-        let (_, mailbox, host) = crate::mime::addresses(&p.header(raw, "From")?).into_iter().next()?;
+        let (mailbox, host) = from_of(raw)?;
         closest(&self.rules(), &mailbox, &host)?.node
+    }
+
+    pub fn offer(&self, raw: &[u8]) -> Option<Offer> {
+        let (mailbox, host) = from_of(raw)?;
+        let (address, domain) = (format!("{mailbox}@{host}").to_lowercase(), format!("@{host}").to_lowercase());
+        let rules = self.rules();
+        let rule = closest(&rules, &mailbox, &host).cloned();
+        let senders = if rule.as_ref().is_some_and(|r| r.sender == address) {
+            Vec::new()
+        } else {
+            [address.clone(), domain].into_iter().filter(|s| !rules.iter().any(|r| r.sender == *s)).collect()
+        };
+        Some(Offer { address, rule, senders })
     }
 }
 
@@ -119,6 +148,23 @@ mod tests {
         assert_eq!(s.rule_for(&from("info@eu.mail.acme.com")), Some(sub), "the closest domain");
         assert_eq!(s.rule_for(&from("info@notacme.com")), None);
         assert_eq!(s.rule_for(b"Subject: nobody\r\n\r\nbody\r\n"), None);
+    }
+
+    #[test]
+    fn a_message_offers_what_is_free() {
+        let s = MailStore::memory();
+        let node = s.create_node(None, "News").unwrap();
+        let offered = |sender: &str| {
+            let o = s.offer(&from(sender)).unwrap();
+            (o.rule.map(|r| r.sender), o.senders)
+        };
+        assert_eq!(offered("Zoe <Zoe@Mail.Acme.com>"), (None, vec!["zoe@mail.acme.com".to_string(), "@mail.acme.com".to_string()]));
+        s.add_rule("@acme.com", node).unwrap();
+        assert_eq!(offered("zoe@acme.com"), (Some("@acme.com".to_string()), vec!["zoe@acme.com".to_string()]), "its domain has a rule: its address can");
+        assert_eq!(offered("zoe@mail.acme.com").1, ["zoe@mail.acme.com", "@mail.acme.com"], "a subdomain can too");
+        s.add_rule("zoe@acme.com", node).unwrap();
+        assert_eq!(offered("zoe@acme.com"), (Some("zoe@acme.com".to_string()), vec![]), "its own rule: nothing more");
+        assert!(s.offer(b"Subject: nobody\r\n\r\nbody\r\n").is_none());
     }
 
     #[test]

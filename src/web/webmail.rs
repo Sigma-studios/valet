@@ -441,6 +441,8 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 .toolbar button.refresh:disabled { opacity:.7; cursor:progress; }
 .headers { margin-bottom:12px; } .headers h1 { margin:0 0 8px; }
 .headers .meta { color:var(--muted); font-size:13px; }
+.make-rule { font-size:13px; } .make-rule summary { cursor:pointer; color:var(--accent); width:fit-content; }
+.make-rule form { margin:6px 0 2px; } .make-rule label.also { flex-direction:row; align-items:center; gap:4px; }
 .reader iframe { width:100%; border:0; background:#fff; border-radius:6px; min-height:200px; display:block; }
 .reader pre { white-space:pre-wrap; word-wrap:break-word; font:inherit; margin:0; }
 .atts { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
@@ -1406,6 +1408,8 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
         })
         .collect();
     let flagged = has_flag(&src, "\\Flagged");
+    // Rules are for others' mail, not your own.
+    let offer = app.mail.offer(&raw).filter(|o| !app.accounts().iter().any(|a| a.sends_as(&o.address)));
     // What each action form carries: where to come back to.
     let hidden = html! {
         input type="hidden" name="back" value=(back);
@@ -1451,6 +1455,30 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
             div.headers {
                 h1 { (subject) }
                 div { b { (everyone(m.from())) } }
+                @if let Some(o) = &offer {
+                    @if let Some(r) = &o.rule {
+                        div.meta { "Mail from " (r.sender) " "
+                            @match r.node.and_then(|n| app.mail.mailbox(n)) {
+                                Some(b) => { "goes to " (place_name(&b)) }
+                                None => { "has a rule waiting for a folder" }
+                            }
+                            ". " a href="/rules" { "Edit" }
+                        }
+                    }
+                    @if !o.senders.is_empty() {
+                        details.make-rule {
+                            summary { "Make a rule…" }
+                            form.row method="post" action={"/msg/" (id)} {
+                                (hidden)
+                                input type="hidden" name="action" value="rule";
+                                label { "Mail from" select name="sender" { @for s in &o.senders { option value=(s) { (s) } } } }
+                                label { "Goes to" (rule_folders(&tree, app.mail.all_inboxes(), None)) }
+                                label.also { input type="checkbox" name="also" value="1" checked; "Move this message too" }
+                                button type="submit" { "Add rule" }
+                            }
+                        }
+                    }
+                }
                 div.meta { "To " (everyone(m.to()))
                     @let cc = everyone(m.cc()); @if !cc.is_empty() { br; "Cc " (cc) } }
                 div.meta { (time(src.date, true)) " · " (place_name(&folder)) }
@@ -1632,6 +1660,13 @@ pub struct ActionForm {
     list: Option<String>,
     #[serde(default)]
     to: Option<String>,
+    /// Making a rule from it: the sender, the folder, and whether it goes too.
+    #[serde(default)]
+    sender: Option<String>,
+    #[serde(default)]
+    node: Option<String>,
+    #[serde(default)]
+    also: Option<String>,
 }
 
 /// Each account's Spam and Trash folders, by what they're called.
@@ -1792,6 +1827,22 @@ pub async fn action(State(app): St, headers: HeaderMap, Path(id): Path<i64>, axu
                     app.mail.copy(&[src.id], t.id, true).map(|_| (list.clone(), Some("Moved.")))
                 }
                 _ => return back(&here, None, Some("Pick one of your folders, or a folder of the same account.")),
+            }
+        }
+        "rule" => {
+            let node = f.node.as_deref().and_then(|n| n.parse::<i64>().ok());
+            match node.ok_or_else(|| anyhow::anyhow!("choose a folder")).and_then(|n| app.mail.add_rule(f.sender.as_deref().unwrap_or(""), n).map(|_| n)) {
+                Ok(node) => match folder.account.as_deref().filter(|_| f.also.is_some()) {
+                    Some(acc) => {
+                        let moved = match crate::folders::member_in(&app, node, acc).await {
+                            Ok(_) => app.mail.copy(&[src.id], node, true).map(|_| ()),
+                            Err(e) => Err(e),
+                        };
+                        moved.map(|_| (list.clone(), Some("Rule added, and this message moved."))).map_err(|e| e.context("the rule is added, but this message couldn't be moved"))
+                    }
+                    None => Ok((here.clone(), Some("Rule added."))),
+                },
+                Err(e) => Err(e),
             }
         }
         "delete" => match delete(&app, &[(src.id, folder.clone())]) {
