@@ -89,6 +89,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/tree/{id}", post(webmail::node_action))
         .route("/rules", get(webmail::rules_page).post(webmail::create_rule))
         .route("/rules/{id}", post(webmail::save_rule))
+        .route("/rules/{id}/inbox", post(webmail::file_rule))
         .route("/rules/{id}/delete", post(webmail::delete_rule))
 }
 

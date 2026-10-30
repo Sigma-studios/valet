@@ -25,6 +25,8 @@ use tokio::sync::{Notify, broadcast, watch};
 mod rules;
 mod tree;
 
+pub use rules::rule_of;
+
 pub use tree::{ALL_MAIL, Node, Place, SPECIALS, Shift};
 
 pub const ALL_INBOXES: &str = "INBOX";

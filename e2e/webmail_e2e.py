@@ -688,6 +688,36 @@ def mail_rules(s, inbox):
     for sender in ("boss@corp.test", "@corp.test"):
         s.post(f"{WEB}/rules/{rule(sender)}/delete")
 
+    # Mail already in the inboxes, when asked.
+    arrive("test", "old-1", "letters@old.test")
+    arrive("test", "old-2", "hi@mail.old.test")
+    arrive("org", "old-3", "letters@old.test")
+    arrive("test", "old-vip", "vip@old.test")
+    arrive("test", "old-other", "x@older.test")
+    wait(lambda: all(n in rows(s, inbox) for n in ("old-1", "old-2", "old-3", "old-vip", "old-other")), "mail from a sender already in the inboxes")
+    s.post(f"{WEB}/rules", data={"sender": "vip@old.test", "node": str(spam)})
+    r = s.post(f"{WEB}/rules", data={"sender": "@old.test", "node": str(bosses), "inbox": "1"})
+    check(flash(r)[0] == "Rule added, and 3 messages moved.", f"a new rule moves it, when asked: {flash(r)}")
+    wait(lambda: {"old-1", "old-2"} <= set(gm_subjects("test", "Bosses")) and "old-3" in gm_subjects("org", "Bosses"), "at the provider, in each account")
+    left = rows(s, inbox)
+    check(not {"old-1", "old-2", "old-3"} & set(left) and {"old-vip", "old-other"} <= set(left), "a closer rule's mail and others' stay")
+    check("old-vip" in gm_subjects("test", "INBOX"), "at the provider too")
+
+    r = s.post(f"{WEB}/rules/{rule('vip@old.test')}/inbox")
+    check(flash(r)[0] == "Moved 1 message.", f"a rule's Move inbox mail: {flash(r)}")
+    wait(lambda: "old-vip" in gm_subjects("test", "Spam"), "it moved")
+    r = s.post(f"{WEB}/rules/{rule('vip@old.test')}/inbox")
+    check(flash(r)[0] == "No mail in the inbox follows it.", "nothing more")
+
+    arrive("test", "seen-1", "m@msg.test")
+    arrive("test", "seen-2", "m@msg.test")
+    first = wait(lambda: rows(s, inbox).get("seen-1") if "seen-2" in rows(s, inbox) else None, "two messages from one sender")
+    r = made(first, sender="m@msg.test", node=str(bosses), also="1", inbox="1")
+    check(flash(r)[0] == "Rule added, and 2 messages moved." and flash(r)[1] is None, f"from a message: it and the rest, once each: {flash(r)}")
+    wait(lambda: {"seen-1", "seen-2"} <= set(gm_subjects("test", "Bosses")), "both at the provider")
+    for sender in ("@old.test", "vip@old.test", "m@msg.test"):
+        s.post(f"{WEB}/rules/{rule(sender)}/delete")
+
 
 def search_delay(s, inbox):
     """How long typing a search waits: a setting, 100 ms at first, for the mail's and the invitations' pages."""

@@ -61,6 +61,12 @@ fn from_of(raw: &[u8]) -> Option<(String, String)> {
     (!host.is_empty()).then_some((mailbox, host))
 }
 
+/// The rule mail from this address follows.
+pub fn rule_of<'a>(rules: &'a [Rule], address: &str) -> Option<&'a Rule> {
+    let (mailbox, host) = address.rsplit_once('@')?;
+    closest(rules, mailbox, host)
+}
+
 impl MailStore {
     pub fn rules(&self) -> Vec<Rule> {
         let c = self.db();
@@ -147,6 +153,10 @@ mod tests {
         assert_eq!(s.rule_for(&from("info@eu.acme.com")), Some(news), "subdomains too");
         assert_eq!(s.rule_for(&from("info@eu.mail.acme.com")), Some(sub), "the closest domain");
         assert_eq!(s.rule_for(&from("info@notacme.com")), None);
+        let rules = s.rules();
+        assert_eq!(rule_of(&rules, "ZOE@acme.com").map(|r| r.node), Some(Some(zoe)));
+        assert_eq!(rule_of(&rules, "info@eu.acme.com").map(|r| r.node), Some(Some(news)));
+        assert!(rule_of(&rules, "info@notacme.com").is_none() && rule_of(&rules, "nobody").is_none());
         assert_eq!(s.rule_for(b"Subject: nobody\r\n\r\nbody\r\n"), None);
     }
 
