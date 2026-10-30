@@ -339,6 +339,7 @@ fn sidebar(app: &App, current: i64) -> Markup {
                 }
             }
             a.edit-tree href="/tree" { "Edit folders" }
+            a.edit-tree href="/rules" { "Mail rules" }
             details.accounts #accounts open[in_accounts] {
                 summary { span.twisty { (PreEscaped(CHEVRON)) } "Accounts" }
                 @for (a, boxes) in &per {
@@ -351,6 +352,7 @@ fn sidebar(app: &App, current: i64) -> Markup {
         select.folders-menu onchange="location = this.value" {
             @for (n, b) in &tree { option value={"/box/" (b.id)} selected[b.id == current] { (indent(n.depth)) (short_name(b)) } }
             option value="/tree" { "Edit folders…" }
+            option value="/rules" { "Mail rules…" }
             @for (a, boxes) in &per {
                 optgroup label={"Accounts › " (a.name)} {
                     @for b in boxes { option value={"/box/" (b.id)} selected[b.id == current] { (short_name(b)) } }
@@ -2212,6 +2214,91 @@ pub async fn reset_tree(State(app): St, headers: HeaderMap) -> Response {
     match app.mail.reset_tree() {
         Ok(()) => back("/tree", Some("Back to the default tree."), None),
         Err(e) => back("/tree", None, Some(&format!("{e:#}"))),
+    }
+}
+
+// Mail rules
+
+/// The folders a rule can file into, with the one it does selected.
+fn rule_folders(tree: &[(Node, Mailbox)], inbox: i64, on: Option<i64>) -> Markup {
+    html! {
+        select name="node" aria-label="Folder" required {
+            @if on.is_none() { option value="" selected { "Choose a folder…" } }
+            @for (n, b) in tree.iter().filter(|(n, b)| n.id != inbox && !b.is_all_mail()) {
+                option value=(n.id) selected[on == Some(n.id)] { (indent(n.depth)) (short_name(b)) }
+            }
+        }
+    }
+}
+
+pub async fn rules_page(State(app): St, headers: HeaderMap, Query(m): Query<super::Msg>) -> Response {
+    guard!(app, headers);
+    let (tree, _) = folders(&app);
+    let inbox = app.mail.all_inboxes();
+    let rules = app.mail.rules();
+    mail_page("Mail rules", 0, &app, html! {
+        h1 { "Mail rules" }
+        (flash(&m))
+        p.muted.small { "New mail coming into an inbox from these senders goes straight to the folder, at the provider too, without a notification. "
+            "Invitations in it still reach the calendar. Mail already there stays; a message moved back from valet stays in the inbox. "
+            "A rule covers every account: a folder an account doesn't have yet is made there, as when moving mail by hand." }
+        div.card {
+            @if rules.is_empty() { p.muted.small style="margin:0" { "No rule yet." } }
+            @for r in &rules {
+                form.row method="post" action={"/rules/" (r.id)} style="padding:5px 0" {
+                    input name="sender" value=(r.sender) aria-label="Sender" required;
+                    (rule_folders(&tree, inbox, r.node))
+                    button type="submit" { "Save" }
+                    button.plain type="submit" formaction={"/rules/" (r.id) "/delete"} formnovalidate { "Delete" }
+                    @if r.node.is_none() { span.err.small { "Its folder was deleted: choose another. Until then, this mail stays in the inbox." } }
+                }
+            }
+        }
+        h2 { "New rule" }
+        form.card.row method="post" action="/rules" {
+            label { "From" input name="sender" placeholder="someone@acme.com or @acme.com" style="width:280px" required; }
+            label { "Goes to" (rule_folders(&tree, inbox, None)) }
+            button type="submit" { "Add" }
+        }
+        p.muted.small { "@acme.com covers the domain and its subdomains. An address's own rule comes first, then the closest domain's." }
+    })
+}
+
+#[derive(Deserialize)]
+pub struct RuleForm {
+    #[serde(default)]
+    sender: String,
+    #[serde(default)]
+    node: String,
+}
+
+impl RuleForm {
+    fn node(&self) -> anyhow::Result<i64> {
+        self.node.parse().map_err(|_| anyhow::anyhow!("choose a folder"))
+    }
+}
+
+pub async fn create_rule(State(app): St, headers: HeaderMap, axum::extract::Form(f): axum::extract::Form<RuleForm>) -> Response {
+    guard!(app, headers);
+    match f.node().and_then(|node| app.mail.add_rule(&f.sender, node)) {
+        Ok(_) => back("/rules", Some("Rule added."), None),
+        Err(e) => back("/rules", None, Some(&format!("{e:#}"))),
+    }
+}
+
+pub async fn save_rule(State(app): St, headers: HeaderMap, Path(id): Path<i64>, axum::extract::Form(f): axum::extract::Form<RuleForm>) -> Response {
+    guard!(app, headers);
+    match f.node().and_then(|node| app.mail.set_rule(id, &f.sender, node)) {
+        Ok(()) => back("/rules", Some("Saved."), None),
+        Err(e) => back("/rules", None, Some(&format!("{e:#}"))),
+    }
+}
+
+pub async fn delete_rule(State(app): St, headers: HeaderMap, Path(id): Path<i64>) -> Response {
+    guard!(app, headers);
+    match app.mail.delete_rule(id) {
+        Ok(()) => back("/rules", Some("Deleted."), None),
+        Err(e) => back("/rules", None, Some(&format!("{e:#}"))),
     }
 }
 

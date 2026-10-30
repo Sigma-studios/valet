@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, broadcast, watch};
 
+mod rules;
 mod tree;
 
 pub use tree::{ALL_MAIL, Node, Place, SPECIALS, Shift};
@@ -214,6 +215,7 @@ CREATE TABLE IF NOT EXISTS invites (
     summary TEXT NOT NULL, organizer TEXT NOT NULL, dtstart TEXT NOT NULL, ics TEXT NOT NULL,
     response TEXT, received INTEGER NOT NULL, message TEXT NOT NULL DEFAULT '', UNIQUE (account, uid, method, sequence));
 CREATE TABLE IF NOT EXISTS arrivals (seq INTEGER PRIMARY KEY AUTOINCREMENT, message INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rules (id INTEGER PRIMARY KEY, sender TEXT NOT NULL UNIQUE, node INTEGER);
 -- Search: the words of each message kept (see `search_text`), by blob; the
 -- index alone is kept, not the text. Accents and case don't count.
 CREATE TABLE IF NOT EXISTS searched (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE);
