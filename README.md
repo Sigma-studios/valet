@@ -91,7 +91,9 @@ and deleted at the provider.
 *Mail rules* in Settings send new inbox mail from a sender
 (`someone@acme.com`, or `@acme.com` for a domain and its subdomains) straight
 to a folder of the tree: an address's own rule first, then the closest
-domain's. The move happens at the provider too, and a rule covers every
+domain's. A message's *Make a rule…*, under its sender, makes one from it,
+for its address or domain, and moves it along unless unticked; what the
+sender's rule is shows there too. The move happens at the provider too, and a rule covers every
 account, each message going to the folder in its own account (made there if
 needed). Mail filed this way doesn't notify or count on the badge; invitations
 in it still reach the calendar. Rules look at the From header, which senders

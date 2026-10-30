@@ -656,6 +656,38 @@ def mail_rules(s, inbox):
     arrive("test", "rule-gone", "hi@news.test")
     wait(lambda: "rule-gone" in rows(s, inbox), "without a rule, mail stays in the inbox")
 
+    # From a message.
+    s.post(f"{WEB}/tree", data={"name": "Bosses", "parent": ""})
+    bosses = node_id(s, "Bosses")
+    made = lambda id, **f: s.post(f"{WEB}/msg/{id}", data={"action": "rule", "back": str(inbox), **f})
+    senders = lambda page: re.findall(r'<option value="([^"]+)">\1</option>', page.split('name="sender"')[1].split("</select>")[0]) if 'name="sender"' in page else []
+    arrive("test", "from-boss", "Boss <Boss@corp.test>")
+    boss = wait(lambda: rows(s, inbox).get("from-boss"), "a message to make a rule from")
+    page = s.get(f"{WEB}/msg/{boss}").text
+    check("Make a rule…" in page and senders(page) == ["boss@corp.test", "@corp.test"], f"it offers its address, then its domain: {senders(page)}")
+    check(flash(made(boss, sender="boss@corp.test"))[1] == "choose a folder", "a rule from a message needs a folder too")
+    check(flash(made(boss, sender="boss@corp.test", node=str(bosses), also="1"))[0] == "Rule added, and this message moved.", "rule made, message moved")
+    wait(lambda: "from-boss" in gm_subjects("test", "Bosses"), "it moved at the provider, its folder made")
+    check("from-boss" not in rows(s, inbox), "and left the inbox")
+    arrive("test", "from-boss-2", "boss@corp.test")
+    wait(lambda: "from-boss-2" in gm_subjects("test", "Bosses"), "the sender's next mail follows")
+    moved = wait(lambda: rows(s, bosses).get("from-boss"), "it is in the folder")
+    page = s.get(f"{WEB}/msg/{moved}").text
+    check("Mail from boss@corp.test goes to Bosses" in page and 'href="/rules"' in page and "Make a rule…" not in page, "its message says so, with Edit, and offers no other")
+    check(flash(made(moved, sender="boss@corp.test", node=str(bosses)))[1] == "boss@corp.test has a rule already", "one rule per sender, there too")
+
+    arrive("test", "from-corp", "ann@corp.test")
+    ann = wait(lambda: rows(s, inbox).get("from-corp"), "another sender of that domain")
+    check(flash(made(ann, sender="@corp.test", node=str(bosses)))[0] == "Rule added.", "unticked: the rule alone")
+    check("from-corp" in rows(s, inbox), "the message stays")
+    page = s.get(f"{WEB}/msg/{ann}").text
+    check("Mail from @corp.test goes to Bosses" in page and senders(page) == ["ann@corp.test"], f"its domain's rule shown, its address still free: {senders(page)}")
+    arrive("test", "from-me", "test@local.test")
+    mine = wait(lambda: rows(s, inbox).get("from-me"), "a message from one of my addresses")
+    check("Make a rule…" not in s.get(f"{WEB}/msg/{mine}").text, "offers no rule")
+    for sender in ("boss@corp.test", "@corp.test"):
+        s.post(f"{WEB}/rules/{rule(sender)}/delete")
+
 
 def search_delay(s, inbox):
     """How long typing a search waits: a setting, 100 ms at first, for the mail's and the invitations' pages."""
