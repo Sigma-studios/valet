@@ -1474,6 +1474,7 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
                                 label { "Mail from" select name="sender" { @for s in &o.senders { option value=(s) { (s) } } } }
                                 label { "Goes to" (rule_folders(&tree, app.mail.all_inboxes(), None)) }
                                 label.also { input type="checkbox" name="also" value="1" checked; "Move this message too" }
+                                label.also { input type="checkbox" name="inbox" value="1"; "And what's in the inbox from them" }
                                 button type="submit" { "Add rule" }
                             }
                         }
@@ -1667,6 +1668,8 @@ pub struct ActionForm {
     node: Option<String>,
     #[serde(default)]
     also: Option<String>,
+    #[serde(default)]
+    inbox: Option<String>,
 }
 
 /// Each account's Spam and Trash folders, by what they're called.
@@ -1831,19 +1834,37 @@ pub async fn action(State(app): St, headers: HeaderMap, Path(id): Path<i64>, axu
         }
         "rule" => {
             let node = f.node.as_deref().and_then(|n| n.parse::<i64>().ok());
-            match node.ok_or_else(|| anyhow::anyhow!("choose a folder")).and_then(|n| app.mail.add_rule(f.sender.as_deref().unwrap_or(""), n).map(|_| n)) {
-                Ok(node) => match folder.account.as_deref().filter(|_| f.also.is_some()) {
-                    Some(acc) => {
-                        let moved = match crate::folders::member_in(&app, node, acc).await {
-                            Ok(_) => app.mail.copy(&[src.id], node, true).map(|_| ()),
-                            Err(e) => Err(e),
-                        };
-                        moved.map(|_| (list.clone(), Some("Rule added, and this message moved."))).map_err(|e| e.context("the rule is added, but this message couldn't be moved"))
-                    }
-                    None => Ok((here.clone(), Some("Rule added."))),
-                },
-                Err(e) => Err(e),
+            let added = node.ok_or_else(|| anyhow::anyhow!("choose a folder")).and_then(|n| Ok((n, app.mail.add_rule(f.sender.as_deref().unwrap_or(""), n)?)));
+            let (node, rule) = match added {
+                Ok(a) => a,
+                Err(e) => return back(&here, None, Some(&format!("{e:#}"))),
+            };
+            let (mut moved, mut trouble) = (0, None);
+            if let Some(acc) = folder.account.as_deref().filter(|_| f.also.is_some()) {
+                let this = match crate::folders::member_in(&app, node, acc).await {
+                    Ok(_) => app.mail.copy(&[src.id], node, true),
+                    Err(e) => Err(e),
+                };
+                match this {
+                    Ok(_) => moved = 1,
+                    Err(e) => trouble = Some(format!("the rule is added, but this message couldn't be moved: {e:#}")),
+                }
             }
+            if f.inbox.is_some() {
+                let (n, e) = file_inbox(&app, rule).await;
+                moved += n;
+                trouble = trouble.or(e);
+            }
+            if let Some(acc) = &folder.account {
+                app.mail.waker(acc).notify_one();
+            }
+            let said = match moved {
+                0 => "Rule added.".to_string(),
+                1 if f.inbox.is_none() => "Rule added, and this message moved.".to_string(),
+                n => format!("Rule added, and {} moved.", messages(n)),
+            };
+            let to = if app.mail.message(id).is_some() { &here } else { &list };
+            return back(to, Some(&said), trouble.as_deref());
         }
         "delete" => match delete(&app, &[(src.id, folder.clone())]) {
             Ok(0) => Ok((list.clone(), Some("Deleted."))),
@@ -2268,6 +2289,41 @@ pub async fn reset_tree(State(app): St, headers: HeaderMap) -> Response {
 
 // Mail rules
 
+fn messages(n: usize) -> String {
+    if n == 1 { "1 message".to_string() } else { format!("{n} messages") }
+}
+
+/// Moves the mail already in live accounts' inboxes that follows this rule
+/// (not the mail another, closer rule has): how many, and what went wrong.
+async fn file_inbox(app: &Arc<App>, rule: i64) -> (usize, Option<String>) {
+    let rules = app.mail.rules();
+    let Some(node) = rules.iter().find(|r| r.id == rule).and_then(|r| r.node) else { return (0, Some("that rule has no folder".into())) };
+    let (mut moved, mut trouble) = (0, None);
+    for b in app.mail.mailboxes().into_iter().filter(|b| !b.is_node() && b.is_inbox()) {
+        let Some(acc) = b.account.as_deref().and_then(|a| app.account(a)).filter(|a| a.retired.is_none()) else { continue };
+        let follows = |m: &Msg| {
+            let Some(f) = facts(app, &m.blob) else { return false };
+            f.from.first().and_then(|(_, address)| crate::mailstore::rule_of(&rules, address)).is_some_and(|r| r.id == rule)
+        };
+        let ids: Vec<i64> = app.mail.messages(b.id).iter().filter(|m| follows(m)).map(|m| m.id).collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let done = match crate::folders::member_in(app, node, &acc.id).await {
+            // Its folder here is this inbox: nothing to move.
+            Ok(folder) if folder == b.id => continue,
+            Ok(_) => app.mail.copy(&ids, node, true),
+            Err(e) => Err(e),
+        };
+        match done {
+            Ok(_) => moved += ids.len(),
+            Err(e) => trouble = Some(format!("{}: {e:#}", acc.name)),
+        }
+        app.mail.waker(&acc.id).notify_one();
+    }
+    (moved, trouble)
+}
+
 /// The folders a rule can file into, with the one it does selected.
 fn rule_folders(tree: &[(Node, Mailbox)], inbox: i64, on: Option<i64>) -> Markup {
     html! {
@@ -2289,7 +2345,7 @@ pub async fn rules_page(State(app): St, headers: HeaderMap, Query(m): Query<supe
         h1 { "Mail rules" }
         (flash(&m))
         p.muted.small { "New mail coming into an inbox from these senders goes straight to the folder, at the provider too, without a notification. "
-            "Invitations in it still reach the calendar. Mail already there stays; a message moved back from valet stays in the inbox. "
+            "Invitations in it still reach the calendar. Mail already there stays unless you ask for it to move; a message moved back from valet stays in the inbox. "
             "A rule covers every account: a folder an account doesn't have yet is made there, as when moving mail by hand." }
         div.card {
             @if rules.is_empty() { p.muted.small style="margin:0" { "No rule yet." } }
@@ -2298,6 +2354,7 @@ pub async fn rules_page(State(app): St, headers: HeaderMap, Query(m): Query<supe
                     input name="sender" value=(r.sender) aria-label="Sender" required;
                     (rule_folders(&tree, inbox, r.node))
                     button type="submit" { "Save" }
+                    @if r.node.is_some() { button.plain style="color:var(--fg)" type="submit" formaction={"/rules/" (r.id) "/inbox"} formnovalidate title="Move the mail already in the inbox that follows this rule" { "Move inbox mail" } }
                     button.plain type="submit" formaction={"/rules/" (r.id) "/delete"} formnovalidate { "Delete" }
                     @if r.node.is_none() { span.err.small { "Its folder was deleted: choose another. Until then, this mail stays in the inbox." } }
                 }
@@ -2307,6 +2364,7 @@ pub async fn rules_page(State(app): St, headers: HeaderMap, Query(m): Query<supe
         form.card.row method="post" action="/rules" {
             label { "From" input name="sender" placeholder="someone@acme.com or @acme.com" style="width:280px" required; }
             label { "Goes to" (rule_folders(&tree, inbox, None)) }
+            label style="flex-direction:row; align-items:center; gap:4px" { input type="checkbox" name="inbox" value="1"; "Move what's in the inbox from them too" }
             button type="submit" { "Add" }
         }
         p.muted.small { "@acme.com covers the domain and its subdomains. An address's own rule comes first, then the closest domain's." }
@@ -2319,6 +2377,8 @@ pub struct RuleForm {
     sender: String,
     #[serde(default)]
     node: String,
+    #[serde(default)]
+    inbox: Option<String>,
 }
 
 impl RuleForm {
@@ -2330,6 +2390,10 @@ impl RuleForm {
 pub async fn create_rule(State(app): St, headers: HeaderMap, axum::extract::Form(f): axum::extract::Form<RuleForm>) -> Response {
     guard!(app, headers);
     match f.node().and_then(|node| app.mail.add_rule(&f.sender, node)) {
+        Ok(rule) if f.inbox.is_some() => {
+            let (n, trouble) = file_inbox(&app, rule).await;
+            back("/rules", Some(&format!("Rule added, and {} moved.", messages(n))), trouble.as_deref())
+        }
         Ok(_) => back("/rules", Some("Rule added."), None),
         Err(e) => back("/rules", None, Some(&format!("{e:#}"))),
     }
@@ -2341,6 +2405,14 @@ pub async fn save_rule(State(app): St, headers: HeaderMap, Path(id): Path<i64>, 
         Ok(()) => back("/rules", Some("Saved."), None),
         Err(e) => back("/rules", None, Some(&format!("{e:#}"))),
     }
+}
+
+/// A rule's *Move inbox mail*.
+pub async fn file_rule(State(app): St, headers: HeaderMap, Path(id): Path<i64>) -> Response {
+    guard!(app, headers);
+    let (n, trouble) = file_inbox(&app, id).await;
+    let said = if n == 0 { "No mail in the inbox follows it.".to_string() } else { format!("Moved {}.", messages(n)) };
+    back("/rules", (trouble.is_none() || n > 0).then_some(said.as_str()), trouble.as_deref())
 }
 
 pub async fn delete_rule(State(app): St, headers: HeaderMap, Path(id): Path<i64>) -> Response {
