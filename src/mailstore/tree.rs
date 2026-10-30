@@ -512,6 +512,7 @@ impl MailStore {
             c.execute("DELETE FROM tree_members WHERE node = ?1", [id])?;
             c.execute("DELETE FROM tree WHERE mailbox = ?1", [id])?;
             c.execute("DELETE FROM mailboxes WHERE id = ?1", [id])?;
+            c.execute("UPDATE rules SET node = NULL WHERE node = ?1", [id])?;
             Ok(())
         })
     }
@@ -588,6 +589,10 @@ impl MailStore {
     pub fn reset_tree(&self) -> Result<()> {
         self.in_tx(|c| {
             let inbox = inbox_id(c)?;
+            let rules: Vec<(i64, String)> = {
+                let mut st = c.prepare("SELECT r.id, m.name FROM rules r JOIN mailboxes m ON m.id = r.node")?;
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+            };
             for n in load(c)?.into_iter().filter(|n| n.id != inbox) {
                 c.execute("DELETE FROM messages WHERE mailbox = ?1", [n.id])?;
                 c.execute("DELETE FROM tree_members WHERE node = ?1", [n.id])?;
@@ -599,6 +604,10 @@ impl MailStore {
             set_members_in(c, inbox, &inboxes)?;
             place(c, &unplaced_in(c))?;
             make_all_mail(c)?;
+            // A rule follows its folder, if the new tree has one of that name.
+            for (id, name) in rules {
+                c.execute("UPDATE rules SET node = (SELECT id FROM mailboxes WHERE name = ?2 AND account IS NULL) WHERE id = ?1", params![id, name])?;
+            }
             Ok(())
         })
     }

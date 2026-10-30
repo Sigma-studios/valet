@@ -86,6 +86,20 @@ Each account's real folders stay reachable under `Accounts/<Account>/…`
 (collapsed under *Accounts* in the webmail); there, folders are made, renamed
 and deleted at the provider.
 
+### Mail rules
+
+*Mail rules* in the webmail's sidebar send new inbox mail from a sender
+(`someone@acme.com`, or `@acme.com` for a domain and its subdomains) straight
+to a folder of the tree: an address's own rule first, then the closest
+domain's. The move happens at the provider too, and a rule covers every
+account, each message going to the folder in its own account (made there if
+needed). Mail filed this way doesn't notify or count on the badge; invitations
+in it still reach the calendar. Rules look at the From header, which senders
+can fake, and only at mail arriving from then on. A message moved back from
+valet stays in the inbox; moved back directly at the provider, it looks new, so
+the rule files it again. If a rule's folder is deleted, the rule waits for
+another and its mail stays in the inbox.
+
 ## Alert patterns
 
 A pattern is a named, reusable set of alerts with a tag: *Meeting* (`#meeting`)

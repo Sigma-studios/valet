@@ -87,6 +87,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/tree/reset", post(webmail::reset_tree))
         .route("/tree/add/{folder}", post(webmail::add_to_tree))
         .route("/tree/{id}", post(webmail::node_action))
+        .route("/rules", get(webmail::rules_page).post(webmail::create_rule))
+        .route("/rules/{id}", post(webmail::save_rule))
+        .route("/rules/{id}/delete", post(webmail::delete_rule))
 }
 
 const COOKIE: &str = "valet_session";

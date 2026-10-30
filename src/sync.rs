@@ -298,7 +298,7 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder, co
                 added += 1;
                 if f.remote == "INBOX" {
                     invites::from_mail(app, acc, body);
-                    if !first && !flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")) {
+                    if !first && !by_rule(app, acc, f.mailbox, id, body).await && !flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")) {
                         arrived.push(id);
                     }
                 }
@@ -358,6 +358,23 @@ async fn sync_folder(app: &Arc<App>, acc: &Account, s: &mut Imap, f: &Folder, co
         }
     }
     Ok((added, Some(now)))
+}
+
+/// Files a message just come into the inbox as a rule says (making the folder
+/// in its account if needed); whether it left the inbox. If it can't, it stays.
+async fn by_rule(app: &Arc<App>, acc: &Account, inbox: i64, id: i64, raw: &[u8]) -> bool {
+    let Some(node) = app.mail.rule_for(raw) else { return false };
+    let filed = async {
+        if crate::folders::member_in(app, node, &acc.id).await? == inbox {
+            return Ok(false);
+        }
+        app.mail.copy(&[id], node, true)?;
+        anyhow::Ok(true)
+    };
+    filed.await.unwrap_or_else(|e| {
+        tracing::warn!(account = %acc.id, node, "a mail rule couldn't file a message: {e:#}");
+        false
+    })
 }
 
 /// How far back a folder's first sync goes; the rest comes after.

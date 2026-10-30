@@ -257,6 +257,7 @@ def main():
     retiring(s, inbox)
     # After storage (Settings shows what's used, worked out at most every minute).
     search_delay(s, inbox)
+    mail_rules(s, inbox)
     if len(sys.argv) > 1 and os.access(__import__("cdp").CHROME, os.X_OK):
         scrolling(s, sys.argv[1])
 
@@ -591,6 +592,69 @@ def scrolling(s, out):
         check(not b.errors, f"no script errors: {b.errors}")
     finally:
         b.close()
+
+
+def mail_rules(s, inbox):
+    """New inbox mail from a sender goes to a folder, at the provider too, in each account; no notification."""
+    badge = lambda: s.get(f"{WEB}/mail/badge.json").json()["badge"]
+    def arrive(user, subject, frm):
+        g = gm_imap(user)
+        g.append("INBOX", None, None, message(subject, frm=frm, to=f"{user}@local.test"))
+        g.logout()
+        check(s.post(f"{WEB}/mail/refresh").ok, f"{subject} arrives")
+
+    s.post(f"{WEB}/tree", data={"name": "Newsletters", "parent": ""})
+    news, spam = node_id(s, "Newsletters"), node_id(s, "Spam")
+    check('href="/rules"' in s.get(f"{WEB}/box/{inbox}").text and "No rule yet." in s.get(f"{WEB}/rules").text, "the sidebar leads to the rules, none yet")
+    for sender, node in (("acme", news), ("a@b.c, d@e.f", news), ("a@b.c", inbox), ("a@b.c", node_id(s, "All mail"))):
+        check(flash(s.post(f"{WEB}/rules", data={"sender": sender, "node": str(node)}))[1], f"{sender!r} into {node} refused")
+    check(flash(s.post(f"{WEB}/rules", data={"sender": "a@b.c", "node": ""}))[1] == "choose a folder", "a rule needs a folder")
+
+    for sender, node in (("@news.test", news), ("Zoe <ZOE@news.test>", spam), ("someone@else.org", news)):
+        check(flash(s.post(f"{WEB}/rules", data={"sender": sender, "node": str(node)}))[0] == "Rule added.", f"rule for {sender}")
+    check(flash(s.post(f"{WEB}/rules", data={"sender": "@NEWS.test", "node": str(spam)}))[1] == "@news.test has a rule already", "one rule per sender")
+    rule = lambda sender: re.search(rf'action="/rules/(\d+)"[^>]*>\s*<input name="sender" value="{re.escape(sender)}"', s.get(f"{WEB}/rules").text).group(1)
+
+    # Mail already there stays, though someone@else.org has a rule now.
+    before, known = badge(), rows(s, inbox)
+    check(s.post(f"{WEB}/mail/refresh").ok and rows(s, inbox) == known, "mail already in the inbox stays")
+    s.post(f"{WEB}/rules/{rule('someone@else.org')}/delete")
+
+    arrive("test", "rule-domain", "Acme <hi@mail.news.test>")
+    wait(lambda: "rule-domain" in gm_subjects("test", "Newsletters"), "a subdomain's mail is in the folder, made at the provider")
+    check("rule-domain" not in gm_subjects("test", "INBOX"), "and out of the provider's inbox")
+    wait(lambda: "rule-domain" in rows(s, news) and "rule-domain" not in rows(s, inbox), "valet shows it there")
+    arrive("org", "rule-org", "hi@news.test")
+    wait(lambda: "rule-org" in gm_subjects("org", "Newsletters"), "a rule covers every account: the folder is made in Org too")
+    arrive("test", "rule-zoe", "zoe@news.test")
+    wait(lambda: "rule-zoe" in gm_subjects("test", "Spam"), "an address's rule before its domain's")
+    check(badge() == before, "filed mail doesn't count on the badge")
+    arrive("test", "rule-none", "other@elsewhere.test")
+    wait(lambda: "rule-none" in rows(s, inbox), "other mail stays in the inbox")
+    check(badge() == before + 1 and "rule-none" in gm_subjects("test", "INBOX"), "and counts")
+
+    # Moved back from valet, it stays.
+    r = s.post(f"{WEB}/msg/{rows(s, news)['rule-domain']}", data={"action": "move", "to": str(inbox), "back": str(news)})
+    check(flash(r)[0] == "Moved.", "move it back to the inbox")
+    wait(lambda: "rule-domain" in gm_subjects("test", "INBOX"), "it is back at the provider")
+    s.post(f"{WEB}/mail/refresh")
+    s.post(f"{WEB}/mail/refresh")
+    check("rule-domain" in rows(s, inbox) and "rule-domain" in gm_subjects("test", "INBOX"), "the rule leaves it there")
+
+    # Its folder deleted, a rule waits for another.
+    s.post(f"{WEB}/tree/{news}", data={"action": "delete"})
+    check("Its folder was deleted: choose another" in s.get(f"{WEB}/rules").text, "a rule without its folder says so")
+    arrive("test", "rule-waiting", "hi@news.test")
+    wait(lambda: "rule-waiting" in rows(s, inbox), "its mail stays in the inbox")
+    check("rule-waiting" in gm_subjects("test", "INBOX"), "at the provider too")
+    r = s.post(f"{WEB}/rules/{rule('@news.test')}", data={"sender": "@news.test", "node": str(spam)})
+    check(flash(r)[0] == "Saved." and "Its folder was deleted" not in r.text, "another folder chosen")
+    arrive("test", "rule-again", "hi@news.test")
+    wait(lambda: "rule-again" in gm_subjects("test", "Spam"), "it files again")
+    for sender in ("@news.test", "zoe@news.test"):
+        check(flash(s.post(f"{WEB}/rules/{rule(sender)}/delete"))[0] == "Deleted.", f"{sender}'s rule deleted")
+    arrive("test", "rule-gone", "hi@news.test")
+    wait(lambda: "rule-gone" in rows(s, inbox), "without a rule, mail stays in the inbox")
 
 
 def search_delay(s, inbox):
