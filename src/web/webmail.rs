@@ -339,7 +339,6 @@ fn sidebar(app: &App, current: i64) -> Markup {
                 }
             }
             a.edit-tree href="/tree" { "Edit folders" }
-            a.edit-tree href="/rules" { "Mail rules" }
             details.accounts #accounts open[in_accounts] {
                 summary { span.twisty { (PreEscaped(CHEVRON)) } "Accounts" }
                 @for (a, boxes) in &per {
@@ -352,7 +351,6 @@ fn sidebar(app: &App, current: i64) -> Markup {
         select.folders-menu onchange="location = this.value" {
             @for (n, b) in &tree { option value={"/box/" (b.id)} selected[b.id == current] { (indent(n.depth)) (short_name(b)) } }
             option value="/tree" { "Edit folders…" }
-            option value="/rules" { "Mail rules…" }
             @for (a, boxes) in &per {
                 optgroup label={"Accounts › " (a.name)} {
                     @for b in boxes { option value={"/box/" (b.id)} selected[b.id == current] { (short_name(b)) } }
@@ -2236,7 +2234,7 @@ pub async fn rules_page(State(app): St, headers: HeaderMap, Query(m): Query<supe
     let (tree, _) = folders(&app);
     let inbox = app.mail.all_inboxes();
     let rules = app.mail.rules();
-    mail_page("Mail rules", 0, &app, html! {
+    page("Mail rules", "/rules", html! {
         h1 { "Mail rules" }
         (flash(&m))
         p.muted.small { "New mail coming into an inbox from these senders goes straight to the folder, at the provider too, without a notification. "

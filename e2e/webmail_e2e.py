@@ -605,7 +605,7 @@ def mail_rules(s, inbox):
 
     s.post(f"{WEB}/tree", data={"name": "Newsletters", "parent": ""})
     news, spam = node_id(s, "Newsletters"), node_id(s, "Spam")
-    check('href="/rules"' in s.get(f"{WEB}/box/{inbox}").text and "No rule yet." in s.get(f"{WEB}/rules").text, "the sidebar leads to the rules, none yet")
+    check('href="/rules"' in s.get(f"{WEB}/settings").text and "No rule yet." in s.get(f"{WEB}/rules").text, "Settings leads to the rules, none yet")
     for sender, node in (("acme", news), ("a@b.c, d@e.f", news), ("a@b.c", inbox), ("a@b.c", node_id(s, "All mail"))):
         check(flash(s.post(f"{WEB}/rules", data={"sender": sender, "node": str(node)}))[1], f"{sender!r} into {node} refused")
     check(flash(s.post(f"{WEB}/rules", data={"sender": "a@b.c", "node": ""}))[1] == "choose a folder", "a rule needs a folder")

@@ -138,6 +138,7 @@ fn waiting(app: &App) -> Vec<crate::mailstore::Invite> {
 const SETTINGS: &[(&str, &str)] = &[
     ("/settings", "Overview"),
     ("/mail", "Mail accounts"),
+    ("/rules", "Mail rules"),
     ("/storage", "Storage"),
     ("/calendars", "Calendars"),
     ("/patterns", "Alert patterns"),
