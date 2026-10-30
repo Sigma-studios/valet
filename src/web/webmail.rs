@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use super::*;
 use crate::accounts::Account;
-use crate::mailstore::{ALL_INBOXES, ALL_MAIL, Mailbox, Msg, Node, Place, SPECIALS, Shift, StoreMode};
+use crate::mailstore::{ALL_INBOXES, ALL_MAIL, Mailbox, Msg, Node, Place, Rule, SPECIALS, Shift, StoreMode};
 
 /// Rows a list shows at first, and fetches at a time as it is scrolled.
 const PAGE: usize = 50;
@@ -2293,25 +2293,36 @@ fn messages(n: usize) -> String {
     if n == 1 { "1 message".to_string() } else { format!("{n} messages") }
 }
 
+/// The inboxes of live accounts, each with its mail by the rule it follows
+/// (not a rule whose folder there is that inbox itself: nothing to move).
+fn inbox_mail(app: &App, rules: &[Rule]) -> Vec<(Account, Vec<(i64, i64)>)> {
+    let inboxes = app.mail.mailboxes().into_iter().filter(|b| !b.is_node() && b.is_inbox());
+    inboxes
+        .filter_map(|b| {
+            let acc = b.account.as_deref().and_then(|a| app.account(a)).filter(|a| a.retired.is_none())?;
+            let rule_of = |m: &Msg| {
+                let f = facts(app, &m.blob)?;
+                let r = crate::mailstore::rule_of(rules, &f.from.first()?.1)?;
+                (r.node.is_some_and(|n| app.mail.member_of(n, &acc.id) != Some(b.id))).then_some((m.id, r.id))
+            };
+            let mail = app.mail.messages(b.id).iter().filter_map(rule_of).collect();
+            Some((acc, mail))
+        })
+        .collect()
+}
+
 /// Moves the mail already in live accounts' inboxes that follows this rule
 /// (not the mail another, closer rule has): how many, and what went wrong.
 async fn file_inbox(app: &Arc<App>, rule: i64) -> (usize, Option<String>) {
     let rules = app.mail.rules();
     let Some(node) = rules.iter().find(|r| r.id == rule).and_then(|r| r.node) else { return (0, Some("that rule has no folder".into())) };
     let (mut moved, mut trouble) = (0, None);
-    for b in app.mail.mailboxes().into_iter().filter(|b| !b.is_node() && b.is_inbox()) {
-        let Some(acc) = b.account.as_deref().and_then(|a| app.account(a)).filter(|a| a.retired.is_none()) else { continue };
-        let follows = |m: &Msg| {
-            let Some(f) = facts(app, &m.blob) else { return false };
-            f.from.first().and_then(|(_, address)| crate::mailstore::rule_of(&rules, address)).is_some_and(|r| r.id == rule)
-        };
-        let ids: Vec<i64> = app.mail.messages(b.id).iter().filter(|m| follows(m)).map(|m| m.id).collect();
+    for (acc, mail) in inbox_mail(app, &rules) {
+        let ids: Vec<i64> = mail.iter().filter(|(_, r)| *r == rule).map(|(m, _)| *m).collect();
         if ids.is_empty() {
             continue;
         }
         let done = match crate::folders::member_in(app, node, &acc.id).await {
-            // Its folder here is this inbox: nothing to move.
-            Ok(folder) if folder == b.id => continue,
             Ok(_) => app.mail.copy(&ids, node, true),
             Err(e) => Err(e),
         };
@@ -2341,6 +2352,13 @@ pub async fn rules_page(State(app): St, headers: HeaderMap, Query(m): Query<supe
     let (tree, _) = folders(&app);
     let inbox = app.mail.all_inboxes();
     let rules = app.mail.rules();
+    // What each rule's button would move.
+    let mut waiting: std::collections::HashMap<i64, usize> = Default::default();
+    for (_, mail) in inbox_mail(&app, &rules) {
+        for (_, rule) in mail {
+            *waiting.entry(rule).or_default() += 1;
+        }
+    }
     page("Mail rules", "/rules", html! {
         h1 { "Mail rules" }
         (flash(&m))
@@ -2354,7 +2372,12 @@ pub async fn rules_page(State(app): St, headers: HeaderMap, Query(m): Query<supe
                     input name="sender" value=(r.sender) aria-label="Sender" required;
                     (rule_folders(&tree, inbox, r.node))
                     button type="submit" { "Save" }
-                    @if r.node.is_some() { button.plain style="color:var(--fg)" type="submit" formaction={"/rules/" (r.id) "/inbox"} formnovalidate title="Move the mail already in the inbox that follows this rule" { "Move inbox mail" } }
+                    @if r.node.is_some() {
+                        @match waiting.get(&r.id) {
+                            Some(n) => { button.plain style="color:var(--fg)" type="submit" formaction={"/rules/" (r.id) "/inbox"} formnovalidate title="Move the mail already in the inbox that follows this rule" { "Move " (messages(*n)) " from the inbox" } }
+                            None => { span.muted.small { "Nothing in the inbox to move" } }
+                        }
+                    }
                     button.plain type="submit" formaction={"/rules/" (r.id) "/delete"} formnovalidate { "Delete" }
                     @if r.node.is_none() { span.err.small { "Its folder was deleted: choose another. Until then, this mail stays in the inbox." } }
                 }
