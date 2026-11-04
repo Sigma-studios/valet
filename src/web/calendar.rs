@@ -258,6 +258,9 @@ pub struct AnswerForm {
     answer: String,
     #[serde(default)]
     calendar: String,
+    /// The alert pattern's id; empty: automatic.
+    #[serde(default)]
+    pattern: String,
 }
 
 /// Answers an invitation from its event's card, as the Invitations page
@@ -279,7 +282,7 @@ pub async fn answer(State(app): St, headers: HeaderMap, form: Result<axum::extra
         return refused("not answered: unknown answer");
     }
     let calendar = (!f.calendar.is_empty()).then_some(f.calendar.as_str());
-    match crate::invites::respond(&app, f.invite, &f.answer, calendar).await {
+    match crate::invites::respond(&app, f.invite, &f.answer, calendar, f.pattern.parse().ok()).await {
         Ok(()) => axum::Json(json!({ "ok": true, "waiting": waiting(&app).len() })).into_response(),
         Err(e) => refused(format!("not answered: {e:#}")),
     }

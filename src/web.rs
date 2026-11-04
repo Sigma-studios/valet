@@ -1401,6 +1401,7 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(mut q): Quer
     let all_calendars = app.store.calendars();
     let calendars: Vec<&Calendar> = all_calendars.iter().filter(|c| c.id != crate::invites::CALENDAR).collect();
     let calendar_name = |id: &str| all_calendars.iter().find(|c| c.id == id).map_or(id.to_string(), |c| c.name.clone());
+    let patterns = app.store.patterns();
     let unanswered = found.iter().any(|i| i.response.is_none());
     let objects = if unanswered { app.store.all_objects() } else { vec![] };
     let now = crate::mailstore::now();
@@ -1441,6 +1442,12 @@ async fn invitations_page(State(app): St, headers: HeaderMap, Query(mut q): Quer
                     @for c in &calendars { option value=(c.id) { (c.name) } }
                     option value="" { "Invitations" }
                 } }
+                @if !patterns.is_empty() {
+                    @let chosen = app.store.find_uid(&i.uid).and_then(|o| app.store.choice(&o.calendar, &o.uid));
+                    label title="The alert pattern its alerts follow; Automatic: the calendar's default, or alerts it came with" {
+                        "Alerts" (pattern_select("pattern", &patterns, chosen, "Automatic"))
+                    }
+                }
                 button type="submit" name="answer" value="ACCEPTED" { "Accept" }
                 button type="submit" name="answer" value="TENTATIVE" { "Maybe" }
                 button.plain type="submit" name="answer" value="DECLINED" { "Decline" }
@@ -1965,6 +1972,9 @@ struct AnswerForm {
     answer: String,
     #[serde(default)]
     calendar: String,
+    /// The alert pattern's id; empty: automatic.
+    #[serde(default)]
+    pattern: String,
     /// The Invitations page as searched and filtered.
     #[serde(default)]
     back: String,
@@ -1983,7 +1993,7 @@ async fn answer_invite(State(app): St, headers: HeaderMap, Path(id): Path<i64>, 
         return back(to, None, Some("Unknown answer."));
     }
     let calendar = (!f.calendar.is_empty()).then_some(f.calendar.as_str());
-    match crate::invites::respond(&app, id, &f.answer, calendar).await {
+    match crate::invites::respond(&app, id, &f.answer, calendar, pattern_id(&f.pattern)).await {
         Ok(()) => back(to, Some("Answered: the organizer gets your reply by email."), None),
         Err(e) => back(to, None, Some(&format!("{e:#}"))),
     }

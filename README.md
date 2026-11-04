@@ -17,7 +17,8 @@ the native apps of every device.
 - **Invitations** arriving in an inbox land in the calendar (an "Invitations"
   calendar until answered), and can be answered from valet's Invitations page,
   which names the events each one would overlap: the organizer gets the reply
-  from the account the invitation came to. It shows those not answered yet,
+  from the account the invitation came to. Answering, you pick the calendar
+  it goes in and, if you like, the alert pattern it follows. It shows those not answered yet,
   for events still to come, and searches and filters them all like the mail.
   *Ignore* takes one off the calendar without telling the organizer; its
   later versions (the event moved), and the same invitation come to another
@@ -110,7 +111,8 @@ A pattern is a named, reusable set of alerts with a tag: *Meeting* (`#meeting`)
 (`#silent`) none. For each event, the first of these that applies wins:
 
 1. a `#tag` in the event's title, typed in any app (`Lyon #flight`);
-2. the pattern chosen for that event on valet's Events page;
+2. the pattern chosen for that event on valet's Events page, or when
+   answering its invitation;
 3. alerts set by hand in a calendar app, kept exactly as they are (Apple
    Calendar's automatic default alerts don't count);
 4. the calendar's default pattern, one for timed events and one for all-day

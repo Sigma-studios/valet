@@ -165,8 +165,9 @@ fn is_me(app: &App, acc: &Account, value: &str) -> bool {
 }
 
 /// Answers invitation `id` (`ACCEPTED`, `TENTATIVE`, `DECLINED`): emails the
-/// organizer, updates the event, and moves it to `calendar` when given.
-pub async fn respond(app: &App, id: i64, partstat: &str, calendar: Option<&str>) -> Result<()> {
+/// organizer, updates the event, and moves it to `calendar` when given. Its
+/// alerts follow `pattern` (`None`: automatic), in the calendar it ends in.
+pub async fn respond(app: &App, id: i64, partstat: &str, calendar: Option<&str>, pattern: Option<i64>) -> Result<()> {
     let inv = app.mail.invite(id).context("no such invitation")?;
     let acc = &app.account(&inv.account).context("account gone")?;
     let cal = ical::parse(&inv.ics)?.pop().context("bad invitation")?;
@@ -232,15 +233,23 @@ pub async fn respond(app: &App, id: i64, partstat: &str, calendar: Option<&str>)
                     p.params = format!("{others};PARTSTAT={partstat}");
                 }
             }
+            // Chosen before (moving would lose it), or now.
+            let had = app.store.choice(&o.calendar, &o.uid);
             let target = calendar.filter(|c| *c != o.calendar && app.store.calendar(c).is_some());
-            match target {
+            let landed = match target {
                 Some(t) => {
                     app.store.put_object(t, &o.name, &stored.to_ics(), false).map_err(|e| anyhow::anyhow!("{e:?}"))?;
                     app.store.delete_object(&o.calendar, &o.name)?;
+                    t
                 }
                 None => {
                     app.store.put_object(&o.calendar, &o.name, &stored.to_ics(), false).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                    o.calendar.as_str()
                 }
+            };
+            let pattern = pattern.filter(|p| app.store.patterns().iter().any(|x| x.id == *p));
+            if pattern.is_some() || had.is_some() {
+                app.store.set_choice(landed, &o.uid, pattern)?;
             }
         }
     }

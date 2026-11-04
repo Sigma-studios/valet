@@ -329,6 +329,9 @@
     const mine = calendars.filter((c) => c.id !== 'invitations');
     const cal = el('select', { name: 'calendar' },
       mine.map((c) => el('option', { value: c.id, selected: c.id === e.calendar }, c.name)), el('option', { value: '' }, 'Invitations'));
+    // Its alerts: a pattern, or automatic.
+    const pat = patterns.length ? el('select', { name: 'pattern' }, el('option', { value: '' }, 'Automatic'),
+      patterns.map((p) => el('option', { value: p.id, selected: e.alertBy === 'chosen' && e.alert === p.id }, `${p.name}${p.ring ? ' ⏰' : ''}`))) : null;
     const err = el('p', { class: 'err small' });
     // Emailing the answer takes a few seconds: a spinner meanwhile.
     const wait = (b, on) => {
@@ -340,7 +343,7 @@
       err.textContent = '';
       wait(b, true);
       try {
-        const r = await post('/calendar/invite', { invite: e.invite, answer: a, calendar: cal.value });
+        const r = await post('/calendar/invite', { invite: e.invite, answer: a, calendar: cal.value, pattern: pat ? pat.value : '' });
         // The bar's count of invitations waiting.
         const count = document.querySelector('header a[href="/invitations"] .count');
         if (count) r.waiting ? (count.textContent = r.waiting) : count.remove();
@@ -350,6 +353,7 @@
     };
     const button = (a, label, attrs = {}) => el('button', { type: 'button', disabled: !online, onclick: (ev) => answer(a, ev.currentTarget), ...attrs }, label);
     const row = el('div', { class: 'row' }, el('label', {}, 'Put it in', cal),
+      pat ? el('label', { title: "The alert pattern its alerts follow; Automatic: the calendar's default, or alerts it came with" }, 'Alerts', pat) : null,
       button('ACCEPTED', 'Accept'), button('TENTATIVE', 'Maybe'), button('DECLINED', 'Decline', { class: 'plain' }),
       button('IGNORED', 'Ignore', { class: 'plain', title: "Dismiss it without answering: it leaves the calendar, the organizer isn't told" }));
     return el('div', { class: 'answer' },
