@@ -99,7 +99,7 @@ public class AlarmReceiver extends BroadcastReceiver {
         return d + (d == 1 ? " day" : " days");
     }
 
-    private static String day(LocalDate d, LocalDate today) {
+    static String day(LocalDate d, LocalDate today) {
         if (d.equals(today)) return "Today";
         if (d.equals(today.plusDays(1))) return "Tomorrow";
         if (d.equals(today.minusDays(1))) return "Yesterday";

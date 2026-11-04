@@ -8,7 +8,8 @@
         <item name="android:windowBackground">@android:color/white</item>
     </style>
     <style name="Theme.Valet.Ring" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/valet_blue</item>
-        <item name="android:statusBarColor">@color/valet_blue</item>
+        <item name="android:windowBackground">@drawable/ring_bg</item>
+        <item name="android:statusBarColor">#172554</item>
+        <item name="android:navigationBarColor">#0C0A09</item>
     </style>
 </resources>
