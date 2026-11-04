@@ -379,7 +379,7 @@ fn sidebar(app: &App, current: i64) -> Markup {
 
 const MAIL_CSS: &str = r#"
 .mail { display:grid; grid-template-columns: 230px 1fr; gap:20px; align-items:start; }
-.folders { display:flex; flex-direction:column; gap:1px; position:sticky; top:12px; max-height:calc(100vh - 24px); overflow-y:auto; scrollbar-width:thin; scrollbar-color:var(--line) transparent; font-size:14px; }
+.folders { display:flex; flex-direction:column; gap:1px; position:sticky; top:12px; max-height:calc(100vh - 24px); overflow-y:auto; font-size:14px; }
 .folders .section, .folders details.accounts summary { padding:4px 8px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
 .folders .section { margin-top:6px; }
 .folders .node { display:flex; align-items:center; padding-left:calc(var(--depth, 0) * 16px); } .folders .node[hidden] { display:none; }
@@ -457,7 +457,7 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 @media (min-width: 1260px) {
   .pane:has(> .split.reading) { overflow:hidden; display:flex; flex-direction:column; padding-bottom:0; }
   .split.reading { flex:1; min-height:0; display:grid; grid-template-columns:minmax(220px, 26%) 1fr; gap:14px; }
-  .split.reading > .listcol, .split.reading > .readcol { min-height:0; overflow-y:auto; padding-bottom:16px; scrollbar-width:thin; }
+  .split.reading > .listcol, .split.reading > .readcol { min-height:0; overflow-y:auto; padding-bottom:16px; }
   .split.reading .list a.link { display:block; padding:9px 10px 9px 8px; }
   .split.reading .list .star, .split.reading .list .from, .split.reading .list .tag, .split.reading .list .preview, .split.reading .list .when { display:none; }
   .split.reading .list .line { display:block; }
@@ -484,7 +484,7 @@ form.write textarea { min-height:320px; font:inherit; padding:8px; border:1px so
   body:has(> header) > main { display:flex; flex-direction:column; overflow:hidden; padding-bottom:0; }
   .mail { flex:1; min-height:0; align-items:stretch; }
   .mail > nav.folders { position:static; max-height:none; min-height:0; padding-bottom:16px; }
-  .mail > .pane { min-width:0; min-height:0; overflow-y:auto; padding-bottom:16px; scrollbar-width:thin; }
+  .mail > .pane { min-width:0; min-height:0; overflow-y:auto; padding-bottom:16px; }
   .pane > .toolbar { position:sticky; top:0; z-index:2; background:var(--bg); padding-bottom:10px; margin-bottom:2px; }
 }
 @media (max-width: 720px) {
@@ -1770,7 +1770,7 @@ pub async fn html_body(State(app): St, headers: HeaderMap, Path(id): Path<i64>, 
          img-src 'self' data:{remote}; style-src 'unsafe-inline'{remote}; font-src data:{remote}; media-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'self'"
     );
     let doc = format!(
-        "<!doctype html><meta charset=\"utf-8\"><base target=\"_blank\"><style>html{{color-scheme:light}}body{{margin:12px;font:14px/1.45 system-ui,sans-serif;color:#111;background:#fff;overflow-wrap:anywhere}}img{{max-width:100%;height:auto}}</style>{body}"
+        "<!doctype html><meta charset=\"utf-8\"><base target=\"_blank\"><style>html{{color-scheme:light;scrollbar-width:thin;scrollbar-color:#e7e5e4 transparent}}body{{margin:12px;font:14px/1.45 system-ui,sans-serif;color:#111;background:#fff;overflow-wrap:anywhere}}img{{max-width:100%;height:auto}}</style>{body}"
     );
     Response::builder()
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")

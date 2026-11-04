@@ -152,6 +152,8 @@ const CSS: &str = r#"
 :root { color-scheme:light dark; --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --card:#fff; --accent:#2563eb; --bad:#b91c1c; --good:#15803d; }
 @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#f5f5f4; --muted:#a8a29e; --line:#44403c; --card:#292524; --accent:#60a5fa; --bad:#f87171; --good:#4ade80; } }
 * { box-sizing: border-box; } [hidden] { display:none !important; }
+/* One scrollbar everywhere: thin, the colour of the lines, no track. */
+* { scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
 body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
 header { border-bottom:1px solid var(--line); background:var(--card); }
 /* The bar is the same on every page, so its links never move. */
@@ -171,7 +173,7 @@ main { max-width:960px; margin:0 auto; padding:16px; } body.wide main { max-widt
      with this padding, leave the content almost no room on large screens. */
   body:has(> header) > main, body.wide:has(> header) > main { max-width:none; }
   body:has(> header) > main { flex:1; min-height:0; width:100%; overflow-y:auto;
-    padding-inline:max(16px, calc((100% - 960px) / 2 + 16px)); scrollbar-width:thin; }
+    padding-inline:max(16px, calc((100% - 960px) / 2 + 16px)); }
   body.wide:has(> header) > main { padding-inline:max(16px, calc((100% - 2000px) / 2 + 16px)); }
 }
 h1 { font-size:22px; margin:8px 0 16px; } h2 { font-size:17px; margin:24px 0 8px; }
