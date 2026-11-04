@@ -140,6 +140,12 @@ valet; *Sync again* undoes it), [mail rules](#mail-rules), calendars and their d
 event, `.ics` import (Google, Outlook, IONOS exports; importing again updates
 instead of duplicating), and how to connect each app.
 
+On a phone, a message opens full screen: a bar at the top to go back (the
+phone's Back button too), one at the bottom with Reply, Archive and Delete,
+the rest under More. Its subject shows at once while the rest comes; the
+first few unread messages are fetched ahead, so they open at once (remote
+images still wait to be asked for, so senders aren't told).
+
 ## The apps
 
 The site installs as an app (a PWA): Chrome, Edge or Brave offer to install

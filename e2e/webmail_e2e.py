@@ -260,6 +260,7 @@ def main():
     mail_rules(s, inbox)
     if len(sys.argv) > 1 and os.access(__import__("cdp").CHROME, os.X_OK):
         scrolling(s, sys.argv[1])
+        phone_reading(s, sys.argv[1])
 
 
 def all_mail(s, inbox):
@@ -589,6 +590,56 @@ def scrolling(s, out):
         check(count() == n + 1 and b.js("document.querySelector('#bulk .list .subject').textContent") == "long-new", "new mail swaps every row in, the new one on top")
         b.go(f"{WEB}/box/{projects}?page=0&n=150", 2)
         check(count() == n + 1, "reopened from its address: as many rows")
+        check(not b.errors, f"no script errors: {b.errors}")
+    finally:
+        b.close()
+
+
+def phone_reading(s, out):
+    """On a phone, a message takes the whole screen: a bar to go back, one
+    with the usual actions (the others under More). On its way, its subject
+    shows over a spinner; slow, the page opens it instead. Back finds the
+    list scrolled as it was. The first unread ones are fetched ahead."""
+    from cdp import Browser
+    projects = node_id(s, "Projects")
+    b = Browser(os.path.join(out, "chrome-phone"), width=390, height=844, port=9338, mobile=True)
+    shown = lambda sel: b.js(f"[...document.querySelectorAll({sel!r})].filter(e => e.checkVisibility()).map(e => e.textContent.trim())")
+    try:
+        b.go(f"{WEB}/login")
+        b.js(f"document.querySelector('input[name=password]').value = {os.environ['VALET_PASSWORD']!r}; document.querySelector('form').submit()")
+        b.settle(1.5)
+        b.go(f"{WEB}/box/{projects}", 3)
+        unread = b.js("document.querySelectorAll('#bulk .list .row.unread').length")
+        ahead = b.js("performance.getEntriesByType('resource').filter(e => e.name.includes('fragment=1')).length")
+        check(ahead == min(3, unread), f"the first unread ones fetched ahead ({ahead} of {unread} unread)")
+        check(shown(".compose-fab") == ["Write"], "Write floats over the list")
+        b.js("scrollTo(0, 600)")
+        y = b.js("scrollY")
+        b.js("document.querySelectorAll('#bulk .list a.link')[8].click()")
+        b.settle(1.5)
+        check(b.js("!!document.querySelector('.readcol:not(.pending) .reader') && new URLSearchParams(location.search).has('open')"), "a message opens")
+        check(not b.js("document.querySelector('body > header').checkVisibility() || document.querySelector('.listcol').checkVisibility()"), "alone: no site bar, no list")
+        check(b.js("scrollY") == 0, "from its top")
+        check(shown(".msg-top a") == ["✕ Close"] and b.js("document.querySelector('.msg-top span').checkVisibility()") is False, "a bar to go back, an arrow only")
+        check(shown(".msg-actions > *") == ["Reply", "Archive", "Delete", "More"], f"the usual actions at the bottom: {shown('.msg-actions > *')}")
+        check(shown(".more-panel > *") == [], "the others hidden")
+        b.js("document.querySelector('.more-toggle').click()")
+        more = shown(".more-panel > *")
+        check(len(more) == 5 and more[:2] == ["Reply all", "Forward"] and more[3] == "Mark unread" and more[4].startswith("Move to…"), f"More shows the others: {more[:4]}")
+        b.js("document.querySelector('.readcol .headers').click()")
+        check(shown(".more-panel > *") == [], "a tap elsewhere hides them")
+        b.js("history.back()")
+        b.settle(1)
+        check(b.js("!document.querySelector('.readcol') && !new URLSearchParams(location.search).has('open')"), "Back: the list again")
+        check(b.js("scrollY") == y and b.js("document.querySelector('body > header').checkVisibility()"), f"scrolled as it was ({b.js('scrollY')} for {y}), the site bar back")
+        # valet slow to answer: the fragment never comes.
+        b.js("const f = window.fetch; window.fetch = (u, o) => String(u).includes('fragment=1') ? new Promise(() => {}) : f(u, o); window.samePage = 1")
+        subject = b.js("document.querySelector('#bulk .list .row:not(.unread) .subject').textContent")
+        b.js("document.querySelector('#bulk .list .row:not(.unread) a.link').click()")
+        b.settle(0.5)
+        check(b.js("!!document.querySelector('.readcol.pending .spin')") and b.js("document.querySelector('.readcol h1').textContent") == subject, "on its way: its subject, a spinner")
+        b.settle(7)
+        check(b.js("window.samePage === undefined && !!document.querySelector('.readcol .reader iframe, .readcol .reader pre')"), "too slow: the page opens it")
         check(not b.errors, f"no script errors: {b.errors}")
     finally:
         b.close()

@@ -6,6 +6,7 @@ import android.app.AlarmManager;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.app.NotificationManager;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -14,6 +15,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Message;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.WindowInsets;
@@ -69,6 +71,9 @@ public class MainActivity extends Activity {
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        // Links that open a new tab (all those in mail) come to Chrome.onCreateWindow: without
+        // it they would replace the page, which the mail's sandboxed frame may not do.
+        s.setSupportMultipleWindows(true);
         s.setUserAgentString(s.getUserAgentString() + " ValetApp/1");
         CookieManager.getInstance().setAcceptCookie(true);
         web.addJavascriptInterface(new Bridge(), "ValetApp");
@@ -184,17 +189,50 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean ours(Uri u) {
+        return server != null && u.toString().startsWith(server);
+    }
+
+    /** Links in mail open in the app they are for, or the browser. */
+    private void openOutside(Uri u) {
+        try {
+            if ("intent".equalsIgnoreCase(u.getScheme())) {
+                openIntent(u);
+            } else {
+                startActivity(new Intent(Intent.ACTION_VIEW, u));
+            }
+        } catch (Exception e) {
+            Toast.makeText(this, "No app opens " + u.getScheme() + " links", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** An intent:// link, as Chrome takes it: only an app that opens links from the web, else the page it falls back to, else the app's store page. */
+    private void openIntent(Uri u) throws Exception {
+        Intent i = Intent.parseUri(u.toString(), Intent.URI_INTENT_SCHEME);
+        i.addCategory(Intent.CATEGORY_BROWSABLE);
+        i.setComponent(null);
+        i.setSelector(null);
+        try {
+            startActivity(i);
+            return;
+        } catch (ActivityNotFoundException e) {
+            String fallback = i.getStringExtra("browser_fallback_url");
+            if (fallback != null && (fallback.startsWith("https://") || fallback.startsWith("http://"))) {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(fallback)));
+            } else if (i.getPackage() != null) {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=" + i.getPackage())));
+            } else {
+                throw e;
+            }
+        }
+    }
+
     private class Client extends WebViewClient {
         @Override
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
             Uri u = req.getUrl();
-            if (server != null && u.toString().startsWith(server)) return false;
-            // Links in mail open in the browser.
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW, u));
-            } catch (Exception e) {
-                Toast.makeText(MainActivity.this, "No app opens " + u.getScheme() + " links", Toast.LENGTH_SHORT).show();
-            }
+            if (ours(u)) return false;
+            openOutside(u);
             return true;
         }
 
@@ -210,6 +248,54 @@ public class MainActivity extends Activity {
     }
 
     private class Chrome extends WebChromeClient {
+        /**
+         * A link for a new tab: the new tab is a WebView never shown, which
+         * takes the link's address and hands it on. valet's own pages open
+         * here; the rest outside the app.
+         */
+        @Override
+        public boolean onCreateWindow(WebView view, boolean dialog, boolean gesture, Message result) {
+            WebView tab = new WebView(MainActivity.this);
+            tab.setWebViewClient(new WebViewClient() {
+                private boolean done;
+
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                    take(req.getUrl());
+                    return true;
+                }
+
+                // In case the first address doesn't go through shouldOverrideUrlLoading. A form
+                // sent to valet (Log in to Microsoft) loads here, and its redirect is taken above.
+                @Override
+                public void onPageStarted(WebView v, String url, android.graphics.Bitmap icon) {
+                    if (url != null && !url.equals("about:blank") && !ours(Uri.parse(url))) {
+                        v.stopLoading();
+                        take(Uri.parse(url));
+                    }
+                }
+
+                @Override
+                public void onPageFinished(WebView v, String url) {
+                    if (!done && url != null && !url.equals("about:blank")) {
+                        done = true;
+                        web.post(tab::destroy);
+                    }
+                }
+
+                private void take(Uri u) {
+                    if (done) return;
+                    done = true;
+                    if (ours(u)) web.loadUrl(u.toString());
+                    else openOutside(u);
+                    web.post(tab::destroy);
+                }
+            });
+            ((WebView.WebViewTransport) result.obj).setWebView(tab);
+            result.sendToTarget();
+            return true;
+        }
+
         @Override
         public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
             if (picking != null) picking.onReceiveValue(null);

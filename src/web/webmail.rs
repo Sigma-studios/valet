@@ -237,7 +237,8 @@ const REFRESH_SCRIPT: &str = r#"
   b.addEventListener('click', async () => {
     if (!navigator.onLine) { say("You're offline: new mail can be checked once you're back online.", true); return; }
     b.disabled = true;
-    b.textContent = '↻ Checking…';
+    b.classList.add('busy');
+    b.querySelector('.word').textContent = ' Checking…';
     say('');
     try {
       const r = await fetch(`/mail/refresh?folder=${b.dataset.folder}`, { method: 'POST' });
@@ -253,7 +254,8 @@ const REFRESH_SCRIPT: &str = r#"
       say("Couldn't check: valet didn't answer.", true);
     } finally {
       b.disabled = false;
-      b.textContent = '↻ Refresh';
+      b.classList.remove('busy');
+      b.querySelector('.word').textContent = ' Refresh';
     }
   });
   // Live: a hidden page catches up when shown again.
@@ -312,6 +314,20 @@ const SIDEBAR_SCRIPT: &str = r#"
 
 /// The arrow of a folder that has folders inside, turned by the stylesheet.
 const CHEVRON: &str = r#"<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+
+/// A message's buttons on a phone: an icon over the word (wider screens show the word only).
+macro_rules! icon {
+    ($paths:literal) => {
+        concat!(r#"<svg class="i" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">"#, $paths, "</svg>")
+    };
+}
+const ICON_BACK: &str = icon!(r#"<path d="M20 12H5"/><path d="m11 5-7 7 7 7"/>"#);
+const ICON_REPLY: &str = icon!(r#"<path d="m9 15-5-5 5-5"/><path d="M4 10h10a6 6 0 0 1 6 6v3"/>"#);
+const ICON_ARCHIVE: &str = icon!(r#"<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M10 13h4"/>"#);
+const ICON_NOT_SPAM: &str = icon!(r#"<path d="M3 13h5l2 3h4l2-3h5"/><path d="M5.5 5h13L21 13v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6z"/>"#);
+const ICON_DELETE: &str = icon!(r#"<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="m6 7 1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/>"#);
+const ICON_WRITE: &str = icon!(r#"<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>"#);
+const ICON_MORE: &str = icon!(r#"<circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/>"#);
 
 fn sidebar(app: &App, current: i64) -> Markup {
     let (tree, per) = folders(app);
@@ -414,9 +430,19 @@ a.compose:hover { text-decoration:none; filter:brightness(1.1); }
 /* "Move to…" as wide as what it shows, not as its longest folder name (which
    the open menu still shows in full), so the actions after it don't wrap. */
 .toolbar select[name=to] { field-sizing:content; max-width:9.5em; }
-/* A message's many actions, compact so they hold on one line where they can. */
-.toolbar.msg-actions { gap:5px; }
-.toolbar.msg-actions :is(a.button, button, select) { padding:4px 7px; font-size:14px; }
+/* A message's many actions, compact so they hold on one line where they can,
+   in this order (on a phone, the usual ones come first: see below). */
+.toolbar.msg-bar { gap:5px; }
+.msg-bar :is(a.button, button, select) { padding:4px 7px; font-size:14px; }
+.msg-bar .msg-top, .msg-bar .msg-actions, .msg-bar .more-panel { display:contents; }
+.msg-bar .o1 { order:1; } .msg-bar .o2 { order:2; }
+.msg-bar svg.i, .msg-bar .more-toggle, .compose-fab { display:none; }
+/* A message on its way: a spinner in its row, or where it will show. */
+.list .row.loading { position:relative; }
+.list .row.loading .when { visibility:hidden; }
+.list .row.loading::after { content:""; position:absolute; right:14px; top:50%; width:12px; height:12px; margin-top:-8px;
+  border:2px solid var(--muted); border-right-color:transparent; border-radius:50%; animation:spin .7s linear infinite; }
+.reader .spin { width:24px; height:24px; margin:40px auto; border:3px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
 .toolbar button.refresh { white-space:nowrap; }
 .toolbar .refresh-note:empty { display:none; }
 /* The toolbar: refresh and search, or, while messages are ticked, what to do with them. */
@@ -463,8 +489,45 @@ form.write textarea { min-height:320px; font:inherit; padding:8px; border:1px so
 }
 @media (max-width: 720px) {
   .mail { display:block; } nav.folders { display:none; } .folders-menu { display:block; }
-  .list a.link { grid-template-columns: 1fr auto; } .list .star { display:none; }
-  .list .line { grid-column: 1 / -1; }
+  .list a.link { grid-template-columns: 1fr auto; row-gap:2px; padding:9px 12px 9px 6px; } .list .star { display:none; }
+  .list .line { grid-column: 1 / -1; } .list .when { grid-row:1; grid-column:2; }
+  /* The list from edge to edge, Write floating over its end. */
+  body:has(.mail) > main { padding:8px 8px 88px; }
+  .folders-menu { margin-bottom:8px; }
+  .toolbar { margin-bottom:8px; }
+  .toolbar button.refresh .word { display:none; }
+  .list { border-radius:0; border-inline:none; margin-inline:-8px; }
+  .compose-fab { display:flex; align-items:center; gap:8px; position:fixed; right:16px; bottom:calc(16px + env(safe-area-inset-bottom)); z-index:15;
+    padding:14px 20px 14px 16px; border-radius:16px; background:var(--accent); color:#fff; font-weight:600; box-shadow:0 4px 14px rgb(0 0 0 / .3); }
+  .compose-fab:hover { text-decoration:none; }
+  /* Reading: the message alone, the whole width, under a bar to go back and
+     over one with the usual actions (the others under More). */
+  body:has(.msg-bar) > header, body:has(.msg-bar) .folders-menu, body:has(.msg-bar) .pane > form.toolbar, body:has(.msg-bar) .compose-fab { display:none; }
+  body:has(.msg-bar) > main { padding:48px 0 calc(62px + env(safe-area-inset-bottom)); }
+  .toolbar.msg-bar { margin:0; }
+  .msg-bar .o1, .msg-bar .o2 { order:0; }
+  .msg-bar svg.i { display:block; }
+  .msg-bar .msg-top { display:flex; align-items:center; position:fixed; top:0; left:0; right:0; z-index:20; height:48px; padding:0 4px;
+    background:var(--card); border-bottom:1px solid var(--line); }
+  .msg-bar .msg-top a.button { display:flex; align-items:center; padding:10px 12px; border:none; background:none; color:var(--fg); }
+  .msg-bar .msg-top span { display:none; }
+  .msg-bar .msg-actions { display:flex; position:fixed; left:0; right:0; bottom:0; z-index:20; padding:2px 4px env(safe-area-inset-bottom);
+    background:var(--card); border-top:1px solid var(--line); }
+  .msg-bar .msg-actions > :is(a.button, form, button) { flex:1; min-width:0; }
+  .msg-bar .msg-actions > form { display:flex; }
+  .msg-bar .msg-actions > a.button, .msg-bar .msg-actions > form > button, .msg-bar .msg-actions > button.more-toggle { flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; gap:3px;
+    padding:7px 2px 6px; border:none; border-radius:8px; background:none; color:var(--fg); font-size:11px; line-height:1.2; white-space:nowrap; }
+  .msg-bar .msg-actions > form > button.danger { color:var(--bad); }
+  .msg-bar .msg-actions > button.more-toggle[aria-expanded=true] { background:var(--line); }
+  .msg-bar .more-panel { display:none; flex-direction:column; gap:2px; position:fixed; right:8px; bottom:calc(66px + env(safe-area-inset-bottom));
+    min-width:230px; max-width:calc(100vw - 16px); padding:6px; background:var(--card); border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 28px rgb(0 0 0 / .25); }
+  .msg-bar .msg-actions.more-open .more-panel { display:flex; }
+  .msg-bar .more-panel form { display:block; }
+  .msg-bar .more-panel :is(a.button, button) { display:block; width:100%; text-align:left; padding:11px 12px; border:none; border-radius:8px; background:none; color:var(--fg); font-size:15px; }
+  .msg-bar .more-panel select { width:100%; padding:10px 8px; font-size:15px; }
+  :is(.readcol, .pane) > .card.reader { margin:0; padding:12px; border:none; border-radius:0; }
+  .reader iframe { width:calc(100% + 24px); margin-inline:-12px; border-radius:0; }
+  .headers h1 { font-size:19px; margin-bottom:6px; }
 }
 "#;
 
@@ -530,10 +593,31 @@ fn mail_page(title: &str, current: i64, app: &App, body: Markup) -> Response {
                 (sidebar(app, current))
                 div.pane { (body) }
             }
-            script { (PreEscaped(TIME_SCRIPT)) }
+            script { (PreEscaped(TIME_SCRIPT)) (PreEscaped(MORE_SCRIPT)) }
         },
     )
 }
+
+/// A message's More button, on a phone: the less usual actions over the
+/// bar, until it's pressed again, something else is, or Escape.
+const MORE_SCRIPT: &str = r#"
+{
+  const shut = (bar) => { bar.classList.remove('more-open'); bar.querySelector('.more-toggle').setAttribute('aria-expanded', 'false'); };
+  document.addEventListener('click', (e) => {
+    const t = e.target.closest('.msg-actions .more-toggle'), open = document.querySelector('.msg-actions.more-open');
+    if (open && !e.target.closest('.more-panel') && open.querySelector('.more-toggle') !== t) shut(open);
+    if (!t) return;
+    const bar = t.closest('.msg-actions');
+    if (bar.classList.contains('more-open')) return shut(bar);
+    bar.classList.add('more-open');
+    t.setAttribute('aria-expanded', 'true');
+  });
+  document.addEventListener('keydown', (e) => {
+    const open = document.querySelector('.msg-actions.more-open');
+    if (e.key === 'Escape' && open) { shut(open); open.querySelector('.more-toggle').focus(); }
+  });
+}
+"#;
 
 /// INBOX, shown at its own address (where the installed app starts, and
 /// what the service worker keeps for offline reading).
@@ -1189,7 +1273,7 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
         (flash_of(&q))
         form.toolbar method="get" action={"/box/" (id)} data-delay=(super::search_delay(&app)) {
             span.normal {
-                button.refresh type="button" data-folder=(id) title="Check every account for new mail now, this folder first" { "↻ Refresh" }
+                button.refresh type="button" data-folder=(id) title="Check every account for new mail now, this folder first" aria-label="Refresh" { "↻" span.word { " Refresh" } }
                 span.refresh-note.small.muted role="status" {}
                 span.search { input type="search" name="q" value=(q.q) placeholder={"Search " (title)}; }
                 a.button href=(q.link(id, 0, &["q"])) hidden[q.q.is_empty()] title="Clear the search (the filters stay)" data-swap="clear-search" { "Clear" }
@@ -1229,30 +1313,50 @@ pub async fn list(State(app): St, headers: HeaderMap, Path(id): Path<i64>, Query
             }
             @if let Some((_, (_, body))) = &reading { div.readcol { (body) } }
         }
+        // Phones: Write, over the list. And what shows while a message is on its way.
+        a.compose-fab href="/compose" { (PreEscaped(ICON_WRITE)) "Write" }
+        template #reading-soon {
+            div.readcol.pending {
+                div.toolbar.msg-bar { div.msg-top {
+                    a.button.close href=(here) title="Close this message" aria-label="Back to the list" { (PreEscaped(ICON_BACK)) span { "✕ Close" } }
+                } }
+                div.card.reader {
+                    div.headers { h1 {} div { b {} } }
+                    div.spin role="status" aria-label="Loading" {}
+                }
+            }
+        }
         script { (PreEscaped(BULK_SCRIPT)) }
         script { (PreEscaped(PANE_SCRIPT)) }
     })
 }
 
 /// Opening a message without reloading the page: its part is fetched ahead
-/// (when the pointer rests on its row, not marking it read), swapped in on
-/// click, and marked read then; its body frame is fetched ahead too.
+/// (when the pointer rests on its row, and for the first unread ones, not
+/// marking them read), swapped in on click, and marked read then; its body
+/// frame is fetched ahead too. Until it's in, its row spins and, where the
+/// message takes the list's place, its subject shows over a spinner; slow
+/// (valet away), the page opens it instead. Back closes it.
 const PANE_SCRIPT: &str = r#"
 {
   const split = document.querySelector('.split');
-  const cache = new Map();
+  // Where the message takes the list's place (as the stylesheet says), and where the pane, not the window, scrolls.
+  const narrow = matchMedia('(max-width: 1259px)'), framed = matchMedia('(min-width: 721px)');
+  // Parts fetched, kept a little while: their buttons say how the message was then.
+  const cache = new Map(), framesAsked = new Set();
   const get = (url) => {
-    if (!cache.has(url)) {
-      const p = fetch(url + '&fragment=1', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); });
-      p.catch(() => cache.delete(url));
-      cache.set(url, p);
-    }
-    return cache.get(url);
+    const had = cache.get(url);
+    if (had && Date.now() - had.at < 120000) return had.p;
+    const p = fetch(url + '&fragment=1', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); });
+    const entry = { p, at: Date.now() };
+    p.catch(() => { if (cache.get(url) === entry) cache.delete(url); });
+    cache.set(url, entry);
+    return p;
   };
   const warm = (a) => {
     if (!a?.dataset.open || a.closest('.row.open')) return;
     get(a.dataset.open).catch(() => {});
-    fetch(`/msg/${a.dataset.id}/html`).catch(() => {});
+    if (!framesAsked.has(a.dataset.id)) { framesAsked.add(a.dataset.id); fetch(`/msg/${a.dataset.id}/html`).catch(() => {}); }
   };
   let resting = null;
   split.addEventListener('pointerover', (e) => {
@@ -1261,16 +1365,67 @@ const PANE_SCRIPT: &str = r#"
     if (a) resting = setTimeout(() => warm(a), 70);
   });
   split.addEventListener('pointerdown', (e) => warm(e.target.closest('a.link')));
+  // The first unread ones, ahead, once the list is in (not where the
+  // connection asks to save data). Remote images stay out: nobody is told.
+  const ahead = () => {
+    if (!navigator.onLine || navigator.connection?.saveData) return;
+    for (const a of [...split.querySelectorAll('.list .row.unread a.link[data-open]')].slice(0, 3)) warm(a);
+  };
+  const idle = (f) => (window.requestIdleCallback ? requestIdleCallback(f, { timeout: 3000 }) : setTimeout(f, 500));
+  idle(ahead);
+  // The list changed (new mail, read elsewhere): what was fetched may be out of date.
+  document.addEventListener('valet:list', () => { cache.clear(); idle(ahead); });
   const openRow = () => split.querySelector('.row.open');
   const unmark = () => { const r = openRow(); if (r) { r.classList.remove('open'); const a = r.querySelector('a.link'); a.href = a.dataset.open; } };
+  // In the message's place, the list is left where it was scrolled to, for coming back.
+  let listAt = null;
+  const leaveList = () => {
+    if (!narrow.matches || listAt) return;
+    const s = framed.matches ? split.closest('.pane') : document.scrollingElement;
+    listAt = [s, s.scrollTop];
+    s.scrollTop = 0;
+  };
+  // Opened here: one entry in the history above the list's, so Back closes
+  // it (opening another meanwhile takes its place).
+  let pushed = false;
+  const enter = (url) => {
+    if (location.pathname + location.search === url) return;
+    if (pushed || new URLSearchParams(location.search).has('open')) history.replaceState(null, '', url);
+    else { history.pushState(null, '', url); pushed = true; }
+  };
+  let opening = null;
   const close = () => {
+    opening = null;
+    pushed = false;
+    for (const r of split.querySelectorAll('.row.loading')) r.classList.remove('loading');
     unmark();
     split.querySelector('.readcol')?.remove();
     split.classList.remove('reading');
-    history.pushState(null, '', split.dataset.list);
     document.title = `${split.dataset.title} · valet`;
+    if (listAt) { const [s, y] = listAt; listAt = null; s.scrollTop = y; }
+  };
+  const leave = () => {
+    if (pushed) return history.back();
+    close();
+    history.pushState(null, '', split.dataset.list);
+  };
+  // While it's on its way, where it will show: its subject and sender, a spinner.
+  const soon = (a) => {
+    const col = document.getElementById('reading-soon')?.content.firstElementChild.cloneNode(true);
+    if (!col) return;
+    col.querySelector('a.close').href = split.dataset.list;
+    col.querySelector('h1').textContent = a.querySelector('.subject')?.textContent ?? '';
+    col.querySelector('.headers b').textContent = a.querySelector('.from')?.textContent ?? '';
+    // The list's entry keeps where it was scrolled to: in the history first.
+    enter(a.dataset.open);
+    leaveList();
+    const old = split.querySelector('.readcol');
+    old ? old.replaceWith(col) : split.append(col);
+    split.classList.add('reading');
   };
   const show = (a, html) => {
+    // The list may have been swapped in meanwhile.
+    a = split.querySelector(`.list a.link[data-id="${a.dataset.id}"]`) || a;
     const row = a.closest('.row');
     unmark();
     row.classList.add('open');
@@ -1285,23 +1440,45 @@ const PANE_SCRIPT: &str = r#"
     t.innerHTML = html;
     const col = t.content.firstElementChild;
     valetTimes(col);
+    enter(a.dataset.open);
+    leaveList();
     const old = split.querySelector('.readcol');
     old ? old.replaceWith(col) : split.append(col);
     split.classList.add('reading');
-    history.pushState(null, '', a.dataset.open);
     document.title = `${col.dataset.subject} · valet`;
-    row.scrollIntoView({ block: 'nearest' });
+    if (!narrow.matches) row.scrollIntoView({ block: 'nearest' });
   };
   split.addEventListener('click', async (e) => {
     const a = e.target.closest('a.link, a.close');
     if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     if (a.matches('a.link') && !a.dataset.open) return;
     e.preventDefault();
-    if (a.matches('a.close') || a.closest('.row.open')) return close();
-    try { show(a, await get(a.dataset.open)); } catch (_) { location = a.dataset.open; }
+    if (a.matches('a.close') || a.closest('.row.open')) return leave();
+    const url = a.dataset.open, row = a.closest('.row'), me = (opening = {});
+    for (const r of split.querySelectorAll('.row.loading')) r.classList.remove('loading');
+    row.classList.add('loading');
+    if (narrow.matches) soon(a);
+    try {
+      const html = await Promise.race([get(url), new Promise((_, no) => setTimeout(() => no(new Error('slow')), 6000))]);
+      if (opening === me) show(a, html);
+    } catch (_) {
+      if (opening !== me) return;
+      // Slow or failing: the whole page instead (the service worker has it, if read before offline).
+      cache.delete(url);
+      location.pathname + location.search === url ? location.replace(url) : location.assign(url);
+    } finally {
+      row.classList.remove('loading');
+      if (opening === me) opening = null;
+    }
   });
-  // Back and forward: the page as its address says.
-  addEventListener('popstate', () => location.reload());
+  // Back to the list's entry: the message closes. Elsewhere in the
+  // history: the page as its address says.
+  addEventListener('popstate', () => {
+    if (new URLSearchParams(location.search).has('open')) return location.reload();
+    if (!split.classList.contains('reading')) return;
+    close();
+    history.replaceState(null, '', split.dataset.list);
+  });
 }
 "#;
 
@@ -1415,41 +1592,56 @@ fn reader(app: &App, id: i64, q: &ListQuery, pane: Option<(i64, String)>) -> Opt
         input type="hidden" name="back" value=(back);
         @if let Some((_, l)) = &pane { input type="hidden" name="list" value=(l); }
     };
+    let archive = html! {
+        form.o1 method="post" action={"/msg/" (id)} { (hidden)
+            button name="action" value="archive" { (PreEscaped(ICON_ARCHIVE)) span { "Archive" } } }
+    };
     let body = html! {
-        div.toolbar.msg-actions {
-            @if pane.is_some() { a.button.close href=(close) title="Close this message" { "✕ Close" } }
-            @else { a.button href=(close) { "← Back" } }
-            @if is_draft(&src, &folder) { a.button href={"/compose?draft=" (id)} { "Continue writing" } }
-            a.button href={"/compose?reply=" (id)} { "Reply" }
-            a.button href={"/compose?all=" (id)} { "Reply all" }
-            a.button href={"/compose?forward=" (id)} { "Forward" }
-            @if in_spam {
-                form method="post" action={"/msg/" (id)} { (hidden)
-                    button name="action" value="notspam" title="Back to its inbox" { "Not spam" } }
+        // One row of buttons; on a phone, a bar at the top to go back and
+        // one at the bottom with the usual actions, the rest under More.
+        div.toolbar.msg-bar {
+            div.msg-top {
+                @if pane.is_some() {
+                    a.button.close href=(close) title="Close this message" aria-label="Back to the list" { (PreEscaped(ICON_BACK)) span { "✕ Close" } }
+                } @else {
+                    a.button href=(close) aria-label="Back" { (PreEscaped(ICON_BACK)) span { "← Back" } }
+                }
             }
-            form method="post" action={"/msg/" (id)} { (hidden)
-                button name="action" value="archive" { "Archive" } }
-            form method="post" action={"/msg/" (id)} { (hidden)
-                button name="action" value=(if flagged { "unflag" } else { "flag" }) { @if flagged { "★ Unflag" } @else { "☆ Flag" } } }
-            form method="post" action={"/msg/" (id)} { (hidden)
-                button name="action" value="unseen" { "Mark unread" } }
-            form method="post" action={"/msg/" (id)} {
-                (hidden)
-                input type="hidden" name="action" value="move";
-                select name="to" onchange="this.form.submit()" {
-                    option value="" { "Move to…" }
-                    optgroup label="Your folders" {
-                        @for (n, b) in &tree { @if b.id != back && !b.is_all_mail() { option value=(b.id) { (indent(n.depth)) (short_name(b)) } } }
-                    }
-                    @if !account_folders.is_empty() {
-                        optgroup label={"Accounts › " (place_name(&folder).split(" › ").next().unwrap_or(""))} {
-                            @for b in &account_folders { option value=(b.id) { (short_name(b)) } }
+            div.msg-actions {
+                @if is_draft(&src, &folder) { a.button href={"/compose?draft=" (id)} { (PreEscaped(ICON_WRITE)) span { "Continue writing" } } }
+                a.button href={"/compose?reply=" (id)} { (PreEscaped(ICON_REPLY)) span { "Reply" } }
+                @if in_spam {
+                    form.o1 method="post" action={"/msg/" (id)} { (hidden)
+                        button name="action" value="notspam" title="Back to its inbox" { (PreEscaped(ICON_NOT_SPAM)) span { "Not spam" } } }
+                } @else { (archive) }
+                form.o2 method="post" action={"/msg/" (id)} onsubmit=[for_good.then_some("return confirm('Delete this message for good?')")] { (hidden)
+                    button.danger name="action" value="delete" { (PreEscaped(ICON_DELETE)) span { "Delete" } } }
+                button.more-toggle type="button" aria-expanded="false" aria-haspopup="true" { (PreEscaped(ICON_MORE)) span { "More" } }
+                div.more-panel {
+                    a.button href={"/compose?all=" (id)} { "Reply all" }
+                    a.button href={"/compose?forward=" (id)} { "Forward" }
+                    @if in_spam { (archive) }
+                    form.o1 method="post" action={"/msg/" (id)} { (hidden)
+                        button name="action" value=(if flagged { "unflag" } else { "flag" }) { @if flagged { "★ Unflag" } @else { "☆ Flag" } } }
+                    form.o1 method="post" action={"/msg/" (id)} { (hidden)
+                        button name="action" value="unseen" { "Mark unread" } }
+                    form.o1 method="post" action={"/msg/" (id)} {
+                        (hidden)
+                        input type="hidden" name="action" value="move";
+                        select name="to" onchange="this.form.submit()" aria-label="Move to a folder" {
+                            option value="" { "Move to…" }
+                            optgroup label="Your folders" {
+                                @for (n, b) in &tree { @if b.id != back && !b.is_all_mail() { option value=(b.id) { (indent(n.depth)) (short_name(b)) } } }
+                            }
+                            @if !account_folders.is_empty() {
+                                optgroup label={"Accounts › " (place_name(&folder).split(" › ").next().unwrap_or(""))} {
+                                    @for b in &account_folders { option value=(b.id) { (short_name(b)) } }
+                                }
+                            }
                         }
                     }
                 }
             }
-            form method="post" action={"/msg/" (id)} onsubmit=[for_good.then_some("return confirm('Delete this message for good?')")] { (hidden)
-                button.danger name="action" value="delete" { "Delete" } }
         }
         div.card.reader {
             div.headers {
@@ -1571,7 +1763,7 @@ pub async fn html_body(State(app): St, headers: HeaderMap, Path(id): Path<i64>, 
     let raw = app.mail.blob(&src.blob).unwrap_or_default();
     let Some(m) = parse(&raw) else { return StatusCode::NOT_FOUND.into_response() };
     let body = m.body_html(0).unwrap_or_default();
-    let body = cid_links(&body, id);
+    let body = no_link_targets(&cid_links(&body, id));
     let remote = if q.images.is_some() { " https: http:" } else { "" };
     let csp = format!(
         "sandbox allow-same-origin allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'none'; \
@@ -1588,6 +1780,67 @@ pub async fn html_body(State(app): St, headers: HeaderMap, Path(id): Path<i64>, 
         .header(header::CACHE_CONTROL, "private, max-age=3600")
         .body(Body::from(doc))
         .unwrap()
+}
+
+/// Links lose their own `target`, so all open in a new tab as the frame's
+/// `<base>` says: `_top` is refused by the sandbox (a tap does nothing), and
+/// `_self` or a name would open the site inside the frame.
+fn no_link_targets(html: &str) -> String {
+    let b = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(at) = html[i..].find('<').map(|n| i + n) {
+        let name_end = html[at + 1..].find(|c: char| !c.is_ascii_alphanumeric()).map_or(html.len(), |n| at + 1 + n);
+        out.push_str(&html[i..name_end]);
+        i = name_end;
+        let name = &html[at + 1..name_end];
+        if !name.eq_ignore_ascii_case("a") && !name.eq_ignore_ascii_case("area") {
+            continue;
+        }
+        // Its attributes, each kept but `target`, up to the tag's end.
+        loop {
+            let from = i;
+            while i < b.len() && b[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i >= b.len() || b[i] == b'>' {
+                out.push_str(&html[from..i]);
+                break;
+            }
+            let attr = i;
+            while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b'=' | b'>') {
+                i += 1;
+            }
+            let attr_name = &html[attr..i];
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'=' {
+                j += 1;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                match b.get(j) {
+                    Some(&q @ (b'"' | b'\'')) => j = html[j + 1..].find(q as char).map_or(b.len(), |n| j + 2 + n),
+                    _ => {
+                        while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'>' {
+                            j += 1;
+                        }
+                    }
+                }
+                i = j;
+            } else if i == attr {
+                // A stray `=`.
+                i += 1;
+            }
+            if !attr_name.eq_ignore_ascii_case("target") {
+                out.push_str(&html[from..i]);
+            }
+        }
+    }
+    out.push_str(&html[i..]);
+    out
 }
 
 /// `cid:` references (images sent inside the message) point to valet.
@@ -3059,6 +3312,10 @@ mod tests {
     #[test]
     fn helpers() {
         assert_eq!(cid_links(r#"<img src="cid:abc@x"> cid: text"#, 7), r#"<img src="/msg/7/cid/abc@x"> cid: text"#);
+        assert_eq!(
+            no_link_targets(r#"<A HREF="https://x/?a>b" Target="_top">x</A> <a target=_self href=y>y</a><abbr target="t">z</abbr><area target = 'n' alt=a> 1 < 2 <a"#),
+            r#"<A HREF="https://x/?a>b">x</A> <a href=y>y</a><abbr target="t">z</abbr><area alt=a> 1 < 2 <a"#
+        );
         assert!(has_remote(r#"<img SRC="https://t.example/p.gif">"#) && !has_remote("<p>http://x</p>"));
         assert_eq!(prefixed("Re:", "re: hi"), "re: hi");
         assert_eq!(prefixed("Re:", "hi"), "Re: hi");
