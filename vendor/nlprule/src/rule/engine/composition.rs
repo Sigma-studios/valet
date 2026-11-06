@@ -149,7 +149,42 @@ impl Matcher {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct TextMatcher {
     pub(crate) matcher: Matcher,
-    pub(crate) set: Option<DefaultHashSet<WordIdInt>>,
+    pub(crate) set: Option<WordSet>,
+}
+
+static WORD_SETS: once_cell::sync::Lazy<crate::utils::intern::Pool<Vec<WordIdInt>>> =
+    once_cell::sync::Lazy::new(Default::default);
+
+/// The words a text matcher accepts (at most a hundred), sorted and shared
+/// between the rules with the same set. Serialized as the hash set it was.
+#[derive(Debug, Clone)]
+pub(crate) struct WordSet(std::sync::Arc<Vec<WordIdInt>>);
+
+impl WordSet {
+    pub(crate) fn contains(&self, id: &WordIdInt) -> bool {
+        self.0.binary_search(id).is_ok()
+    }
+}
+
+impl From<DefaultHashSet<WordIdInt>> for WordSet {
+    fn from(set: DefaultHashSet<WordIdInt>) -> WordSet {
+        let mut ids: Vec<WordIdInt> = set.into_iter().collect();
+        ids.sort_unstable();
+        WordSet(crate::utils::intern::intern(&WORD_SETS, ids))
+    }
+}
+
+impl Serialize for WordSet {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(self.0.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for WordSet {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<WordSet, D::Error> {
+        let set: DefaultHashSet<WordIdInt> = Deserialize::deserialize(d)?;
+        Ok(set.into())
+    }
 }
 
 impl TextMatcher {
@@ -174,14 +209,52 @@ impl TextMatcher {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+static POS_TABLES: once_cell::sync::Lazy<crate::utils::intern::Pool<(usize, Vec<u64>)>> =
+    once_cell::sync::Lazy::new(Default::default);
+
+/// Which part-of-speech tags a token's tag may be: one bit per tag of the
+/// language, shared between the rules with the same table (`postag="V.*"`
+/// recurs thousands of times). Serialized as the list of booleans it was.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "PosMatcherFields", into = "PosMatcherFields")]
 pub struct PosMatcher {
-    pub mask: Vec<bool>,
+    table: std::sync::Arc<(usize, Vec<u64>)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PosMatcherFields {
+    mask: Vec<bool>,
+}
+
+impl From<PosMatcherFields> for PosMatcher {
+    fn from(f: PosMatcherFields) -> PosMatcher {
+        PosMatcher::from_mask(&f.mask)
+    }
+}
+
+impl From<PosMatcher> for PosMatcherFields {
+    fn from(m: PosMatcher) -> PosMatcherFields {
+        PosMatcherFields { mask: (0..m.table.0).map(|i| m.bit(i)).collect() }
+    }
 }
 
 impl PosMatcher {
+    pub fn from_mask(mask: &[bool]) -> PosMatcher {
+        let mut bits = vec![0u64; (mask.len() + 63) / 64];
+        for (i, &on) in mask.iter().enumerate() {
+            if on {
+                bits[i / 64] |= 1 << (i % 64);
+            }
+        }
+        PosMatcher { table: crate::utils::intern::intern(&POS_TABLES, (mask.len(), bits)) }
+    }
+
+    fn bit(&self, i: usize) -> bool {
+        i < self.table.0 && (self.table.1[i / 64] >> (i % 64)) & 1 == 1
+    }
+
     pub fn is_match(&self, pos: &PosId) -> bool {
-        self.mask[pos.id().value() as usize]
+        self.bit(pos.id().value() as usize)
     }
 }
 

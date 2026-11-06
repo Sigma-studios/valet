@@ -10,8 +10,10 @@ LanguageTool languages") with valet's fixes: LanguageTool's French word
 tokenizer, sentence-relative offsets for the built-in rules, sentence ends after
 whitespace, English `n't` and dashes, the speller's accent search and ranking,
 disambiguation filters that match nothing, inflected matching, the French
-and English word-repeat exceptions, and the dictionary and speller forms
-kept packed in memory (a third of it). Rebuilding the data needs the pull
+and English word-repeat exceptions, the dictionary, speller and
+synthesizer forms kept packed in memory, and the rules' regexes,
+part-of-speech tables and word sets shared between rules (memory down by
+half). Rebuilding the data needs the pull
 request's build tools, which are not vendored:
 
 ```sh

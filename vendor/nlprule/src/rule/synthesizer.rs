@@ -33,6 +33,47 @@ impl Default for SynthesizerKind {
     }
 }
 
+/// Rows of form indices, packed (serialized as the list of lists it was).
+#[derive(Clone, Default, Debug)]
+struct Rows {
+    starts: Vec<u32>,
+    items: Vec<u32>,
+}
+
+impl Rows {
+    fn get(&self, i: usize) -> &[u32] {
+        match (self.starts.get(i), self.starts.get(i + 1)) {
+            (Some(&a), Some(&b)) => &self.items[a as usize..b as usize],
+            _ => &[],
+        }
+    }
+}
+
+impl From<Vec<Vec<u32>>> for Rows {
+    fn from(rows: Vec<Vec<u32>>) -> Rows {
+        let mut r = Rows { starts: Vec::with_capacity(rows.len() + 1), items: Vec::new() };
+        r.starts.push(0);
+        for row in rows {
+            r.items.extend(row);
+            r.starts.push(r.items.len() as u32);
+        }
+        r
+    }
+}
+
+impl Serialize for Rows {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq((0..self.starts.len().saturating_sub(1)).map(|i| self.get(i)))
+    }
+}
+
+impl<'de> Deserialize<'de> for Rows {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Rows, D::Error> {
+        let rows: Vec<Vec<u32>> = Deserialize::deserialize(d)?;
+        Ok(rows.into())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Synthesizer {
     /// Serialized `fst::Map` mapping `lemma|POS` (sorted) to a value:
@@ -40,9 +81,9 @@ pub struct Synthesizer {
     /// * odd values encode an extended row: `(value - 1) / 2` into `rows`
     map_bytes: Vec<u8>,
     /// Extended rows (keys with more than one form): row index -> form string indices.
-    rows: Vec<Vec<u32>>,
+    rows: Rows,
     /// Interned form strings.
-    strings: Vec<String>,
+    strings: crate::rule::filter_data::Forms,
     /// (lemma, pos tag) -> manually added forms (`added.txt`)
     manual: HashMap<(String, String), Vec<String>>,
     /// (lemma, pos tag) -> forms to remove (`removed.txt`, `do-not-synthesize.txt`)
@@ -54,8 +95,8 @@ impl Synthesizer {
     pub(crate) fn new(kind: SynthesizerKind) -> Self {
         Synthesizer {
             map_bytes: Vec::new(),
-            rows: Vec::new(),
-            strings: Vec::new(),
+            rows: Rows::default(),
+            strings: Default::default(),
             manual: HashMap::new(),
             removed: HashMap::new(),
             kind,
@@ -81,12 +122,13 @@ impl Synthesizer {
     fn value_forms(&self, value: u64) -> Vec<String> {
         if value % 2 == 0 {
             // single form encoded directly in the value
-            vec![self.strings[((value - 2) / 2) as usize].clone()]
+            vec![self.strings.get(((value - 2) / 2) as usize).unwrap_or("").to_string()]
         } else {
             // extended row
-            self.rows[((value - 1) / 2) as usize]
+            self.rows
+                .get(((value - 1) / 2) as usize)
                 .iter()
-                .map(|i| self.strings[*i as usize].clone())
+                .map(|i| self.strings.get(*i as usize).unwrap_or("").to_string())
                 .collect()
         }
     }
@@ -352,8 +394,8 @@ mod build {
             );
 
             synthesizer.map_bytes = map_builder.into_inner().expect("FST must be buildable");
-            synthesizer.rows = rows;
-            synthesizer.strings = strings;
+            synthesizer.rows = rows.into();
+            synthesizer.strings = strings.into();
         }
 
         for path in manual {

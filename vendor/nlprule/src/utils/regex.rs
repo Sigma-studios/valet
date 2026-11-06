@@ -9,19 +9,33 @@ use std::hash::{Hash, Hasher};
 
 pub use regex_impl::{CaptureMatches, Captures, Match, Matches};
 
+/// The pattern and its compiled form, shared by every rule using it
+/// (compiled once, on first use).
 #[derive(Debug)]
-pub struct Regex {
+struct Inner {
     regex_str: String,
     regex: OnceCell<regex_impl::Regex>,
 }
 
-impl Clone for Regex {
-    fn clone(&self) -> Self {
-        Regex {
-            regex_str: self.regex_str.clone(),
-            regex: OnceCell::new(),
-        }
+impl PartialEq for Inner {
+    fn eq(&self, other: &Self) -> bool {
+        self.regex_str == other.regex_str
     }
+}
+
+impl Eq for Inner {}
+
+impl Hash for Inner {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.regex_str.hash(state);
+    }
+}
+
+static POOL: once_cell::sync::Lazy<super::intern::Pool<Inner>> = once_cell::sync::Lazy::new(Default::default);
+
+#[derive(Debug, Clone)]
+pub struct Regex {
+    inner: std::sync::Arc<Inner>,
 }
 
 impl Serialize for Regex {
@@ -29,7 +43,7 @@ impl Serialize for Regex {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.regex_str)
+        serializer.serialize_str(&self.inner.regex_str)
     }
 }
 
@@ -45,14 +59,14 @@ impl<'de> Deserialize<'de> for Regex {
 
 impl Hash for Regex {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.regex_str.hash(state);
+        self.inner.regex_str.hash(state);
     }
 }
 
 impl Regex {
     /// Gets the pattern string.
     pub fn as_str(&self) -> &str {
-        &self.regex_str
+        &self.inner.regex_str
     }
 
     /// Create a new regex from the pattern string.
@@ -60,22 +74,20 @@ impl Regex {
     /// Note that the regex compilation happens on first use, which is why this method does not
     /// return a result.
     pub fn new(regex_str: String) -> Self {
-        Self {
-            regex_str,
-            regex: OnceCell::new(),
-        }
+        Self { inner: super::intern::intern(&POOL, Inner { regex_str, regex: OnceCell::new() }) }
     }
 
     /// Check whether the pattern compiles as a valid regex.
     #[allow(dead_code)] // used only in compile module
     pub fn try_compile(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
-        regex_impl::Regex::new(&self.regex_str).map(|_| ())
+        regex_impl::Regex::new(&self.inner.regex_str).map(|_| ())
     }
 
     fn regex(&self) -> &regex_impl::Regex {
-        self.regex.get_or_init(|| {
-            regex_impl::Regex::new(&self.regex_str)
-                .unwrap_or_else(|_| panic!("regex string should be pre-tested: {}", self.regex_str))
+        let inner = &*self.inner;
+        inner.regex.get_or_init(|| {
+            regex_impl::Regex::new(&inner.regex_str)
+                .unwrap_or_else(|_| panic!("regex string should be pre-tested: {}", inner.regex_str))
         })
     }
 

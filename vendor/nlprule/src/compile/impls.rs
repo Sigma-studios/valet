@@ -428,7 +428,7 @@ impl TextMatcher {
             None
         };
 
-        TextMatcher { matcher, set }
+        TextMatcher { matcher, set: set.map(Into::into) }
     }
 }
 
@@ -440,7 +440,7 @@ impl PosMatcher {
             mask[id.value() as usize] = matcher.is_match(word.as_str(), None, None);
         }
 
-        PosMatcher { mask }
+        PosMatcher::from_mask(&mask)
     }
 }
 

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 /// index of one original-cased form. Approximates LT's `MorfologikSpeller`.
 /// The speller's forms, packed in one string (serialized as the list of
 /// them, so binaries are unchanged): a `Vec<String>` costs ~40 bytes a form.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct Forms {
     text: String,
     ends: Vec<u32>,

@@ -213,7 +213,7 @@ All through the environment:
 | `LISTEN` | web UI and CalDAV, default `0.0.0.0:8080` |
 | `IMAP_LISTEN` | default `0.0.0.0:1143` |
 | `SMTP_LISTEN` | mail submission, default `0.0.0.0:1587` |
-| `VALET_SPELL` | languages checked as you write: `en`, `fr`, `de` (default `en,fr`); `off` turns it off. English and French take about 400 MB of memory, German about 340 MB more |
+| `VALET_SPELL` | languages checked as you write: `en`, `fr`, `de` (default `en,fr`); `off` turns it off. English and French take about 300 MB of memory, German about 280 MB more |
 
 valet speaks plain HTTP, IMAP and SMTP: put it behind something that adds TLS
 (façade does, for the web and, with `--tls-port`, for the mail ports).
@@ -292,7 +292,7 @@ LanguageTool's rules (about 5,300 for French, 5,700 for English, 5,500 for Germa
 by [nlprule](https://github.com/bminixhofer/nlprule) (its pull request #92,
 with valet's fixes, in `vendor/nlprule`), on data compiled from LanguageTool
 6.5 and kept compressed in `spell/` (see `spell/README.md`). The languages load
-in the background in a few seconds after valet starts; they take about 400 MB
+in the background in a few seconds after valet starts; they take about 300 MB
 of memory for English and French together (`VALET_SPELL` to choose or turn it
 off), and a check takes some tens of milliseconds.
 

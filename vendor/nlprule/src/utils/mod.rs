@@ -2,6 +2,7 @@ use lazy_static::lazy_static;
 
 pub mod parallelism;
 pub mod regex;
+pub(crate) mod intern;
 
 use regex::Regex;
 
