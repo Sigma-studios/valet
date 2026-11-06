@@ -11,6 +11,80 @@ use std::collections::HashMap;
 
 /// A speller vocabulary: an FST over lowercased word forms mapping to the
 /// index of one original-cased form. Approximates LT's `MorfologikSpeller`.
+/// The speller's forms, packed in one string (serialized as the list of
+/// them, so binaries are unchanged): a `Vec<String>` costs ~40 bytes a form.
+#[derive(Default, Clone)]
+pub struct Forms {
+    text: String,
+    ends: Vec<u32>,
+}
+
+impl Forms {
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    pub fn get(&self, i: usize) -> Option<&str> {
+        let end = *self.ends.get(i)? as usize;
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        self.text.get(start..end)
+    }
+
+    /// Forms `first..first + count` (fewer past the end).
+    pub fn range(&self, first: usize, count: usize) -> Vec<&str> {
+        (first..first + count).map_while(|i| self.get(i)).collect()
+    }
+}
+
+impl From<Vec<String>> for Forms {
+    fn from(list: Vec<String>) -> Forms {
+        let mut f = Forms { text: String::with_capacity(list.iter().map(String::len).sum()), ends: Vec::with_capacity(list.len()) };
+        for w in &list {
+            f.text.push_str(w);
+            f.ends.push(f.text.len() as u32);
+        }
+        f
+    }
+}
+
+impl Serialize for Forms {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.len()))?;
+        for i in 0..self.len() {
+            seq.serialize_element(self.get(i).unwrap_or(""))?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Forms {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Forms, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Forms;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list of forms")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Forms, A::Error> {
+                // one form at a time: no Vec<String> of them all at once
+                let mut f = Forms { text: String::new(), ends: Vec::with_capacity(seq.size_hint().unwrap_or(0)) };
+                while let Some(w) = seq.next_element::<std::borrow::Cow<'de, str>>()? {
+                    f.text.push_str(&w);
+                    f.ends.push(f.text.len() as u32);
+                }
+                f.text.shrink_to_fit();
+                Ok(f)
+            }
+        }
+        d.deserialize_seq(V)
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct SpellerDict {
     /// `fst::Map` data: lowercased form -> `(index << 5) | frequency`,
@@ -19,7 +93,7 @@ pub struct SpellerDict {
     /// conversion) the keys keep their original case instead.
     pub map_bytes: Vec<u8>,
     /// Original-cased forms (all case variants kept: "pero", "Pero").
-    pub forms: Vec<String>,
+    pub forms: Forms,
     /// morfologik frequency rank (0..=25) per form, parallel to `forms`.
     pub freqs: Vec<u8>,
     /// LT dictionaries without case conversion (pl_PL) keep proper-noun
@@ -81,13 +155,13 @@ impl SpellerDict {
     }
 
     /// The original-cased dictionary forms sharing `word`'s lowercase key.
-    pub fn variants(&self, word: &str) -> &[String] {
+    pub fn variants(&self, word: &str) -> Vec<&str> {
         match self.map().get(word.to_lowercase()) {
             Some(value) => {
                 let (first, count) = Self::unpack(value);
-                self.forms.get(first..first + count).unwrap_or(&[])
+                self.forms.range(first, count)
             }
-            None => &[],
+            None => Vec::new(),
         }
     }
 
@@ -112,7 +186,7 @@ impl SpellerDict {
     /// too lenient there.
     pub fn is_known_cased(&self, word: &str) -> bool {
         let variants = self.variants(word);
-        if variants.iter().any(|v| v == word) {
+        if variants.iter().any(|v| *v == word) {
             return true;
         }
         let mut chars = word.chars();
@@ -254,7 +328,7 @@ impl SpellerDict {
                                 continue;
                             }
                             let freq = self.freqs.get(first + k).copied().unwrap_or(0);
-                            out.push((d, freq, form.clone()));
+                            out.push((d, freq, form.to_string()));
                         }
                     }
                 }
@@ -284,7 +358,7 @@ impl SpellerDict {
                                 continue;
                             }
                             let freq = self.freqs.get(first + k).copied().unwrap_or(0);
-                            out.push((d, freq, form.clone()));
+                            out.push((d, freq, form.to_string()));
                         }
                     }
                 }

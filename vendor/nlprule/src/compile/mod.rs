@@ -365,7 +365,7 @@ fn build_filter_data(
         }
         data.speller = Some(SpellerDict {
             map_bytes: builder.into_inner().unwrap_or_default(),
-            forms: grouped_forms,
+            forms: grouped_forms.into(),
             freqs: grouped_freqs,
             case_sensitive: false,
             eq_pairs: Vec::new(),

@@ -296,6 +296,16 @@ impl<'a, T> UnsafeSlice<'a, T> {
 
 impl From<TaggerFields> for Tagger {
     fn from(data: TaggerFields) -> Self {
+        // checking only (no compile feature): keep the dictionary compact
+        if cfg!(not(feature = "compile")) {
+            return Tagger {
+                tags: WordIdMap(Vec::new()),
+                tag_store: data.tag_store,
+                word_store: BiMap::new(),
+                lang_options: data.lang_options,
+                compact: Some(Compact::from_fsts(data.word_store_fst, data.tag_fst)),
+            };
+        }
         let word_store_fst = Map::new(data.word_store_fst).unwrap();
         let mut word_store: BiMap<String, WordIdInt> = BiMap::with_capacity(word_store_fst.len());
         let mut stream = word_store_fst.into_stream();
@@ -372,6 +382,7 @@ impl From<TaggerFields> for Tagger {
             tag_store: data.tag_store,
             word_store,
             lang_options: data.lang_options,
+            compact: None,
         }
     }
 }
@@ -533,12 +544,99 @@ pub struct Tagger {
     pub(crate) tag_store: BiMap<String, PosIdInt>,
     pub(crate) word_store: BiMap<String, WordIdInt>,
     pub(crate) lang_options: TaggerLangOptions,
+    /// Set when loaded outside the `compile` feature: `word_store` and
+    /// `tags` stay empty and this holds the same, in a tenth of the memory.
+    pub(crate) compact: Option<Compact>,
+}
+
+/// The tagger's dictionary as loaded for checking: word -> id in the FST it
+/// is stored as, id -> word in one string, and the readings of every word
+/// in one array (`tag_starts[id]..tag_starts[id + 1]`).
+#[derive(Clone, Default)]
+pub(crate) struct Compact {
+    ids: Map<Vec<u8>>,
+    text: String,
+    word_ends: Vec<u32>,
+    tag_starts: Vec<u32>,
+    tags: Vec<(WordIdInt, PosIdInt)>,
+}
+
+impl Compact {
+    fn from_fsts(word_store_fst: Vec<u8>, tag_fst: Vec<u8>) -> Compact {
+        let ids = Map::new(word_store_fst).unwrap();
+        // id -> word
+        let mut words: Vec<(u32, Vec<u8>)> = Vec::with_capacity(ids.len());
+        let mut stream = ids.stream();
+        while let Some((key, value)) = stream.next() {
+            words.push((value as u32, key.to_vec()));
+        }
+        words.sort_unstable_by_key(|w| w.0);
+        let n = words.last().map_or(0, |w| w.0 as usize + 1);
+        let mut text = String::with_capacity(words.iter().map(|w| w.1.len()).sum());
+        let mut word_ends = vec![0u32; n];
+        let mut at = 0;
+        for (id, key) in &words {
+            // ids are dense; a gap keeps the previous end (an empty word)
+            for e in &mut word_ends[at..*id as usize] {
+                *e = text.len() as u32;
+            }
+            text.push_str(std::str::from_utf8(key).expect("word store keys are valid utf-8."));
+            word_ends[*id as usize] = text.len() as u32;
+            at = *id as usize + 1;
+        }
+        drop(words);
+        // readings, grouped by word id in the order they were stored
+        let tag_map = Map::new(tag_fst).unwrap();
+        let mut readings: Vec<(u32, WordIdInt, PosIdInt)> = Vec::with_capacity(tag_map.len());
+        let mut stream = tag_map.stream();
+        while let Some((key, value)) = stream.next() {
+            let word = &key[..key.len() - 1];
+            let Some(word_id) = ids.get(word) else { continue };
+            let v = value.to_be_bytes();
+            let lemma_id = WordIdInt(u32::from_be_bytes([v[0], v[1], v[2], v[3]]));
+            let pos_id = PosIdInt(u16::from_be_bytes([v[6], v[7]]));
+            readings.push((word_id as u32, lemma_id, pos_id));
+        }
+        readings.sort_by_key(|r| r.0);
+        let mut tag_starts = vec![0u32; n + 1];
+        for r in &readings {
+            tag_starts[r.0 as usize + 1] += 1;
+        }
+        for i in 0..n {
+            tag_starts[i + 1] += tag_starts[i];
+        }
+        let tags = readings.into_iter().map(|r| (r.1, r.2)).collect();
+        Compact { ids, text, word_ends, tag_starts, tags }
+    }
+
+    fn id(&self, word: &str) -> Option<WordIdInt> {
+        self.ids.get(word).map(|v| WordIdInt(v as u32))
+    }
+
+    fn word(&self, id: &WordIdInt) -> Option<&str> {
+        let i = id.0 as usize;
+        let end = *self.word_ends.get(i)? as usize;
+        let start = if i == 0 { 0 } else { self.word_ends[i - 1] as usize };
+        self.text.get(start..end)
+    }
+
+    fn readings(&self, id: &WordIdInt) -> &[(WordIdInt, PosIdInt)] {
+        let i = id.0 as usize;
+        match (self.tag_starts.get(i), self.tag_starts.get(i + 1)) {
+            (Some(&a), Some(&b)) => &self.tags[a as usize..b as usize],
+            _ => &[],
+        }
+    }
 }
 
 impl Tagger {
     /// Directly looks up the given word in the `tags` map and returns
     /// corresponding [WordData].
     fn get_raw(&self, word: &str) -> RawTagIter {
+        if let Some(c) = &self.compact {
+            let slice = c.id(word).map_or(&[][..], |id| c.readings(&id));
+            return RawTagIter { tagger: &self, slice_iter: slice.iter() };
+        }
         let slice = if let Some(pairs) = self
             .word_store
             .get_by_left(word)
@@ -613,6 +711,9 @@ impl Tagger {
 
     /// Gets the string associated with a word ID.
     fn str_for_word_id(&self, id: &WordIdInt) -> &str {
+        if let Some(c) = &self.compact {
+            return c.word(id).expect("only valid word ids are created");
+        }
         self.word_store
             .get_by_right(id)
             .expect("only valid word ids are created")
@@ -670,7 +771,10 @@ impl Tagger {
     /// Tags the given text.
     /// Unknown words will not get a numerical id.
     pub fn id_word<'a>(&self, text: Cow<'a, str>) -> WordId<'a> {
-        let id = self.word_store.get_by_left(text.as_ref()).copied();
+        let id = match &self.compact {
+            Some(c) => c.id(text.as_ref()),
+            None => self.word_store.get_by_left(text.as_ref()).copied(),
+        };
         WordId(text, id)
     }
 

@@ -3,10 +3,10 @@
 //! fixes for French, English and the speller), on data compiled from
 //! LanguageTool 6.5 and embedded zstd-compressed (spell/*.bin.zst).
 //!
-//! The languages load on a thread at start (about 270 MB of memory each and
+//! The languages load on a thread at start (about 200 MB of memory each and
 //! a second or two), so valet answers at once; until they are loaded a check
 //! says so and the editor tries again later. `VALET_SPELL` lists the
-//! languages (default `en,fr`; `de` too, about 500 MB more); `off` turns
+//! languages (default `en,fr`; `de` too, about 340 MB more); `off` turns
 //! checking off.
 
 use std::sync::OnceLock;

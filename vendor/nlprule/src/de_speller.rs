@@ -146,7 +146,7 @@ fn starts_upper(s: &str) -> bool {
 
 /// A capitalized dictionary form (a noun, in German).
 fn known_noun(word: &str, speller: &SpellerDict) -> bool {
-    starts_upper(word) && speller.variants(word).iter().any(|v| v == word)
+    starts_upper(word) && speller.variants(word).iter().any(|v| *v == word)
 }
 
 /// LT's GermanSpellerRule accepts noun compounds its splitter can cut into
@@ -248,7 +248,7 @@ pub(crate) fn suggestions(
     // 1. the same word in another case ("rechnung" -> "Rechnung")
     for v in speller.variants(word) {
         if v != word && is_correct(v, speller) {
-            push(&mut out, v.clone());
+            push(&mut out, v.to_string());
         }
     }
     // candidates are checked without the compound heuristic (cheap)

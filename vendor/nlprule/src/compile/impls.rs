@@ -215,6 +215,7 @@ impl Tagger {
             word_store,
             tag_store,
             lang_options,
+            compact: None,
         })
     }
 }

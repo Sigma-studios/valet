@@ -9,8 +9,9 @@ LanguageTool's data; the code in `vendor/nlprule` is MIT or Apache-2.0.
 LanguageTool languages") with valet's fixes: LanguageTool's French word
 tokenizer, sentence-relative offsets for the built-in rules, sentence ends after
 whitespace, English `n't` and dashes, the speller's accent search and ranking,
-disambiguation filters that match nothing, inflected matching, and the French
-and English word-repeat exceptions. Rebuilding the data needs the pull
+disambiguation filters that match nothing, inflected matching, the French
+and English word-repeat exceptions, and the dictionary and speller forms
+kept packed in memory (a third of it). Rebuilding the data needs the pull
 request's build tools, which are not vendored:
 
 ```sh
