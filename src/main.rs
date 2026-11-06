@@ -204,7 +204,15 @@ pub fn router(app: Arc<App>) -> axum::Router {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter({
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+            // the spelling checker says each rule it applies, at info
+            if std::env::var("RUST_LOG").map_or(true, |v| !v.contains("nlprule")) {
+                filter.add_directive("nlprule=warn".parse().expect("a valid directive"))
+            } else {
+                filter
+            }
+        })
         .init();
     let config = Config::from_env()?;
     let data_dir = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "data".into()));
