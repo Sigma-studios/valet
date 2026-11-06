@@ -1,6 +1,7 @@
 mod accounts;
 mod alarms;
 mod calendar;
+mod contacts;
 mod dav;
 mod folders;
 mod ical;
@@ -244,6 +245,7 @@ async fn main() -> Result<()> {
         compacting.mail.compact();
         compacting.mail.measure();
         compacting.mail.index_search();
+        contacts::update(&compacting);
     });
     tracing::info!("{} mail accounts", app.accounts().len());
     let stopping = app.clone();

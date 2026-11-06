@@ -804,6 +804,37 @@ impl MailStore {
         }
     }
 
+    /// The headers of the messages kept after blob `after` (its rowid),
+    /// `limit` at a time, in the order they were kept: (rowid, headers). Only
+    /// the start of each is read, so attachments cost nothing.
+    pub fn heads_after(&self, after: i64, limit: usize) -> Vec<(i64, Vec<u8>)> {
+        const START: usize = 64 * 1024;
+        let rows: Vec<(i64, Vec<u8>)> = {
+            let c = self.db();
+            let mut st = c.prepare("SELECT rowid, substr(data, 1, ?3) FROM blobs WHERE rowid > ?1 ORDER BY rowid LIMIT ?2").unwrap();
+            st.query_map(params![after, limit as i64, START as i64], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().filter_map(Result::ok).collect()
+        };
+        rows.into_iter()
+            .map(|(id, data)| {
+                let mut raw = Vec::new();
+                if data.starts_with(&ZSTD_MAGIC) {
+                    // a cut frame: what it decodes to before the cut
+                    if let Ok(d) = zstd::stream::read::Decoder::new(data.as_slice()) {
+                        use std::io::Read;
+                        let _ = d.take(START as u64).read_to_end(&mut raw);
+                    }
+                } else {
+                    raw = data;
+                }
+                if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n").or_else(|| raw.windows(2).position(|w| w == b"\n\n")) {
+                    raw.truncate(end);
+                }
+                raw.extend_from_slice(b"\r\n\r\n");
+                (id, raw)
+            })
+            .collect()
+    }
+
     /// Once for the messages kept before search had an index: their words,
     /// a few at a time, read without holding the store. Search reads every
     /// message, as it did, until it's done.
@@ -1699,6 +1730,22 @@ mod tests {
         assert!(m.mailbox(inbox).is_none() && m.status("b").is_none());
         assert_eq!(m.count(m.all_inboxes()).0, 0);
         assert_eq!(m.db().query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn heads_are_read_without_the_rest() {
+        let s = MailStore::memory();
+        let json = r#"{"id":"a","name":"A","address":"a@x.fr","imap":"i:993","smtp":"s:465","password":"p"}"#;
+        s.put_account(&serde_json::from_str(json).unwrap()).unwrap();
+        let inbox = s.remote_mailbox("a", "INBOX", "A/INBOX", "").unwrap();
+        let big = format!("From: Zoé <zoe@far.test>\r\nTo: a@x.fr\r\nSubject: big\r\nMessage-ID: <big@x>\r\n\r\n{}", "attachment line of text\r\n".repeat(12_000));
+        s.add_fetched(inbox, big.as_bytes(), &[], 0, 1).unwrap();
+        s.add_fetched(inbox, &raw("small@x"), &[], 0, 2).unwrap();
+        let heads = s.heads_after(0, 10);
+        assert_eq!(heads.len(), 2);
+        let first = String::from_utf8(heads[0].1.clone()).unwrap();
+        assert!(first.starts_with("From: Zoé <zoe@far.test>") && first.ends_with("<big@x>\r\n\r\n"), "{first:?}");
+        assert!(s.heads_after(heads[1].0, 10).is_empty(), "nothing after the last");
     }
 
     #[test]

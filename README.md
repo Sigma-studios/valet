@@ -32,7 +32,9 @@ the native apps of every device.
   with attachments, invitations, a date range; in *All mail*, hiding Spam and
   Trash; the filters on show as chips under the search, each removed with its
   ✕), reading, *Not spam* (back to the account's inbox), and writing with
-  formatting (reply, reply all, forward, attachments). What you write is saved
+  formatting (reply, reply all, forward, attachments), To, Cc and Bcc completing
+  the address being typed from the people you've written to (first) or heard
+  from. What you write is saved
   as a draft in the account's Drafts folder every few seconds, so it carries on
   from another device or app. Folders can be created, renamed and deleted, here
   or from a mail app, and the provider follows. It works on the same copy as the mail
@@ -315,4 +317,5 @@ e2e/run_ui.sh <dir>         # the tree editor's routes
 e2e/run_webmail.sh <dir>
 e2e/run_calendar.sh <dir>   # the calendar page and the app; with Chrome, also in a headless Chrome, offline included
 e2e/run_notify.sh <dir>     # new mail told; CHROME_PUSH=1: real Web Push in a headless Chrome (needs the internet)
+e2e/run_addresses.sh <dir>  # completing addresses in the composer, the route and in a headless Chrome
 ```

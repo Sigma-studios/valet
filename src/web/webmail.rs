@@ -2956,6 +2956,107 @@ const EDITOR_SCRIPT: &str = r#"
 })();
 "#;
 
+const ADDRESS_CSS: &str = r#"
+.addr-pop { position:absolute; z-index:50; margin:0; padding:4px; list-style:none; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,.18); max-width:min(480px, calc(100vw - 16px)); }
+.addr-pop li { padding:6px 10px; border-radius:6px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.addr-pop li.on { background:var(--line); }
+.addr-pop .who { font-weight:600; }
+.addr-pop .at { color:var(--muted); margin-left:6px; }
+"#;
+
+/// To, Cc and Bcc complete the address being typed (after the last comma)
+/// from the people mail was sent to or received from: arrows to choose,
+/// Enter or Tab to take, Escape to leave.
+const ADDRESS_SCRIPT: &str = r#"
+(() => {
+  let pop = null, items = [], on = 0, seq = 0, timer = null, input = null;
+  const hide = () => { if (pop) { pop.remove(); pop = null; } items = []; };
+  // The part of the field being typed: from the separator before the caret to the one after.
+  const part = el => {
+    const v = el.value, at = el.selectionStart ?? v.length;
+    const start = Math.max(v.lastIndexOf(',', at - 1), v.lastIndexOf(';', at - 1)) + 1;
+    let end = v.slice(at).search(/[,;]/);
+    end = end < 0 ? v.length : at + end;
+    return { start, end, typed: v.slice(start, at).trim() };
+  };
+  const show = (el, found) => {
+    hide();
+    const taken = el.value.toLowerCase();
+    items = found.filter(f => !taken.includes(f.address.toLowerCase()));
+    if (!items.length) return;
+    on = 0;
+    pop = document.createElement('ul');
+    pop.className = 'addr-pop';
+    pop.setAttribute('role', 'listbox');
+    items.forEach((f, i) => {
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      if (f.name) {
+        const who = document.createElement('span'); who.className = 'who'; who.textContent = f.name;
+        const at = document.createElement('span'); at.className = 'at'; at.textContent = f.address;
+        li.append(who, at);
+      } else {
+        li.textContent = f.address;
+      }
+      li.addEventListener('mousedown', e => { e.preventDefault(); take(el, i); });
+      pop.append(li);
+    });
+    document.body.append(pop);
+    const r = el.getBoundingClientRect();
+    pop.style.left = (r.left + scrollX) + 'px';
+    pop.style.top = (r.bottom + scrollY + 2) + 'px';
+    pop.style.minWidth = Math.min(r.width, 320) + 'px';
+    mark();
+  };
+  const mark = () => { if (pop) [...pop.children].forEach((li, i) => li.classList.toggle('on', i === on)); };
+  const take = (el, i) => {
+    const f = items[i];
+    if (!f) return;
+    const { start, end } = part(el);
+    const name = f.name && /[,;"<>@()]/.test(f.name) ? '"' + f.name.replace(/"/g, '') + '"' : f.name;
+    const one = name ? name + ' <' + f.address + '>' : f.address;
+    const before = el.value.slice(0, start).replace(/\s*$/, start ? ' ' : '');
+    const after = el.value.slice(end).replace(/^[,;]?\s*/, '');
+    el.value = before + one + ', ' + after;
+    const caret = (before + one + ', ').length;
+    el.setSelectionRange(caret, caret);
+    hide();
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const look = async el => {
+    const { typed } = part(el);
+    const mine = ++seq;
+    if (!typed) { hide(); return; }
+    let found;
+    try {
+      const r = await fetch('/compose/addresses?q=' + encodeURIComponent(typed));
+      if (!r.ok) return;
+      found = await r.json();
+    } catch (e) { return; }
+    if (mine !== seq || document.activeElement !== el || part(el).typed !== typed) return;
+    show(el, found);
+  };
+  for (const el of document.querySelectorAll('input[data-addresses]')) {
+    el.addEventListener('input', e => {
+      if (!e.isTrusted) return;
+      input = el;
+      clearTimeout(timer);
+      timer = setTimeout(() => look(el), 120);
+    });
+    el.addEventListener('keydown', e => {
+      if (!pop) return;
+      if (e.key === 'ArrowDown') { e.preventDefault(); on = (on + 1) % items.length; mark(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); on = (on + items.length - 1) % items.length; mark(); }
+      else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); take(el, on); }
+      else if (e.key === 'Escape') { e.preventDefault(); hide(); }
+    });
+    el.addEventListener('blur', () => { seq++; hide(); });
+  }
+  addEventListener('resize', hide);
+})();
+"#;
+
 fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
     let accounts: Vec<Account> = app.accounts().into_iter().filter(|a| a.retired.is_none()).collect();
     let senders: Vec<(String, String)> = accounts
@@ -2967,7 +3068,7 @@ fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
         html! { button type="button" data-cmd=(cmd) data-arg=(arg) title=(title) { (label) } }
     };
     mail_page("Write", inbox, app, html! {
-        style { (PreEscaped(EDITOR_CSS)) }
+        style { (PreEscaped(EDITOR_CSS)) (PreEscaped(ADDRESS_CSS)) }
         @if let Some(e) = err { p.err { (e) } }
         @if senders.is_empty() {
             p.muted { "Add a mail account first, on the " a href="/mail" { "Accounts" } " page." }
@@ -2976,9 +3077,9 @@ fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
                 label { "From" select name="from" {
                     @for (addr, name) in &senders { option value=(addr) selected[addr.eq_ignore_ascii_case(&d.from)] { (addr) " (" (name) ")" } }
                 } }
-                label { "To" input name="to" value=(d.to) placeholder="name@example.com, …" autofocus[d.to.is_empty()]; }
-                label { "Cc" input name="cc" value=(d.cc); }
-                details open[!d.bcc.is_empty()] { summary.small { "Bcc" } label { input name="bcc" value=(d.bcc); } }
+                label { "To" input name="to" value=(d.to) placeholder="name@example.com, …" autofocus[d.to.is_empty()] autocomplete="off" data-addresses; }
+                label { "Cc" input name="cc" value=(d.cc) autocomplete="off" data-addresses; }
+                details open[!d.bcc.is_empty()] { summary.small { "Bcc" } label { input name="bcc" value=(d.bcc) autocomplete="off" data-addresses; } }
                 label { "Subject" input name="subject" value=(d.subject); }
                 div {
                     div.editor-bar {
@@ -3017,6 +3118,7 @@ fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
                 }
             }
             script { (PreEscaped(EDITOR_SCRIPT)) }
+            script { (PreEscaped(ADDRESS_SCRIPT)) }
         }
     })
 }
@@ -3189,6 +3291,17 @@ pub async fn refresh(State(app): St, headers: HeaderMap, Query(q): Query<Refresh
 
 /// Saves the form as a draft in the From account's Drafts folder, replacing
 /// the one saved before. Answers the new draft's id and its attachments.
+/// Addresses mail was sent to or received from, for what is typed in To, Cc
+/// or Bcc (see `contacts`).
+pub async fn compose_addresses(State(app): St, headers: HeaderMap, Query(s): Query<SuggestQuery>) -> Response {
+    if !authed(&app, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let found = tokio::task::spawn_blocking(move || crate::contacts::suggest(&app, &s.q, 8)).await.unwrap_or_default();
+    let found: Vec<serde_json::Value> = found.into_iter().map(|(name, address)| serde_json::json!({ "name": name, "address": address })).collect();
+    axum::Json(found).into_response()
+}
+
 pub async fn save_draft(State(app): St, headers: HeaderMap, form: Multipart) -> Response {
     if !super::authed(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "logged out" }))).into_response();

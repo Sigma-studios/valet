@@ -77,6 +77,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/msg/{id}/cid/{cid}", get(webmail::cid))
         .route("/compose", get(webmail::compose).post(webmail::send))
         .route("/compose/draft", post(webmail::save_draft))
+        .route("/compose/addresses", get(webmail::compose_addresses))
         .route("/mail/refresh", post(webmail::refresh))
         .route("/mail/events", get(webmail::events))
         .route("/folders/{account}", get(webmail::folders_page).post(webmail::create_folder))
