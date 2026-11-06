@@ -3057,6 +3057,152 @@ const ADDRESS_SCRIPT: &str = r#"
 })();
 "#;
 
+const SPELL_CSS: &str = r#"
+::highlight(valet-spelling) { text-decoration: underline wavy var(--bad); text-decoration-skip-ink: none; text-underline-offset: 3px; }
+::highlight(valet-grammar) { text-decoration: underline wavy var(--accent); text-decoration-skip-ink: none; text-underline-offset: 3px; }
+.spell-pop { position:absolute; z-index:50; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,.18); padding:4px; min-width:160px; max-width:320px; font-size:14px; }
+.spell-pop .msg { color:var(--muted); font-size:12px; margin:4px 8px 6px; }
+.spell-pop button { display:block; width:100%; text-align:left; background:none; border:none; color:var(--fg); padding:6px 8px; border-radius:6px; font-weight:600; cursor:pointer; }
+.spell-pop button:hover { background:var(--line); }
+.spell-pop button.ignore { font-weight:normal; color:var(--muted); }
+"#;
+
+/// Spelling and grammar checking as one writes: the text goes to
+/// /compose/check a moment after typing stops, mistakes are underlined with
+/// the CSS Custom Highlight API (nothing is added to what is written), and a
+/// click on one offers its corrections.
+const SPELL_SCRIPT: &str = r#"
+(() => {
+  const ed = document.querySelector('form.write .editor');
+  if (!ed || !(window.CSS && CSS.highlights && window.Highlight)) return;
+  const marks = { spelling: new Highlight(), grammar: new Highlight() };
+  CSS.highlights.set('valet-spelling', marks.spelling);
+  CSS.highlights.set('valet-grammar', marks.grammar);
+  const BLOCK = /^(DIV|P|LI|UL|OL|H[1-6]|PRE|TABLE|TR|TD|TH)$/;
+  let found = [], timer = null, seq = 0, pop = null;
+  const ignored = new Set();
+  // What was written, as one string with a line per block, and where each
+  // text node starts in it. Quoted mail (<blockquote>) is not checked.
+  const read = () => {
+    let text = '';
+    const parts = [];
+    const nl = () => { if (text && !text.endsWith('\n')) text += '\n'; };
+    const walk = node => {
+      for (const n of node.childNodes) {
+        if (n.nodeType === 3) { parts.push({ node: n, at: text.length }); text += n.data; }
+        else if (n.nodeType === 1) {
+          if (n.tagName === 'BLOCKQUOTE') { nl(); continue; }
+          if (n.tagName === 'BR') { text += '\n'; continue; }
+          const block = BLOCK.test(n.tagName);
+          if (block) nl();
+          walk(n);
+          if (block) nl();
+        }
+      }
+    };
+    walk(ed);
+    return { text, parts };
+  };
+  // The node and offset of a position in the string; an end position stays
+  // in the text node it ends.
+  const locate = (parts, pos, end) => {
+    let lo = 0, hi = parts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (parts[mid].at < pos || (!end && parts[mid].at === pos)) lo = mid; else hi = mid - 1;
+    }
+    const p = parts[lo];
+    return p && { node: p.node, offset: Math.min(Math.max(pos - p.at, 0), p.node.data.length) };
+  };
+  const paint = () => {
+    marks.spelling.clear(); marks.grammar.clear();
+    found = found.filter(f => !f.range.collapsed && !ignored.has(f.word));
+    for (const f of found) marks[f.m.kind === 'spelling' ? 'spelling' : 'grammar'].add(f.range);
+  };
+  const check = async () => {
+    const { text, parts } = read();
+    const mine = ++seq;
+    if (!text.trim()) { found = []; paint(); return; }
+    let j;
+    try {
+      const r = await fetch('/compose/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
+      if (!r.ok) return;
+      j = await r.json();
+    } catch (e) { return; }
+    if (mine !== seq || !j.enabled) return;
+    if (!j.ready) { clearTimeout(timer); timer = setTimeout(check, 3000); return; }
+    if (read().text !== text) { schedule(); return; }
+    found = [];
+    for (const m of j.mistakes) {
+      const a = locate(parts, m.start, false), b = locate(parts, m.end, true);
+      if (!a || !b) continue;
+      const range = document.createRange();
+      try { range.setStart(a.node, a.offset); range.setEnd(b.node, b.offset); } catch (e) { continue; }
+      found.push({ range, m, word: text.slice(m.start, m.end) });
+    }
+    paint();
+  };
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(check, 800); };
+  const hide = () => { if (pop) { pop.remove(); pop = null; } };
+  const at = () => {
+    const sel = getSelection();
+    if (!sel.rangeCount || !sel.isCollapsed) return null;
+    return found.find(f => f.range.isPointInRange(sel.anchorNode, sel.anchorOffset));
+  };
+  const show = f => {
+    hide();
+    pop = document.createElement('div');
+    pop.className = 'spell-pop';
+    const msg = document.createElement('div');
+    msg.className = 'msg';
+    msg.textContent = f.m.message;
+    pop.append(msg);
+    const button = (label, cls, act) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      if (cls) b.className = cls;
+      b.addEventListener('mousedown', e => e.preventDefault());
+      b.addEventListener('click', () => { act(); hide(); });
+      pop.append(b);
+    };
+    for (const rep of f.m.replacements) {
+      button(rep, '', () => {
+        ed.focus();
+        const sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(f.range);
+        document.execCommand('insertText', false, rep);
+        found = found.filter(x => x !== f);
+        paint();
+      });
+    }
+    button(f.m.kind === 'spelling' ? 'Ignore this word' : 'Ignore', 'ignore', () => { ignored.add(f.word); paint(); });
+    document.body.append(pop);
+    const r = f.range.getBoundingClientRect();
+    const left = Math.min(r.left + scrollX, scrollX + document.documentElement.clientWidth - pop.offsetWidth - 8);
+    pop.style.left = Math.max(left, scrollX + 8) + 'px';
+    pop.style.top = (r.bottom + scrollY + 4) + 'px';
+  };
+  ed.addEventListener('input', () => {
+    hide();
+    // the word being typed loses its underline until the next check
+    const sel = getSelection();
+    if (sel.rangeCount) {
+      const c = sel.getRangeAt(0);
+      found = found.filter(f => !(f.range.isPointInRange(c.startContainer, c.startOffset) || f.range.comparePoint(c.startContainer, c.startOffset) === 0));
+    }
+    paint();
+    schedule();
+  });
+  ed.addEventListener('click', () => { const f = at(); f ? show(f) : hide(); });
+  ed.addEventListener('keydown', e => { if (e.key === 'Escape') hide(); });
+  document.addEventListener('mousedown', e => { if (pop && !pop.contains(e.target)) hide(); });
+  addEventListener('resize', hide);
+  if (read().text.trim()) schedule();
+})();
+"#;
+
 fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
     let accounts: Vec<Account> = app.accounts().into_iter().filter(|a| a.retired.is_none()).collect();
     let senders: Vec<(String, String)> = accounts
@@ -3068,7 +3214,7 @@ fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
         html! { button type="button" data-cmd=(cmd) data-arg=(arg) title=(title) { (label) } }
     };
     mail_page("Write", inbox, app, html! {
-        style { (PreEscaped(EDITOR_CSS)) (PreEscaped(ADDRESS_CSS)) }
+        style { (PreEscaped(EDITOR_CSS)) (PreEscaped(ADDRESS_CSS)) @if crate::spell::enabled() { (PreEscaped(SPELL_CSS)) } }
         @if let Some(e) = err { p.err { (e) } }
         @if senders.is_empty() {
             p.muted { "Add a mail account first, on the " a href="/mail" { "Accounts" } " page." }
@@ -3119,6 +3265,7 @@ fn compose_view(app: &App, d: &Draft, err: Option<&str>) -> Response {
             }
             script { (PreEscaped(EDITOR_SCRIPT)) }
             script { (PreEscaped(ADDRESS_SCRIPT)) }
+            @if crate::spell::enabled() { script { (PreEscaped(SPELL_SCRIPT)) } }
         }
     })
 }
@@ -3300,6 +3447,29 @@ pub async fn compose_addresses(State(app): St, headers: HeaderMap, Query(s): Que
     let found = tokio::task::spawn_blocking(move || crate::contacts::suggest(&app, &s.q, 8)).await.unwrap_or_default();
     let found: Vec<serde_json::Value> = found.into_iter().map(|(name, address)| serde_json::json!({ "name": name, "address": address })).collect();
     axum::Json(found).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct CheckText {
+    text: String,
+}
+
+/// Spelling and grammar mistakes in what is being written (see `spell`).
+pub async fn check_text(State(app): St, headers: HeaderMap, axum::Json(req): axum::Json<CheckText>) -> Response {
+    if !super::authed(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "logged out" }))).into_response();
+    }
+    if !crate::spell::enabled() {
+        return axum::Json(serde_json::json!({ "enabled": false })).into_response();
+    }
+    if req.text.chars().count() > crate::spell::MAX_CHARS {
+        return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(serde_json::json!({ "error": "too long to check" }))).into_response();
+    }
+    match tokio::task::spawn_blocking(move || crate::spell::check(&req.text)).await {
+        Ok(Some(mistakes)) => axum::Json(serde_json::json!({ "enabled": true, "ready": true, "mistakes": mistakes })).into_response(),
+        Ok(None) => axum::Json(serde_json::json!({ "enabled": true, "ready": false })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
 }
 
 pub async fn save_draft(State(app): St, headers: HeaderMap, form: Multipart) -> Response {

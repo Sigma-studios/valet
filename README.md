@@ -34,7 +34,9 @@ the native apps of every device.
   ✕), reading, *Not spam* (back to the account's inbox), and writing with
   formatting (reply, reply all, forward, attachments), To, Cc and Bcc completing
   the address being typed from the people you've written to (first) or heard
-  from. What you write is saved
+  from, and checked as you write for spelling and grammar in English and French
+  (German too, if asked), each paragraph in its own language (see
+  [Spelling and grammar](#spelling-and-grammar)). What you write is saved
   as a draft in the account's Drafts folder every few seconds, so it carries on
   from another device or app. Folders can be created, renamed and deleted, here
   or from a mail app, and the provider follows. It works on the same copy as the mail
@@ -211,6 +213,7 @@ All through the environment:
 | `LISTEN` | web UI and CalDAV, default `0.0.0.0:8080` |
 | `IMAP_LISTEN` | default `0.0.0.0:1143` |
 | `SMTP_LISTEN` | mail submission, default `0.0.0.0:1587` |
+| `VALET_SPELL` | languages checked as you write: `en`, `fr`, `de` (default `en,fr`); `off` turns it off. English and French take about 530 MB of memory, German about 500 MB more |
 
 valet speaks plain HTTP, IMAP and SMTP: put it behind something that adds TLS
 (façade does, for the web and, with `--tls-port`, for the mail ports).
@@ -266,7 +269,7 @@ fields); if it is set when valet has no account yet, they are imported once.
 
 ```sh
 facade app create valet --git https://github.com/Sigma-studios/valet \
-  --rust-bin valet --port 8080 --domain mail.example.com --volume data:/data --memory 512 \
+  --rust-bin valet --port 8080 --domain mail.example.com --volume data:/data --memory 1280 \
   --tls-port 993:1143 --tls-port 465:1587
 facade env set valet DATA_DIR=/data VALET_USER=me --public
 facade env set valet VALET_PASSWORD   # read from stdin
@@ -278,6 +281,20 @@ Then add the mailboxes on the Mail page.
 Mail apps then use `mail.example.com`, IMAP on 993 and SMTP on 465, both
 SSL/TLS, with valet's user name and password (the Connect apps page lists it
 all).
+
+## Spelling and grammar
+
+What is written in the webmail is checked a moment after typing stops: spelling
+mistakes are underlined in red, grammar in blue, and a click on one offers its
+corrections (or to ignore that word). Quoted mail is left alone, and so are
+names, acronyms and units. It runs inside valet, nothing leaves the server:
+LanguageTool's rules (about 5,300 for French, 5,700 for English, 5,500 for German) ported to Rust
+by [nlprule](https://github.com/bminixhofer/nlprule) (its pull request #92,
+with valet's fixes, in `vendor/nlprule`), on data compiled from LanguageTool
+6.5 and kept compressed in `spell/` (see `spell/README.md`). The languages load
+in the background in a few seconds after valet starts; they take about 530 MB
+of memory for English and French together (`VALET_SPELL` to choose or turn it
+off), and a check takes some tens of milliseconds.
 
 ## CalDAV layout
 
@@ -318,4 +335,5 @@ e2e/run_webmail.sh <dir>
 e2e/run_calendar.sh <dir>   # the calendar page and the app; with Chrome, also in a headless Chrome, offline included
 e2e/run_notify.sh <dir>     # new mail told; CHROME_PUSH=1: real Web Push in a headless Chrome (needs the internet)
 e2e/run_addresses.sh <dir>  # completing addresses in the composer, the route and in a headless Chrome
+e2e/run_spell.sh <dir>      # spelling and grammar: the API, then underlines and corrections in a headless Chrome
 ```

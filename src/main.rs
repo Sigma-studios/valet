@@ -13,6 +13,7 @@ mod mime;
 mod mutf7;
 mod notify;
 mod smtpd;
+mod spell;
 mod store;
 mod sync;
 mod util;
@@ -224,6 +225,7 @@ async fn main() -> Result<()> {
         }
     }
     let app = Arc::new(App::new(store, config, mail));
+    spell::start();
 
     let bind = async |var: &str, default: &str| -> Result<tokio::net::TcpListener> {
         let addr = std::env::var(var).unwrap_or_else(|_| default.into());

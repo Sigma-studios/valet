@@ -16,6 +16,8 @@ futures = "0.3.34"
 hex = "0.4.3"
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }
 mail-parser = "0.11.9"
+# LanguageTool's rules in Rust, with valet's fixes (see vendor/nlprule)
+nlprule = { path = "vendor/nlprule" }
 maud = { version = "0.27.0", features = ["axum"] }
 percent-encoding = "2.3.2"
 quick-xml = "0.42.0"
@@ -34,3 +36,22 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.28.0", features = ["v4"] }
 webpki-roots = "1.0.10"
 zstd = "0.13"
+
+# The spelling checker is unusably slow unoptimised (it loads ~120 MB of
+# rules and runs thousands of them per sentence): optimise it in debug too.
+[profile.dev.package.nlprule]
+opt-level = 3
+[profile.dev.package.zstd-sys]
+opt-level = 3
+[profile.dev.package.bincode]
+opt-level = 3
+[profile.dev.package.fst]
+opt-level = 3
+[profile.dev.package.onig_sys]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.aho-corasick]
+opt-level = 3
+[profile.dev.package.spellbook]
+opt-level = 3
