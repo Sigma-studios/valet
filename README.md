@@ -269,7 +269,7 @@ fields); if it is set when valet has no account yet, they are imported once.
 
 ```sh
 facade app create valet --git https://github.com/Sigma-studios/valet \
-  --rust-bin valet --port 8080 --domain mail.example.com --volume data:/data --memory 1280 \
+  --rust-bin valet --port 8080 --domain mail.example.com --volume data:/data --memory 1024 \
   --tls-port 993:1143 --tls-port 465:1587
 facade env set valet DATA_DIR=/data VALET_USER=me --public
 facade env set valet VALET_PASSWORD   # read from stdin
