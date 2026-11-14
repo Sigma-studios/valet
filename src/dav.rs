@@ -113,7 +113,7 @@ pub async fn handle(app: Arc<App>, req: Request<Body>) -> Response<Body> {
     };
     let body = String::from_utf8_lossy(&body).into_owned();
     let Some(res) = resolve(&path) else { return status(StatusCode::NOT_FOUND) };
-    let dav = Dav { app: &app, headers: &headers };
+    let dav = Dav { app: &app, headers: &headers, expand: None };
     let response = match method.as_str() {
         "OPTIONS" => options(),
         "PROPFIND" => dav.propfind(&res, &body),
@@ -186,9 +186,13 @@ enum Node<'a> {
     Object(&'a Object),
 }
 
+#[derive(Clone, Copy)]
 struct Dav<'a> {
     app: &'a App,
     headers: &'a HeaderMap,
+    /// A REPORT's `<C:expand start end/>`: calendar-data gives each
+    /// occurrence in [start, end) on its own.
+    expand: Option<(i64, i64)>,
 }
 
 impl Dav<'_> {
@@ -245,7 +249,10 @@ impl Dav<'_> {
             (DAV, "getetag", Node::Object(o)) => escape(&o.etag),
             (DAV, "getcontenttype", Node::Object(_)) => "text/calendar; charset=utf-8; component=vevent".into(),
             (DAV, "getcontentlength", Node::Object(o)) => o.data.len().to_string(),
-            (CALDAV, "calendar-data", Node::Object(o)) => escape(&o.data),
+            (CALDAV, "calendar-data", Node::Object(o)) => match self.expand {
+                Some((from, to)) => escape(&crate::calendar::expanded(&o.data, from, to).unwrap_or_else(|| o.data.clone())),
+                None => escape(&o.data),
+            },
             _ => return None,
         })
     }
@@ -347,6 +354,14 @@ impl Dav<'_> {
     fn report(&self, res: &Res, body: &str) -> Response<Body> {
         let Ok(root) = xml::parse(body) else { return status(StatusCode::BAD_REQUEST) };
         let wanted = wanted(Some(&root));
+        let expand = root.child(DAV, "prop").and_then(|p| p.child(CALDAV, "calendar-data")).and_then(|d| d.child(CALDAV, "expand"));
+        let expand = match expand.map(time_range) {
+            None => None,
+            Some(Some(range)) => Some(range),
+            Some(None) => return precondition(StatusCode::FORBIDDEN, CALDAV, "valid-filter", ""),
+        };
+        let dav = Dav { expand, ..*self };
+        let this = &dav;
         let store = &self.app.store;
         let cal_id = match res {
             Res::Calendar(id) | Res::Object(id, _) => Some(id.as_str()),
@@ -360,7 +375,7 @@ impl Dav<'_> {
                     let path = href.find("/dav/").map_or(href, |i| &href[i..]);
                     match resolve(path) {
                         Some(Res::Object(c, n)) => match store.object(&c, &n) {
-                            Some(o) => self.response(&Node::Object(&o), &wanted),
+                            Some(o) => this.response(&Node::Object(&o), &wanted),
                             None => not_found(href),
                         },
                         _ => not_found(href),
@@ -375,11 +390,18 @@ impl Dav<'_> {
             root.find(CALDAV, "comp-filter", &mut filters);
             let other = filters.iter().any(|f| f.attr("name").is_some_and(|n| n != "VCALENDAR" && n != "VEVENT"));
             let objects = if other { Vec::new() } else { store.objects(id) };
-            let objects = match res {
+            let mut objects: Vec<Object> = match res {
                 Res::Object(_, name) => objects.into_iter().filter(|o| &o.name == name).collect(),
                 _ => objects,
             };
-            let out: Vec<String> = objects.iter().map(|o| self.response(&Node::Object(o), &wanted)).collect();
+            // The events that happen in the range, as the calendar page and
+            // the agenda find them.
+            let range = filters.iter().filter(|f| f.attr("name") == Some("VEVENT")).find_map(|f| f.child(CALDAV, "time-range"));
+            if let Some(range) = range {
+                let Some((from, to)) = time_range(range) else { return precondition(StatusCode::FORBIDDEN, CALDAV, "valid-filter", "") };
+                objects.retain(|o| crate::calendar::happens(&o.data, from, to));
+            }
+            let out: Vec<String> = objects.iter().map(|o| this.response(&Node::Object(o), &wanted)).collect();
             return multistatus(&out, "");
         }
         if root.is(DAV, "sync-collection") {
@@ -395,7 +417,7 @@ impl Dav<'_> {
                 }
             };
             let (changed, deleted) = store.changes(id, since);
-            let mut out: Vec<String> = changed.iter().map(|o| self.response(&Node::Object(o), &wanted)).collect();
+            let mut out: Vec<String> = changed.iter().map(|o| this.response(&Node::Object(o), &wanted)).collect();
             if since > 0 {
                 out.extend(deleted.iter().map(|n| not_found(&obj_href(id, n))));
             }
@@ -556,6 +578,21 @@ impl Dav<'_> {
     }
 }
 
+/// A CalDAV UTC time (`20261114T000000Z`) as Unix seconds.
+fn caldav_time(s: &str) -> Option<i64> {
+    chrono::NaiveDateTime::parse_from_str(s.trim().strip_suffix('Z')?, "%Y%m%dT%H%M%S").ok().map(|t| t.and_utc().timestamp())
+}
+
+/// The range of a `<C:time-range>` or `<C:expand>`: a missing bound is
+/// open (here, from 1900 or to 2200); `None` when one can't be read.
+fn time_range(e: &Element) -> Option<(i64, i64)> {
+    const EARLIEST: i64 = -2_208_988_800;
+    const LATEST: i64 = 7_258_118_400;
+    let bound = |name, open| e.attr(name).map_or(Some(open), caldav_time);
+    let (from, to) = (bound("start", EARLIEST)?, bound("end", LATEST)?);
+    (from < to).then_some((from.max(EARLIEST), to.min(LATEST)))
+}
+
 fn not_found(href: &str) -> String {
     format!("<D:response><D:href>{}</D:href><D:status>HTTP/1.1 404 Not Found</D:status></D:response>", escape(href))
 }
@@ -575,5 +612,121 @@ mod tests {
         assert_eq!(resolve("/davx"), None);
         assert_eq!(resolve("/dav/cal/a/b/c"), None);
         assert_eq!(obj_href("work", "a b@c.ics"), "/dav/cal/work/a%20b@c.ics");
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+    use crate::calendar::{self, When};
+    use crate::ical;
+
+    const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:weekly\r\nSUMMARY:Standup\r\n\
+        DTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T091500\r\nRRULE:FREQ=WEEKLY\r\n\
+        EXDATE;TZID=Europe/Paris:20261109T090000\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:weekly\r\n\
+        RECURRENCE-ID;TZID=Europe/Paris:20261019T090000\r\nSUMMARY:Standup (moved)\r\nDTSTART;TZID=Europe/Paris:20261020T140000\r\n\
+        DTEND;TZID=Europe/Paris:20261020T141500\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:weekly\r\nRECURRENCE-ID:20261102T080000Z\r\n\
+        STATUS:CANCELLED\r\nDTSTART:20261102T080000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const AWAY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:away\r\nSUMMARY:Away\r\n\
+        DTSTART;VALUE=DATE:20261030\r\nDTEND;VALUE=DATE:20261103\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const LATER: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:later\r\nSUMMARY:Later\r\n\
+        DTSTART:20261210T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    fn app() -> Arc<App> {
+        let store = crate::store::Store::memory();
+        store.create_calendar("work", "Work", None).unwrap();
+        for (name, data) in [("weekly.ics", WEEKLY), ("away.ics", AWAY), ("later.ics", LATER)] {
+            store.put_object("work", name, data, false).unwrap();
+        }
+        let config = crate::Config { user: "me".into(), password: "a long test password".into(), addresses: vec![] };
+        Arc::new(App::new(store, config, crate::mailstore::MailStore::memory()))
+    }
+
+    async fn report(app: &Arc<App>, body: &str) -> xml::Element {
+        use base64::Engine;
+        let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("me:a long test password"));
+        let req = Request::builder().method("REPORT").uri("/dav/cal/work/").header("Depth", "1").header(header::AUTHORIZATION, auth).body(Body::from(body.to_string())).unwrap();
+        let res = handle(app.clone(), req).await;
+        assert_eq!(res.status(), StatusCode::MULTI_STATUS);
+        let bytes = to_bytes(res.into_body(), MAX_BODY).await.unwrap();
+        // The request parser trims text around references: keep the line
+        // breaks of calendar-data as references too.
+        xml::parse(&std::str::from_utf8(&bytes).unwrap().replace("&#13;\n", "&#13;&#10;")).unwrap()
+    }
+
+    fn query(range: &str, data: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?><C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+            <D:prop><D:getetag/>{data}</D:prop>
+            <C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT">{range}</C:comp-filter></C:comp-filter></C:filter>
+            </C:calendar-query>"#
+        )
+    }
+
+    fn hrefs(ms: &xml::Element) -> Vec<String> {
+        let mut out: Vec<String> = ms.all(DAV, "response").filter_map(|r| r.child(DAV, "href")).map(|h| h.text.trim().to_string()).collect();
+        out.sort();
+        out
+    }
+
+    fn secs(s: &str) -> i64 {
+        caldav_time(s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn time_range_and_expand_match_the_engine() {
+        let app = app();
+        // 19 October to 9 November: the series and the trip, not December's.
+        let (start, end) = ("20261019T000000Z", "20261109T230000Z");
+        let range = format!(r#"<C:time-range start="{start}" end="{end}"/>"#);
+        let ms = report(&app, &query(&range, "")).await;
+        assert_eq!(hrefs(&ms), ["/dav/cal/work/away.ics", "/dav/cal/work/weekly.ics"]);
+        let ms = report(&app, &query("", "")).await;
+        assert_eq!(hrefs(&ms).len(), 3, "no time-range, every event");
+        let ms = report(&app, &query(r#"<C:time-range start="20261201T000000Z"/>"#, "")).await;
+        assert_eq!(hrefs(&ms), ["/dav/cal/work/later.ics", "/dav/cal/work/weekly.ics"], "open-ended");
+
+        // Expanded: every occurrence on its own, as the engine finds them.
+        let data = format!(r#"<C:calendar-data><C:expand start="{start}" end="{end}"/></C:calendar-data>"#);
+        let ms = report(&app, &query(&range, &data)).await;
+        let mut got: Vec<(String, When, When, Option<When>)> = Vec::new();
+        for r in ms.all(DAV, "response") {
+            let mut found = Vec::new();
+            r.find(CALDAV, "calendar-data", &mut found);
+            let cal = &ical::parse(&found[0].text).unwrap()[0];
+            assert!(cal.children.iter().all(|c| c.name == "VEVENT"), "no VTIMEZONE");
+            for e in &cal.children {
+                assert!(e.prop("RRULE").is_none() && e.prop("EXDATE").is_none());
+                let w = |name: &str| {
+                    let p = e.prop(name)?;
+                    Some(if p.param("VALUE") == Some("DATE") { When::Day(chrono::NaiveDate::parse_from_str(&p.value, "%Y%m%d").unwrap()) } else { When::At(secs(&p.value)) })
+                };
+                got.push((e.value("UID").unwrap().to_string(), w("DTSTART").unwrap(), w("DTEND").unwrap(), w("RECURRENCE-ID")));
+            }
+        }
+        let mut want = Vec::new();
+        for o in app.store.objects("work") {
+            let cal = &ical::parse(&o.data).unwrap()[0];
+            for occ in calendar::occurrences_in(cal, secs(start), secs(end), calendar::default_zone()) {
+                want.push((o.uid.clone(), occ.start, occ.end, occ.recurrence_id));
+            }
+        }
+        let key = |x: &(String, When, When, Option<When>)| (x.0.clone(), format!("{:?}", x.1));
+        got.sort_by_key(key);
+        want.sort_by_key(key);
+        assert_eq!(got, want);
+        let weekly: Vec<When> = got.iter().filter(|x| x.0 == "weekly").map(|x| x.1).collect();
+        assert_eq!(
+            weekly,
+            [When::At(secs("20261020T120000Z")), When::At(secs("20261026T080000Z"))],
+            "the moved one, then the 26th after daylight saving; 2 and 9 November deleted"
+        );
+
+        // A bad range is refused.
+        let bad = format!(r#"<C:time-range start="2026-10-19" end="{end}"/>"#);
+        use base64::Engine;
+        let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("me:a long test password"));
+        let req = Request::builder().method("REPORT").uri("/dav/cal/work/").header(header::AUTHORIZATION, auth).body(Body::from(query(&bad, ""))).unwrap();
+        assert_eq!(handle(app.clone(), req).await.status(), StatusCode::FORBIDDEN);
     }
 }

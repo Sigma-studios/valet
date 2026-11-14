@@ -63,6 +63,20 @@ pub struct Push {
     pub created: i64,
 }
 
+/// A device's token for the agenda (the token itself is never kept).
+#[derive(Clone, Debug)]
+pub struct Token {
+    pub id: i64,
+    pub name: String,
+    pub created: i64,
+    /// When it last read the agenda.
+    pub used: Option<i64>,
+}
+
+fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.trim().as_bytes()))
+}
+
 pub struct Put {
     pub etag: String,
     pub created: bool,
@@ -90,6 +104,8 @@ CREATE TABLE IF NOT EXISTS choices (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS push (
     endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, agent TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tokens (
+    id INTEGER PRIMARY KEY, name TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, created INTEGER NOT NULL, used INTEGER);
 ";
 
 const COLORS: &[&str] = &["#3b82f6", "#16a34a", "#e11d48", "#f59e0b", "#8b5cf6", "#0891b2", "#db2777", "#65a30d"];
@@ -265,6 +281,33 @@ impl Store {
             .unwrap()
             .filter_map(Result::ok)
             .collect()
+    }
+
+    // Device tokens: what reads the agenda (a desktop bar) without the password
+
+    /// Makes a token for device `name`: returned this once, only its hash kept.
+    pub fn create_token(&self, name: &str, now: i64) -> Result<String> {
+        let mut bytes = [0u8; 32];
+        aws_lc_rs::rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("no randomness"))?;
+        let token = format!("valet_{}", hex::encode(bytes));
+        self.db().execute("INSERT INTO tokens (name, hash, created) VALUES (?1, ?2, ?3)", params![name, token_hash(&token), now])?;
+        Ok(token)
+    }
+
+    pub fn tokens(&self) -> Vec<Token> {
+        let c = self.db();
+        let mut st = c.prepare("SELECT id, name, created, used FROM tokens ORDER BY created, id").unwrap();
+        st.query_map([], |r| Ok(Token { id: r.get(0)?, name: r.get(1)?, created: r.get(2)?, used: r.get(3)? })).unwrap().filter_map(Result::ok).collect()
+    }
+
+    pub fn revoke_token(&self, id: i64) -> Result<bool> {
+        Ok(self.db().execute("DELETE FROM tokens WHERE id = ?1", [id])? > 0)
+    }
+
+    /// Whether `token` is a device's, noting it was used.
+    pub fn use_token(&self, token: &str, now: i64) -> bool {
+        let c = self.db();
+        c.execute("UPDATE tokens SET used = ?2 WHERE hash = ?1", params![token_hash(token), now]).is_ok_and(|n| n == 1)
     }
 
     // Calendars
@@ -704,6 +747,23 @@ mod tests {
         let s = Store { conn: Mutex::new(conn) };
         let colors: Vec<String> = s.patterns().into_iter().map(|p| p.color).collect();
         assert_eq!(colors, PATTERN_COLORS[..2]);
+    }
+
+    #[test]
+    fn device_tokens_keep_only_a_hash() {
+        let s = store();
+        let a = s.create_token("Laptop bar", 100).unwrap();
+        let b = s.create_token("Desktop", 200).unwrap();
+        assert!(a.starts_with("valet_") && a.len() == 6 + 64 && a != b);
+        let kept: String = s.db().query_row("SELECT group_concat(hash) FROM tokens", [], |r| r.get(0)).unwrap();
+        assert!(!kept.contains(&a[6..]) && !kept.contains(&b[6..]), "not the tokens themselves");
+        assert!(s.use_token(&a, 300) && !s.use_token("valet_00", 300) && !s.use_token("", 300));
+        let t = s.tokens();
+        assert_eq!((t[0].name.as_str(), t[0].created, t[0].used), ("Laptop bar", 100, Some(300)));
+        assert_eq!(t[1].used, None);
+        assert!(s.revoke_token(t[0].id).unwrap());
+        assert!(!s.use_token(&a, 400) && s.use_token(&b, 400));
+        assert_eq!(s.tokens().len(), 1);
     }
 
     #[test]

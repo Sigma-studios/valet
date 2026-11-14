@@ -3,7 +3,6 @@
 //! events written from the web form. Apps keep getting the stored iCalendar
 //! as it is; this only reads it, or writes it the way apps do.
 
-use std::collections::HashSet;
 use std::sync::RwLock;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -38,6 +37,8 @@ pub struct Instance {
     pub calendar: String,
     /// The event's resource (what to edit or delete).
     pub name: String,
+    #[serde(skip)]
+    pub uid: String,
     pub title: String,
     pub location: String,
     pub notes: String,
@@ -46,6 +47,9 @@ pub struct Instance {
     pub start: When,
     pub end: When,
     pub repeats: bool,
+    /// Called off by its organizer (shown, struck out).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
     /// An invitation to one of my addresses I haven't answered.
     pub unanswered: bool,
     /// The invitation valet got by mail for it, to answer from its card.
@@ -160,6 +164,11 @@ fn local(tz: Tz, naive: NaiveDateTime) -> DateTime<Tz> {
         .unwrap_or_else(|| tz.from_utc_datetime(&naive))
 }
 
+/// When day `d` starts in `tz`, in Unix seconds.
+pub fn midnight(tz: Tz, d: NaiveDate) -> i64 {
+    local(tz, d.and_time(NaiveTime::MIN)).timestamp()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Start {
     Day(NaiveDate),
@@ -209,8 +218,19 @@ fn shifted(s: Start, len: i64) -> When {
     }
 }
 
-fn overlaps(start: When, end: When, from: i64, to: i64) -> bool {
-    let (s, e) = (start.secs(), end.secs());
+/// Unix seconds of a start or end; a day counts from its midnight in `tz`
+/// (all-day events are dates, which start when that day does where one is).
+fn instant(w: When, tz: Tz) -> i64 {
+    match w {
+        When::Day(d) => local(tz, d.and_time(NaiveTime::MIN)).timestamp(),
+        When::At(t) => t,
+    }
+}
+
+/// Whether [start, end) overlaps [from, to), as RFC 4791's time-range has
+/// it: an event without length is in the range its start is in.
+fn overlaps(start: When, end: When, from: i64, to: i64, tz: Tz) -> bool {
+    let (s, e) = (instant(start, tz), instant(end, tz));
     if s == e { s >= from && s < to } else { s < to && e > from }
 }
 
@@ -227,9 +247,19 @@ fn dates(ev: &Component, name: &str) -> Vec<Start> {
     ev.props.iter().filter(|p| p.name == name).flat_map(|p| p.value.split(',').filter_map(|v| parse_value(p, v))).collect()
 }
 
-/// Starts of a repeating event within [from, to), its first only if its rule
-/// can't be read.
-fn occurrences(ev: &Component, start: Start, len: i64, from: i64, to: i64) -> Vec<Start> {
+/// Whether an EXDATE or a RECURRENCE-ID names occurrence `s`: the same
+/// instant, or the same day when one is a date and the other a time (some
+/// apps write a timed series' exceptions as dates).
+fn same_slot(x: Start, s: Start) -> bool {
+    match (x, s) {
+        (Start::Day(d), Start::Time(t)) | (Start::Time(t), Start::Day(d)) => t.date_naive() == d,
+        (a, b) => when(a).secs() == when(b).secs(),
+    }
+}
+
+/// Starts of a repeating event within [from, to): its first, its RRULEs
+/// and RDATEs, less its EXDATEs; its first only if a rule can't be read.
+fn occurrences(ev: &Component, start: Start, len: i64, from: i64, to: i64, tz: Tz) -> Vec<Start> {
     let dt = engine_time(start);
     let mut rules = Vec::new();
     for p in ev.props.iter().filter(|p| p.name == "RRULE") {
@@ -244,26 +274,37 @@ fn occurrences(ev: &Component, start: Start, len: i64, from: i64, to: i64) -> Ve
         }
         match value.parse::<rrule::RRule<rrule::Unvalidated>>().ok().and_then(|r| r.validate(dt).ok()) {
             Some(r) => rules.push(r),
-            None => return if overlaps(when(start), shifted(start, len), from, to) { vec![start] } else { vec![] },
+            None => return if overlaps(when(start), shifted(start, len), from, to, tz) { vec![start] } else { vec![] },
         }
     }
+    // Days are midnights UTC to the engine, and local ones here: a day more
+    // each side, then the exact test below.
     let span = if matches!(start, Start::Day(_)) { len * 86400 } else { len };
     let utc = |t: i64| rrule::Tz::UTC.timestamp_opt(t, 0).single().unwrap_or(dt);
     let set = rrule::RRuleSet::new(dt)
         .set_rrules(rules)
         .set_rdates(dates(ev, "RDATE").into_iter().map(engine_time).collect())
-        .set_exdates(dates(ev, "EXDATE").into_iter().map(engine_time).collect())
-        .after(utc(from - span))
-        .before(utc(to));
-    set.all(5000)
+        .after(utc(from.saturating_sub(span + 86400)))
+        .before(utc(to.saturating_add(86400)));
+    let mut found: Vec<Start> = set
+        .all(5000)
         .dates
         .into_iter()
         .map(|d| match start {
             Start::Day(_) => Start::Day(d.date_naive()),
             Start::Time(t) => Start::Time(d.with_timezone(&t.timezone())),
         })
-        .filter(|s| overlaps(when(*s), shifted(*s, len), from, to))
-        .collect()
+        .collect();
+    // The first time is always one (RFC 5545 3.8.5.2), even when the rule
+    // doesn't fall on it or there are only RDATEs.
+    if !found.iter().any(|s| same_slot(*s, start)) {
+        found.push(start);
+    }
+    let exdates = dates(ev, "EXDATE");
+    found.retain(|s| !exdates.iter().any(|x| same_slot(*x, *s)) && overlaps(when(*s), shifted(*s, len), from, to, tz));
+    found.sort_by_key(|s| when(*s).secs());
+    found.dedup_by_key(|s| when(*s).secs());
+    found
 }
 
 /// An iCalendar TEXT value as written (`\,` `\;` `\n` `\\`).
@@ -296,35 +337,70 @@ fn events(cal: &Component) -> (Option<&Component>, Vec<&Component>) {
     (master, all.into_iter().filter(|e| e.prop("RECURRENCE-ID").is_some()).collect())
 }
 
-/// Occurrences of an object within [from, to), each with the VEVENT it comes from.
-fn expand(cal: &Component, from: i64, to: i64) -> Vec<(When, When, &Component, bool)> {
-    let (master, moved) = events(cal);
+fn is_cancelled(ev: &Component) -> bool {
+    ev.value("STATUS").is_some_and(|s| s.eq_ignore_ascii_case("CANCELLED"))
+}
+
+/// One occurrence of an event, as the engine finds it.
+#[derive(Clone, Debug)]
+pub struct Occurrence<'a> {
+    pub start: When,
+    /// Excluded: the day after an all-day event's last, or the end instant.
+    pub end: When,
+    /// The VEVENT it comes from: the series', or the one that moved or
+    /// changed this occurrence.
+    pub event: &'a Component,
+    /// The series' VEVENT, for what an occurrence's own leaves to it.
+    pub master: Option<&'a Component>,
+    /// For an occurrence of a series, the start it has there (its
+    /// RECURRENCE-ID); `None` for an event that doesn't repeat.
+    pub recurrence_id: Option<When>,
+    /// Called off as a whole (STATUS:CANCELLED, as an organizer's
+    /// cancellation leaves it). A series' occurrence cancelled on its own is
+    /// a deleted one: it isn't found at all.
+    pub cancelled: bool,
+}
+
+/// The one place valet finds when an event happens: the occurrences of an
+/// object (a VCALENDAR) that overlap [from, to), Unix seconds, in order.
+/// Repeats are expanded from DTSTART, RRULE, RDATE and EXDATE, in the
+/// event's own zone (TZID, so an hour stays put across daylight-saving
+/// changes); RECURRENCE-ID overrides move, change or (cancelled) delete
+/// occurrences. All-day events stay dates, starting at midnight in `tz`.
+pub fn occurrences_in(cal: &Component, from: i64, to: i64, tz: Tz) -> Vec<Occurrence<'_>> {
+    let (master, overrides) = events(cal);
     let repeats = master.is_some_and(|m| m.prop("RRULE").is_some() || m.prop("RDATE").is_some());
+    let master_cancelled = master.is_some_and(is_cancelled);
+    let replaced: Vec<Start> = overrides.iter().filter_map(|e| e.prop("RECURRENCE-ID").and_then(|p| parse_value(p, &p.value))).collect();
     let mut out = Vec::new();
-    let replaced: HashSet<i64> = moved.iter().filter_map(|e| e.prop("RECURRENCE-ID").and_then(|p| parse_value(p, &p.value))).map(|s| when(s).secs()).collect();
     if let Some(m) = master
         && let Some(start) = m.prop("DTSTART").and_then(|p| parse_value(p, &p.value))
     {
         let len = length(m, start);
-        let starts = if repeats { occurrences(m, start, len, from, to) } else { vec![start] };
+        let starts = if repeats { occurrences(m, start, len, from, to, tz) } else { vec![start] };
         for s in starts {
-            if repeats && replaced.contains(&when(s).secs()) {
+            if repeats && replaced.iter().any(|r| same_slot(*r, s)) {
                 continue;
             }
             let (a, b) = (when(s), shifted(s, len));
-            if overlaps(a, b, from, to) {
-                out.push((a, b, m, repeats));
+            if overlaps(a, b, from, to, tz) {
+                out.push(Occurrence { start: a, end: b, event: m, master, recurrence_id: repeats.then_some(a), cancelled: master_cancelled });
             }
         }
     }
-    for e in moved {
+    for e in overrides {
+        let cancelled = is_cancelled(e);
+        if cancelled && master.is_some() && !master_cancelled {
+            continue;
+        }
         let Some(start) = e.prop("DTSTART").and_then(|p| parse_value(p, &p.value)) else { continue };
         let (a, b) = (when(start), shifted(start, length(e, start)));
-        if overlaps(a, b, from, to) {
-            out.push((a, b, e, true));
+        let rid = e.prop("RECURRENCE-ID").and_then(|p| parse_value(p, &p.value)).map(when);
+        if overlaps(a, b, from, to, tz) {
+            out.push(Occurrence { start: a, end: b, event: e, master, recurrence_id: rid.or(Some(a)), cancelled });
         }
     }
-    out.sort_by_key(|(a, ..)| a.secs());
+    out.sort_by_key(|o| (instant(o.start, tz), !matches!(o.start, When::Day(_))));
     out
 }
 
@@ -354,29 +430,66 @@ fn unanswered(ev: &Component, master: Option<&Component>, me: &[String]) -> bool
 fn instances_where(o: &Object, from: i64, to: i64, me: &[String], keep: impl Fn(&dyn Fn(&str) -> Option<String>) -> bool) -> Vec<Instance> {
     let Ok(cals) = ical::parse(&o.data) else { return vec![] };
     let Some(cal) = cals.first() else { return vec![] };
-    let (master, _) = events(cal);
-    let value = |e: &Component, name: &str| e.value(name).or_else(|| master.and_then(|m| m.value(name))).map(unescape);
-    let text = |e: &Component, name: &str| value(e, name).unwrap_or_default();
-    expand(cal, from, to)
+    let value = |occ: &Occurrence, name: &str| occ.event.value(name).or_else(|| occ.master.and_then(|m| m.value(name))).map(unescape);
+    let text = |occ: &Occurrence, name: &str| value(occ, name).unwrap_or_default();
+    occurrences_in(cal, from, to, default_zone())
         .into_iter()
-        .filter(|(_, _, e, _)| keep(&|name| value(e, name)))
-        .map(|(start, end, e, repeats)| Instance {
+        .filter(|occ| keep(&|name| value(occ, name)))
+        .map(|occ| Instance {
             calendar: o.calendar.clone(),
             name: o.name.clone(),
-            title: text(e, "SUMMARY"),
-            location: text(e, "LOCATION"),
-            notes: text(e, "DESCRIPTION"),
-            all_day: matches!(start, When::Day(_)),
-            start,
-            end,
-            repeats,
-            unanswered: unanswered(e, master, me),
+            uid: o.uid.clone(),
+            title: text(&occ, "SUMMARY"),
+            location: text(&occ, "LOCATION"),
+            notes: text(&occ, "DESCRIPTION"),
+            all_day: matches!(occ.start, When::Day(_)),
+            start: occ.start,
+            end: occ.end,
+            repeats: occ.recurrence_id.is_some(),
+            cancelled: occ.cancelled,
+            unanswered: unanswered(occ.event, occ.master, me),
             invite: None,
             mail: None,
             alert: None,
             alert_by: None,
         })
         .collect()
+}
+
+/// Whether an object (its iCalendar text) has an occurrence overlapping
+/// [from, to): CalDAV's time-range filter.
+pub fn happens(data: &str, from: i64, to: i64) -> bool {
+    ical::parse(data).ok().and_then(|cals| cals.into_iter().next()).is_some_and(|cal| !occurrences_in(&cal, from, to, default_zone()).is_empty())
+}
+
+/// An object as CalDAV's `expand` returns it (RFC 4791 9.6.5): each of its
+/// occurrences overlapping [from, to) a VEVENT of its own, with its
+/// RECURRENCE-ID when it belongs to a series, times in UTC (all-day events
+/// keep their dates), no repeat rules and no VTIMEZONE.
+pub fn expanded(data: &str, from: i64, to: i64) -> Option<String> {
+    let cals = ical::parse(data).ok()?;
+    let cal = cals.first()?;
+    let mut out = Component::new("VCALENDAR");
+    out.props = cal.props.clone();
+    let value = |w: When| match w {
+        When::Day(d) => (";VALUE=DATE".to_string(), d.format("%Y%m%d").to_string()),
+        When::At(t) => (String::new(), DateTime::<Utc>::from_timestamp(t, 0).unwrap_or_default().format("%Y%m%dT%H%M%SZ").to_string()),
+    };
+    for occ in occurrences_in(cal, from, to, default_zone()) {
+        let mut ev = occ.event.clone();
+        ev.props.retain(|p| !matches!(p.name.as_str(), "DTSTART" | "DTEND" | "DURATION" | "RECURRENCE-ID" | "RRULE" | "RDATE" | "EXDATE" | "EXRULE"));
+        let at = ev.props.iter().position(|p| p.name == "UID").map_or(0, |i| i + 1);
+        let mut times = vec![("DTSTART", occ.start), ("DTEND", occ.end)];
+        if let Some(rid) = occ.recurrence_id {
+            times.push(("RECURRENCE-ID", rid));
+        }
+        for (i, (name, w)) in times.into_iter().enumerate() {
+            let (params, value) = value(w);
+            ev.props.insert(at + i, Property { name: name.into(), params, value });
+        }
+        out.children.push(ev);
+    }
+    Some(out.to_ics())
 }
 
 /// The events of `objects` an invitation (`ics`) would clash with: timed
@@ -387,10 +500,10 @@ pub fn conflicts(ics: &str, objects: &[Object], now: i64) -> Vec<Instance> {
     let Some(cal) = cals.first() else { return vec![] };
     let uid = events(cal).0.and_then(|m| m.value("UID")).unwrap_or_default();
     let from = first_start(ics).map_or(now, |w| w.secs().max(now));
-    let times: Vec<(i64, i64)> = expand(cal, from, from + 60 * 86400)
+    let times: Vec<(i64, i64)> = occurrences_in(cal, from, from + 60 * 86400, default_zone())
         .into_iter()
-        .filter(|(_, _, e, _)| !e.value("STATUS").is_some_and(|s| s.eq_ignore_ascii_case("CANCELLED")))
-        .filter_map(|(a, b, ..)| match (a, b) {
+        .filter(|occ| !occ.cancelled)
+        .filter_map(|occ| match (occ.start, occ.end) {
             (When::At(a), When::At(b)) => Some((a, b)),
             _ => None,
         })
@@ -429,11 +542,9 @@ pub fn rings(o: &Object, tags: &[String], from: i64, to: i64, tz: Tz) -> Vec<Rin
     // Alerts go off up to a few weeks before or after the start.
     let reach = 30 * 86400;
     let mut out = Vec::new();
-    for (start, _, e, _) in expand(cal, from - reach, to + reach) {
-        let base = match start {
-            When::Day(d) => local(tz, d.and_time(NaiveTime::MIN)).timestamp(),
-            When::At(t) => t,
-        };
+    for occ in occurrences_in(cal, from - reach, to + reach, tz) {
+        let (start, e) = (occ.start, occ.event);
+        let base = instant(start, tz);
         for a in e.children.iter().filter(|c| c.name == "VALARM") {
             if !a.value("X-VALET").is_some_and(|t| tags.iter().any(|x| x.eq_ignore_ascii_case(t))) {
                 continue;
@@ -850,6 +961,117 @@ mod tests {
         assert_eq!(instances(&until, at("2026-10-01T00:00:00Z"), at("2026-11-01T00:00:00Z"), &[]).len(), 3);
         let bad = ev("DTSTART:20261001T080000Z\nRRULE:FREQ=SOMETIMES");
         assert_eq!(instances(&bad, at("2026-10-01T00:00:00Z"), at("2026-11-01T00:00:00Z"), &[]).len(), 1);
+    }
+
+    /// The starts found in [from, to), in RFC 3339, UTC.
+    fn starts(o: &Object, from: &str, to: &str) -> Vec<String> {
+        let cal = &ical::parse(&o.data).unwrap()[0];
+        occurrences_in(cal, at(from), at(to), Tz::Europe__Paris)
+            .into_iter()
+            .map(|occ| match occ.start {
+                When::Day(d) => d.to_string(),
+                When::At(t) => DateTime::from_timestamp(t, 0).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn weekly_event_with_one_moved_and_one_deleted_across_daylight_saving() {
+        // Mondays at 9:00 in Paris from 5 October; the 19th moved to Tuesday
+        // 14:00, 2 November cancelled on its own, 9 November an EXDATE.
+        // Daylight saving ends on 25 October: 9:00 is 7:00 UTC, then 8:00.
+        let o = object(
+            "BEGIN:VCALENDAR\nBEGIN:VTIMEZONE\nTZID:Europe/Paris\nEND:VTIMEZONE\nBEGIN:VEVENT\nUID:u\nSUMMARY:Standup\n\
+             DTSTART;TZID=Europe/Paris:20261005T090000\nDTEND;TZID=Europe/Paris:20261005T091500\nRRULE:FREQ=WEEKLY;COUNT=8\n\
+             EXDATE;TZID=Europe/Paris:20261109T090000\nEND:VEVENT\n\
+             BEGIN:VEVENT\nUID:u\nRECURRENCE-ID;TZID=Europe/Paris:20261019T090000\nSUMMARY:Standup (moved)\n\
+             DTSTART;TZID=Europe/Paris:20261020T140000\nDTEND;TZID=Europe/Paris:20261020T141500\nEND:VEVENT\n\
+             BEGIN:VEVENT\nUID:u\nRECURRENCE-ID:20261102T080000Z\nSUMMARY:Standup\nSTATUS:CANCELLED\n\
+             DTSTART;TZID=Europe/Paris:20261102T090000\nEND:VEVENT\nEND:VCALENDAR\n",
+        );
+        assert_eq!(
+            starts(&o, "2026-10-01T00:00:00Z", "2027-01-01T00:00:00Z"),
+            ["2026-10-05T07:00:00Z", "2026-10-12T07:00:00Z", "2026-10-20T12:00:00Z", "2026-10-26T08:00:00Z", "2026-11-16T08:00:00Z", "2026-11-23T08:00:00Z"],
+        );
+        let cal = &ical::parse(&o.data).unwrap()[0];
+        let found = occurrences_in(cal, at("2026-10-19T00:00:00Z"), at("2026-10-27T00:00:00Z"), Tz::Europe__Paris);
+        let moved = &found[0];
+        assert_eq!(moved.event.value("SUMMARY"), Some("Standup (moved)"));
+        assert_eq!(moved.recurrence_id, Some(When::At(at("2026-10-19T07:00:00Z"))), "where it was in the series");
+        assert_eq!(moved.end, When::At(at("2026-10-20T12:15:00Z")));
+        assert_eq!(found[1].recurrence_id, Some(found[1].start));
+        assert!(found.iter().all(|o| !o.cancelled));
+        // The moved one is found from where it went, not from where it was.
+        assert_eq!(starts(&o, "2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"), ["2026-10-20T12:00:00Z"]);
+        assert!(starts(&o, "2026-10-19T00:00:00Z", "2026-10-20T00:00:00Z").is_empty());
+    }
+
+    #[test]
+    fn hours_stay_put_in_their_own_zone() {
+        // New York leaves daylight saving on 1 November, a week after Paris.
+        let o = ev("DTSTART;TZID=America/New_York:20261023T090000\nDURATION:PT1H\nRRULE:FREQ=WEEKLY;BYDAY=FR,MO");
+        assert_eq!(
+            starts(&o, "2026-10-23T00:00:00Z", "2026-11-03T00:00:00Z"),
+            ["2026-10-23T13:00:00Z", "2026-10-26T13:00:00Z", "2026-10-30T13:00:00Z", "2026-11-02T14:00:00Z"],
+        );
+        // In the hour that doesn't exist (2:30 on 29 March in Paris), the hour after.
+        let gap = ev("DTSTART;TZID=Europe/Paris:20260328T023000\nRRULE:FREQ=DAILY;COUNT=3");
+        assert_eq!(starts(&gap, "2026-03-27T00:00:00Z", "2026-04-01T00:00:00Z"), ["2026-03-28T01:30:00Z", "2026-03-29T01:30:00Z", "2026-03-30T00:30:00Z"]);
+    }
+
+    #[test]
+    fn multi_day_all_day_events_stay_dates() {
+        // Friday to Sunday: DTEND is the Monday, excluded.
+        let o = ev("SUMMARY:Weekend away\nDTSTART;VALUE=DATE:20261113\nDTEND;VALUE=DATE:20261116");
+        let day = |d: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        let paris = |d: u32| local(Tz::Europe__Paris, day(d).and_time(NaiveTime::MIN)).timestamp();
+        let cal = &ical::parse(&o.data).unwrap()[0];
+        let on = |d: u32| occurrences_in(cal, paris(d), paris(d + 1), Tz::Europe__Paris);
+        let found = on(15);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].start, found[0].end), (When::Day(day(13)), When::Day(day(16))));
+        assert!(on(13).len() == 1 && on(14).len() == 1);
+        // Days are Paris days: not the Monday, though its first hour (UTC) is still Sunday.
+        assert!(on(16).is_empty() && on(12).is_empty());
+        // Repeating, each time as long; and one with no DTEND lasts its day.
+        let yearly = ev("DTSTART;VALUE=DATE:20251113\nDTEND;VALUE=DATE:20251116\nRRULE:FREQ=YEARLY");
+        assert_eq!(starts(&yearly, "2026-11-15T12:00:00Z", "2026-11-15T13:00:00Z"), ["2026-11-13"]);
+        let one = ev("DTSTART;VALUE=DATE:20261113");
+        assert_eq!(starts(&one, "2026-11-12T23:00:00Z", "2026-11-13T23:00:00Z"), ["2026-11-13"]);
+        assert!(starts(&one, "2026-11-13T23:00:00Z", "2026-11-14T23:00:00Z").is_empty());
+    }
+
+    #[test]
+    fn rdates_and_cancellations() {
+        // RDATEs add to the first time; EXDATEs written as dates take a timed occurrence's day.
+        let o = ev("DTSTART:20261102T100000Z\nRDATE:20261104T100000Z,20261106T150000Z\nRRULE:FREQ=WEEKLY;COUNT=2\nEXDATE;VALUE=DATE:20261109");
+        assert_eq!(starts(&o, "2026-11-01T00:00:00Z", "2026-12-01T00:00:00Z"), ["2026-11-02T10:00:00Z", "2026-11-04T10:00:00Z", "2026-11-06T15:00:00Z"]);
+        // An event called off as a whole is still found, said cancelled.
+        let off = object(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:u\nSTATUS:CANCELLED\nDTSTART:20261102T100000Z\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\n\
+             BEGIN:VEVENT\nUID:u\nSTATUS:CANCELLED\nRECURRENCE-ID:20261103T100000Z\nDTSTART:20261103T110000Z\nEND:VEVENT\nEND:VCALENDAR\n",
+        );
+        let i = instances(&off, at("2026-11-01T00:00:00Z"), at("2026-11-05T00:00:00Z"), &[]);
+        assert_eq!(i.len(), 2);
+        assert!(i.iter().all(|x| x.cancelled));
+    }
+
+    #[test]
+    fn expanded_for_caldav() {
+        let o = object(
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VTIMEZONE\nTZID:Europe/Paris\nEND:VTIMEZONE\nBEGIN:VEVENT\nUID:u\nSUMMARY:Standup\n\
+             DTSTART;TZID=Europe/Paris:20261026T090000\nDURATION:PT15M\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\n\
+             BEGIN:VEVENT\nUID:u\nRECURRENCE-ID;TZID=Europe/Paris:20261027T090000\nSUMMARY:Late\n\
+             DTSTART;TZID=Europe/Paris:20261027T110000\nDTEND;TZID=Europe/Paris:20261027T111500\nEND:VEVENT\nEND:VCALENDAR\n",
+        );
+        let text = expanded(&o.data, at("2026-10-26T00:00:00Z"), at("2026-10-28T00:00:00Z")).unwrap();
+        let cal = &ical::parse(&text).unwrap()[0];
+        assert_eq!(cal.value("VERSION"), Some("2.0"));
+        assert!(cal.children.iter().all(|c| c.name == "VEVENT" && c.prop("RRULE").is_none() && c.prop("DURATION").is_none()));
+        let rows: Vec<(&str, &str, &str, &str)> = cal.children.iter().map(|e| (e.value("SUMMARY").unwrap(), e.value("DTSTART").unwrap(), e.value("DTEND").unwrap(), e.value("RECURRENCE-ID").unwrap())).collect();
+        assert_eq!(rows, [("Standup", "20261026T080000Z", "20261026T081500Z", "20261026T080000Z"), ("Late", "20261027T100000Z", "20261027T101500Z", "20261027T080000Z")]);
+        let day = expanded(&ev("DTSTART;VALUE=DATE:20261113\nDTEND;VALUE=DATE:20261116").data, at("2026-11-14T00:00:00Z"), at("2026-11-15T00:00:00Z")).unwrap();
+        assert!(day.contains("DTSTART;VALUE=DATE:20261113\r\nDTEND;VALUE=DATE:20261116\r\n") && !day.contains("RECURRENCE-ID"));
     }
 
     #[test]

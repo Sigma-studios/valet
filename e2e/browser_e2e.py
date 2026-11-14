@@ -89,6 +89,15 @@ def online():
     b.shot(f"{shots}/card.png")
     b.js("document.querySelector('dialog.cal-dlg').close()")
 
+    # An agenda link (what a desktop bar opens) opens that event's card.
+    url = b.js(f"fetch('/api/agenda?from={day}').then(r => r.json()).then(j => j.events.find(e => e.title === 'Made in the browser').url)")
+    check(url.startswith(f"{WEB}/calendar#day/{day}/") and url.endswith(".ics"), f"the agenda gives its link: {url}")
+    b.go(f"{WEB}/inbox", 1)
+    b.go(url, 2)
+    wait(b, "document.querySelector('dialog.cal-dlg')?.open && document.querySelector('dialog.cal-dlg h2')?.textContent === 'Made in the browser'", "the link opens its card")
+    check(b.js("location.hash") == f"#day/{day}", "the address is the day's again")
+    b.js("document.querySelector('dialog.cal-dlg').close()")
+
     # Times the server writes: the zone on hover, and the device's when first hovered.
     b.go(f"{WEB}/events")
     check("Paris time (Europe/Paris, " in b.js("document.querySelector('time[datetime]')?.title || ''"), "the Events page's times name their zone")

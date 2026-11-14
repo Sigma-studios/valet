@@ -46,10 +46,16 @@
     return e;
   };
 
-  // State lives in the address: #week/2026-10-23
+  // State lives in the address: #week/2026-10-23. An event's link (from the
+  // agenda) adds its calendar and name, #day/2026-10-23/work/x.ics, to open it.
+  let opening = null;
   function readHash() {
-    const m = /^#(month|week|day)\/(\d{4}-\d{2}-\d{2})$/.exec(location.hash);
-    return m ? { view: m[1], date: parseYmd(m[2]) } : null;
+    const m = /^#(month|week|day)\/(\d{4}-\d{2}-\d{2})(?:\/([^/]+)\/([^/]+))?$/.exec(location.hash);
+    if (!m) return null;
+    if (m[3]) {
+      try { opening = { calendar: decodeURIComponent(m[3]), name: decodeURIComponent(m[4]) }; } catch (_) { opening = null; }
+    }
+    return { view: m[1], date: parseYmd(m[2]) };
   }
   let state = readHash() || { view: localStorage.getItem('valet.cal.view') || (innerWidth < 720 ? 'day' : 'week'), date: today() };
   const go = (view, date) => { location.hash = `${view}/${ymd(date)}`; };
@@ -285,6 +291,14 @@
     const parts = state.view === 'month' ? await month() : await week(state.view === 'week' ? 7 : 1);
     if (mine !== drawing) return;
     root.replaceChildren(...parts.filter(Boolean));
+    if (opening) {
+      const o = opening;
+      opening = null;
+      history.replaceState(null, '', `#${state.view}/${ymd(state.date)}`);
+      const { events } = await eventsIn(state.date, addDays(state.date, 1));
+      const e = events.find((x) => x.calendar === o.calendar && x.name === o.name);
+      if (e) show(e);
+    }
   }
 
   // The card of one event.

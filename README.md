@@ -144,7 +144,8 @@ stays readable everywhere, in the combined folders too, while valet no
 longer logs in to it or sends from it, and changes to its mail stay in
 valet; *Sync again* undoes it), [mail rules](#mail-rules), calendars and their default patterns, alert patterns, the alerts of each
 event, `.ics` import (Google, Outlook, IONOS exports; importing again updates
-instead of duplicating), and how to connect each app.
+instead of duplicating), how to connect each app, and the tokens that let a
+device read the [agenda](#the-agenda).
 
 On a phone, a message opens full screen: a bar at the top to go back (the
 phone's Back button too), one at the bottom with Reply, Archive and Delete,
@@ -199,6 +200,42 @@ At first launch it asks for valet's address. The pages come from valet, so
 only changes to `android/` need installing again: each commit touching it is a
 new build number. Updates must be signed with the same key (the debug key in
 `~/.android/`), or the app has to be removed first.
+
+## The agenda
+
+What's on between two dates, for something outside valet, like a desktop bar
+(Quickshell, Waybar…):
+
+```sh
+curl -H "Authorization: Bearer valet_…" "https://mail.example.com/api/agenda?from=2026-11-14&days=7"
+```
+
+`from` is a day (today unless given) and `days` how many (1 unless given, at
+most 62), midnight to midnight in the zone of the settings. It answers
+`{"from", "days", "zone", "events"}`, the events being every occurrence that
+overlaps those days, by start (repeats expanded, moved ones where they went,
+deleted and cancelled ones left out), each with:
+
+| Field | |
+|---|---|
+| `id` | the event's UID (the occurrences of a series share it) |
+| `title` | |
+| `start`, `end` | `2026-11-14T09:00:00+01:00`, in the zone of the settings; for all-day events a date, `end` being the day after the last |
+| `allDay` | |
+| `calendar`, `color` | its calendar's name and colour |
+| `location` | when it has one |
+| `url` | opens it on valet's calendar page (the app, where installed) |
+| `pending` | an invitation not answered yet |
+
+Each device gets its own token, made in Settings → *Agenda tokens* and shown
+that once (valet keeps only its SHA-256), revoked there; the page says when each
+last read the agenda. A token reads the agenda and nothing else: no mail, no
+CalDAV, no changes. Logged in, the browser reads it too.
+
+The calendar page, CalDAV and the agenda find occurrences the same way
+(`calendar::occurrences_in`): RRULE, RDATE and EXDATE in the event's own zone
+(its TZID, so 9:00 stays 9:00 across daylight saving), overrides by
+RECURRENCE-ID (moved, changed, or cancelled: deleted), all-day events as dates.
 
 ## Configuration
 
@@ -308,7 +345,11 @@ off), and a check takes some tens of milliseconds.
 
 Supported: PROPFIND, PROPPATCH, MKCALENDAR (and extended MKCOL), GET, PUT,
 DELETE with ETags, and the `calendar-query`, `calendar-multiget` and
-`sync-collection` reports. Calendars hold events only (no tasks). There is no
+`sync-collection` reports. `calendar-query` honours a VEVENT `time-range`
+(the events with an occurrence in it; all-day ones are days in the zone of
+the settings), and `calendar-data` an `expand` (RFC 4791 9.6.5: each
+occurrence on its own, with its RECURRENCE-ID, times in UTC); other filters
+(on properties, text) are not applied, so the answer may hold more. Calendars hold events only (no tasks). There is no
 server-side scheduling: apps send invitation replies by email, as they do
 without it.
 
@@ -332,7 +373,7 @@ cargo build
 e2e/run_mail_e2e.sh <dir>   # IMAP; leaves <dir>/mdata for run_ui.sh
 e2e/run_ui.sh <dir>         # the tree editor's routes
 e2e/run_webmail.sh <dir>
-e2e/run_calendar.sh <dir>   # the calendar page and the app; with Chrome, also in a headless Chrome, offline included
+e2e/run_calendar.sh <dir>   # the calendar page, the app and the agenda (tokens, CalDAV alike); with Chrome, also in a headless Chrome, offline included
 e2e/run_notify.sh <dir>     # new mail told; CHROME_PUSH=1: real Web Push in a headless Chrome (needs the internet)
 e2e/run_addresses.sh <dir>  # completing addresses in the composer, the route and in a headless Chrome
 e2e/run_spell.sh <dir>      # spelling and grammar: the API, then underlines and corrections in a headless Chrome

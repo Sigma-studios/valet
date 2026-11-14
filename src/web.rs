@@ -31,6 +31,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/calendar/event/delete", post(calendar::delete))
         .route("/calendar/invite", post(calendar::answer))
         .route("/calendar/alarms.json", get(calendar::alarms))
+        .route("/api/agenda", get(agenda::agenda))
+        .route("/tokens", get(agenda::tokens).post(agenda::create_token))
+        .route("/tokens/{id}/revoke", post(agenda::revoke_token))
         .route("/assets/{name}", get(assets::file))
         .route("/sw.js", get(assets::service_worker))
         .route("/manifest.webmanifest", get(assets::manifest))
@@ -116,6 +119,7 @@ macro_rules! guard {
     };
 }
 
+mod agenda;
 mod assets;
 mod calendar;
 mod push;
@@ -148,6 +152,7 @@ const SETTINGS: &[(&str, &str)] = &[
     ("/events", "Event alerts"),
     ("/import", "Import"),
     ("/connect", "Connect apps"),
+    ("/tokens", "Agenda tokens"),
 ];
 
 const CSS: &str = r#"
