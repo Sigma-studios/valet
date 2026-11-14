@@ -31,6 +31,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/calendar/event/delete", post(calendar::delete))
         .route("/calendar/invite", post(calendar::answer))
         .route("/calendar/alarms.json", get(calendar::alarms))
+        .route("/calendar/birthdays", get(calendar::birthdays).post(calendar::save_birthday))
         .route("/api/agenda", get(agenda::agenda))
         .route("/tokens", get(agenda::tokens).post(agenda::create_token))
         .route("/tokens/{id}/revoke", post(agenda::revoke_token))
@@ -494,8 +495,29 @@ struct PatternForm {
     alerts: String,
     #[serde(default)]
     ring: Option<String>,
+    /// On valet's Android app: `notify`, `ring`, or nothing.
+    #[serde(default)]
+    android: Option<String>,
     #[serde(default)]
     color: String,
+}
+
+impl PatternForm {
+    /// (rings, notifies) on valet's Android app.
+    fn android(&self) -> (bool, bool) {
+        match self.android.as_deref() {
+            Some("ring") => (true, false),
+            Some("notify") => (false, true),
+            Some(_) => (false, false),
+            None => (self.ring.is_some(), false),
+        }
+    }
+}
+
+fn set_android(app: &App, id: i64, f: &PatternForm) {
+    let (ring, notify) = f.android();
+    let _ = app.store.set_ring(id, ring);
+    let _ = app.store.set_notify(id, notify);
 }
 
 fn spec_of(p: &Pattern) -> String {
@@ -534,9 +556,12 @@ fn pattern_fields(p: Option<&Pattern>, color: &str) -> Markup {
         div.alerts-box data-alerts=(serde_json::to_string(&p.map(|p| p.offsets.clone()).unwrap_or_else(|| vec![-10])).unwrap_or_default()) {
             label { "Alerts" input name="alerts" value=[p.map(spec_of)] placeholder="12m, 2m" size="24"; }
         }
-        label style="flex-direction:row; align-items:center; gap:6px" {
-            input type="checkbox" name="ring" value="1" checked[p.is_some_and(|p| p.ring)];
-            "Ring like an alarm (valet's Android app)"
+        label { "On valet's Android app"
+            select name="android" {
+                option value="" selected[p.is_none_or(|p| !p.ring && !p.notify)] { "Nothing more" }
+                option value="notify" selected[p.is_some_and(|p| p.notify && !p.ring)] { "A notification" }
+                option value="ring" selected[p.is_some_and(|p| p.ring)] { "Ring like an alarm" }
+            }
         }
     }
 }
@@ -575,7 +600,7 @@ async fn patterns_page(State(app): St, headers: HeaderMap, Query(m): Query<Msg>)
                     tr {
                         td { span style={"color:" (p.color)} { "● " } a href={"/patterns/" (p.id)} { (p.name) } }
                         td { code { "#" (p.tag) } }
-                        td { (pattern_alerts(p)) @if p.ring { br; span.small { "⏰ rings on the Android app" } } }
+                        td { (pattern_alerts(p)) @if p.ring { br; span.small { "⏰ rings on the Android app" } } @else if p.notify { br; span.small { "🔔 notifies on the Android app" } } }
                         td.muted.small { @for (i, m) in p.offsets.iter().enumerate() { @if i > 0 { ", " } (describe_all_day(*m)) } }
                         td { form method="post" action={"/patterns/" (p.id) "/delete"} onsubmit="return confirm('Delete this pattern?')" {
                             button.plain type="submit" { "Delete" }
@@ -603,7 +628,7 @@ async fn create_pattern(State(app): St, headers: HeaderMap, Form(f): Form<Patter
     match app.store.save_pattern(None, &name, &tag, &offsets) {
         Ok(true) => {
             if let Some(p) = app.store.patterns().into_iter().find(|p| p.tag == tag) {
-                let _ = app.store.set_ring(p.id, f.ring.is_some());
+                set_android(&app, p.id, &f);
                 if let Some(color) = color_of(&f) {
                     let _ = app.store.set_pattern_color(p.id, color);
                 }
@@ -640,7 +665,7 @@ async fn save_pattern(State(app): St, headers: HeaderMap, Path(id): Path<i64>, F
     };
     match app.store.save_pattern(Some(id), &name, &tag, &offsets) {
         Ok(true) => {
-            let _ = app.store.set_ring(id, f.ring.is_some());
+            set_android(&app, id, &f);
             if let Some(color) = color_of(&f) {
                 let _ = app.store.set_pattern_color(id, color);
             }
@@ -2042,7 +2067,7 @@ mod tests {
         assert!(starts(&ics(";TZID=America/New_York:20261023T100000")).into_string().contains("23/10/2026 16:00"));
         assert_eq!(starts(&ics(";VALUE=DATE:20261023")).into_string(), "23/10/2026, all day");
         assert_eq!(today().len(), 8);
-        let p = Pattern { id: 1, name: "x".into(), tag: "x".into(), offsets: vec![-1620, -12, 540], ring: false, color: String::new() };
+        let p = Pattern { id: 1, name: "x".into(), tag: "x".into(), offsets: vec![-1620, -12, 540], ring: false, notify: false, color: String::new() };
         assert_eq!(spec_of(&p), "1d 3h, 12m, 09:00");
         assert_eq!(alarms::parse_spec(&spec_of(&p)).unwrap(), vec![-1620, -12, 540]);
     }

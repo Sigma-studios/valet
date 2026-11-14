@@ -89,3 +89,15 @@ dialog.cal-dlg .answer label { flex-direction:row; align-items:center; gap:6px; 
   .cal-week .head div b { font-size:15px; }
   .cal-week .scroll { height:calc(100vh - 230px); }
 }
+
+/* Birthdays: the list and its form. */
+.cal-bar button.bd-open { font-size:16px; padding:3px 9px; }
+dialog.cal-dlg .bd-head { display:flex; gap:8px; margin:6px 0 8px; }
+dialog.cal-dlg .bd-head input { flex:1; min-width:0; }
+dialog.cal-dlg .bd-list { display:flex; flex-direction:column; max-height:min(55vh, 420px); overflow-y:auto; border-top:1px solid var(--line); }
+dialog.cal-dlg .bd-row { display:flex; justify-content:space-between; gap:12px; align-items:baseline; text-align:left; background:none; color:var(--fg); border:none; border-bottom:1px solid var(--line); border-radius:0; padding:8px 4px; }
+dialog.cal-dlg .bd-row:hover { background:var(--line); }
+dialog.cal-dlg .bd-name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+dialog.cal-dlg .bd-when { color:var(--muted); font-size:13px; white-space:nowrap; }
+dialog.cal-dlg .bd-list p { margin:10px 4px; }
+dialog.cal-dlg .bd-preview { margin:0; padding:8px 10px; border-radius:6px; background:var(--bg); border:1px solid var(--line); }

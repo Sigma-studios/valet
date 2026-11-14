@@ -1,5 +1,6 @@
 mod accounts;
 mod alarms;
+mod birthdays;
 mod calendar;
 mod contacts;
 mod dav;

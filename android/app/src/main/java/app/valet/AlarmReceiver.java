@@ -23,13 +23,15 @@ import java.util.Locale;
 /**
  * An alarm going off: a notification that keeps ringing (the alarm sound,
  * through Do Not Disturb's "alarms") until stopped or snoozed, shown full
- * screen over the lock screen when allowed.
+ * screen over the lock screen when allowed. Or, for patterns set to notify,
+ * a plain notification (a birthday, tomorrow).
  */
 public class AlarmReceiver extends BroadcastReceiver {
     static final String RING = "app.valet.RING";
     static final String STOP = "app.valet.STOP";
     static final String SNOOZE = "app.valet.SNOOZE";
     private static final String CHANNEL = "alarms";
+    private static final String REMINDERS = "reminders";
     private static final long MINUTE = 60_000L;
 
     @Override
@@ -41,7 +43,8 @@ public class AlarmReceiver extends BroadcastReceiver {
         String action = intent.getAction() == null ? "" : intent.getAction();
         switch (action) {
             case RING:
-                ring(c, nm, id, about, at);
+                if (about.getBoolean("notify")) remind(c, nm, about, at);
+                else ring(c, nm, id, about, at);
                 break;
             case STOP:
                 nm.cancel(id);
@@ -62,6 +65,7 @@ public class AlarmReceiver extends BroadcastReceiver {
         b.putString("title", i.getStringExtra("title"));
         b.putLong("start", i.getLongExtra("start", 0));
         b.putString("day", i.getStringExtra("day"));
+        b.putBoolean("notify", i.getBooleanExtra("notify", false));
         return b;
     }
 
@@ -109,6 +113,27 @@ public class AlarmReceiver extends BroadcastReceiver {
     static PendingIntent action(Context c, String action, int id, Bundle about, long at) {
         Intent i = new Intent(c, AlarmReceiver.class).setAction(action).putExtras(about).putExtra("id", id).putExtra("at", at);
         return PendingIntent.getBroadcast(c, id * 4 + (STOP.equals(action) ? 1 : 2), i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    /** A reminder: shown like a message, no sound beyond the channel's own; a tap opens the calendar. */
+    private static void remind(Context c, NotificationManager nm, Bundle about, long at) {
+        NotificationChannel ch = new NotificationChannel(REMINDERS, "Reminders", NotificationManager.IMPORTANCE_DEFAULT);
+        ch.setDescription("Alerts of the patterns set to notify, like birthdays");
+        nm.createNotificationChannel(ch);
+        String when = when(about, System.currentTimeMillis());
+        String text = about.getString("day") != null ? when : when.isEmpty() ? clock(c, about, at) : clock(c, about, at) + " · " + when;
+        String tag = title(about) + "@" + at;
+        Intent open = new Intent(c, MainActivity.class).putExtra("page", "/calendar").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        Notification n = new Notification.Builder(c, REMINDERS)
+            .setSmallIcon(R.drawable.ic_notify)
+            .setContentTitle(title(about))
+            .setContentText(text)
+            .setCategory(Notification.CATEGORY_REMINDER)
+            .setShowWhen(true)
+            .setAutoCancel(true)
+            .setContentIntent(PendingIntent.getActivity(c, tag.hashCode(), open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT))
+            .build();
+        nm.notify(tag, 0, n);
     }
 
     private static void ring(Context c, NotificationManager nm, int id, Bundle about, long at) {

@@ -85,7 +85,7 @@
   const patternOf = (e) => e.alert != null && patterns.find((p) => p.id === e.alert);
   const alertsText = (p, allDay) => {
     const list = allDay ? p.allDay : p.timed;
-    return (list && list.length ? list.join(', ') : 'no alert') + (p.ring ? ', ringing like an alarm' : '');
+    return (list && list.length ? list.join(', ') : 'no alert') + (p.ring ? ', ringing like an alarm' : p.notify ? ', a notification on the Android app' : '');
   };
   const alertWhy = (e) => e.alertBy === 'tag' ? 'by the #tag in its title'
     : e.alertBy === 'chosen' ? 'chosen for this event' : `${calName(e.calendar)}'s default`;
@@ -138,6 +138,7 @@
       el('h1', {}, title),
       el('span', { class: 'cal-zone', 'data-zone': '', title: `Times are in ${T.zoneNote(Date.now())}: change it in Settings` }, T.label),
       views,
+      el('button', { class: 'bd-open', title: 'Birthdays', 'aria-label': 'Birthdays', onclick: () => birthdays() }, '🎂'),
       el('button', { class: 'primary', onclick: () => edit(null, { date: state.view === 'month' ? today() : state.date }) }, 'New event'));
   }
 
@@ -163,7 +164,9 @@
   }
 
   // An event's hover: its title, and for timed ones when, in which zone.
-  const hover = (e) => (e.allDay ? e.title : `${e.title}\n${T.note(e.start * 1000)}`) + (e.unanswered ? '\nNot answered yet' : '')
+  // A birthday says the age it is.
+  const label = (e) => (e.title || '(no title)') + (e.age != null ? ` · ${e.age}` : '');
+  const hover = (e) => (e.allDay ? label(e) : `${label(e)}\n${T.note(e.start * 1000)}`) + (e.unanswered ? '\nNot answered yet' : '')
     + (patternOf(e) ? `\n${alertNote(e)}` : '');
 
   // Invitations not answered yet are drawn hollow, in their calendar's color.
@@ -174,7 +177,7 @@
       style: `--c:${color(e.calendar)}`,
       title: hover(e),
       onclick: (ev) => { ev.stopPropagation(); show(e); },
-    }, e.allDay ? null : el('span', { class: 'd' }), startsHere ? el('span', { class: 't' }, fTime.format(e.s)) : null, alertBadge(e), e.title || '(no title)');
+    }, e.allDay ? null : el('span', { class: 'd' }), startsHere ? el('span', { class: 't' }, fTime.format(e.s)) : null, alertBadge(e), label(e));
   }
 
   async function month() {
@@ -259,7 +262,7 @@
           style: `top:${p.top}px; height:${p.height - 2}px; left:calc(${p.col * w}% + 1px); width:calc(${w}% - 3px); --c:${color(p.e.calendar)}`,
           title: hover(p.e),
           onclick: (ev) => { ev.stopPropagation(); show(p.e); },
-        }, el('div', {}, alertBadge(p.e), p.e.title || '(no title)'), el('div', { class: 't' }, `${fTime.format(p.e.s)} – ${fTime.format(p.e.f)}`)));
+        }, el('div', {}, alertBadge(p.e), label(p.e)), el('div', { class: 't' }, `${fTime.format(p.e.s)} – ${fTime.format(p.e.f)}`)));
       }
       if (sameDay(d, today())) {
         const n = T.wall(Date.now());
@@ -318,7 +321,7 @@
   function show(e) {
     const online = navigator.onLine;
     dlg.replaceChildren(...[
-      el('h2', {}, e.title || '(no title)'),
+      el('h2', {}, label(e)),
       el('div', { class: 'meta' }, whenText(e),
         e.allDay ? null : [' · ', el('span', { 'data-zone': '', title: T.note(e.start * 1000) }, T.label)],
         e.repeats ? ' · repeats' : '', el('br'),
@@ -345,7 +348,7 @@
       mine.map((c) => el('option', { value: c.id, selected: c.id === e.calendar }, c.name)), el('option', { value: '' }, 'Invitations'));
     // Its alerts: a pattern, or automatic.
     const pat = patterns.length ? el('select', { name: 'pattern' }, el('option', { value: '' }, 'Automatic'),
-      patterns.map((p) => el('option', { value: p.id, selected: e.alertBy === 'chosen' && e.alert === p.id }, `${p.name}${p.ring ? ' ⏰' : ''}`))) : null;
+      patterns.map((p) => el('option', { value: p.id, selected: e.alertBy === 'chosen' && e.alert === p.id }, `${p.name}${p.ring ? ' ⏰' : p.notify ? ' 🔔' : ''}`))) : null;
     const err = el('p', { class: 'err small' });
     // Emailing the answer takes a few seconds: a spinner meanwhile.
     const wait = (b, on) => {
@@ -436,7 +439,7 @@
         .concat(ev && ev.repeat === 'custom' ? [['custom', 'As it is (set in another app)']] : [])
         .map(([v, l]) => el('option', { value: v, selected: (ev ? ev.repeat : 'none') === v }, l)));
     const pattern = el('select', { name: 'pattern' }, el('option', { value: '' }, 'Automatic'),
-      patterns.map((p) => el('option', { value: p.id, selected: ev && ev.pattern === p.id }, `${p.name}${p.ring ? ' ⏰' : ''}`)));
+      patterns.map((p) => el('option', { value: p.id, selected: ev && ev.pattern === p.id }, `${p.name}${p.ring ? ' ⏰' : p.notify ? ' 🔔' : ''}`)));
     const allDayBox = el('input', { type: 'checkbox', name: 'all_day', value: '1', checked: allDay });
     const times = [input('start_time', hm(s), { type: 'time', required: true }), input('end_time', hm(f), { type: 'time', required: true })];
     const sync = () => times.forEach((t) => { t.closest('label').style.display = allDayBox.checked ? 'none' : ''; t.disabled = allDayBox.checked; });
@@ -481,6 +484,129 @@
     sync();
     if (!dlg.open) dlg.showModal();
     form.elements.title.focus();
+  }
+
+  // Birthdays: the list (the next first, searched as typed), and the form.
+  const fold = (x) => x.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+  const fFull = fmt({ weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const fMonthName = fmt({ month: 'long' });
+  const plainButton = (text, onclick) => el('button', { type: 'button', style: 'background:var(--card);color:var(--fg);border:1px solid var(--line)', onclick }, text);
+  // The day it falls on in `year` (the 28th for 29 February, but in leap years).
+  const bdOn = (month, day, year) => {
+    const d = new Date(year, month - 1, day);
+    if (d.getMonth() === month - 1) return d;
+    return month === 2 && day === 29 ? new Date(year, 1, 28) : null;
+  };
+  const bdNext = (month, day, t) => {
+    const d = bdOn(month, day, t.getFullYear());
+    return d && d >= t ? d : bdOn(month, day, t.getFullYear() + 1);
+  };
+  const inDays = (d, t) => Math.round((d - t) / 86400000);
+  const soon = (d, t) => {
+    const n = inDays(d, t);
+    return n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : n < 30 ? `${fDayShort.format(d)} · in ${n} days` : fDayShort.format(d);
+  };
+
+  async function birthdays(query = '') {
+    if (!navigator.onLine) { alert("You're offline: birthdays wait until you are back online."); return; }
+    const r = await fetch('/calendar/birthdays', { cache: 'no-store' });
+    if (r.status === 401) { location = '/login'; return; }
+    if (!r.ok) { alert('The birthdays could not be loaded.'); return; }
+    const { today: t, birthdays: list } = await r.json();
+    const now = parseYmd(t);
+    const search = el('input', { type: 'search', placeholder: 'Search', 'aria-label': 'Search birthdays', value: query, autocomplete: 'off' });
+    const rows = el('div', { class: 'bd-list' });
+    const draw = () => {
+      const q = fold(search.value.trim());
+      const found = list.filter((b) => fold(b.person).includes(q));
+      rows.replaceChildren(...(found.length ? found.map((b) => el('button', { type: 'button', class: 'bd-row', onclick: () => birthday(b, now, search.value) },
+        el('span', { class: 'bd-name' }, b.person),
+        el('span', { class: 'bd-when' }, soon(parseYmd(b.next), now), b.turns != null ? ` · turns ${b.turns}` : '')))
+        : [el('p', { class: 'muted' }, list.length ? 'No one by that name.' : 'No birthday yet: add the first.')]));
+    };
+    search.addEventListener('input', draw);
+    draw();
+    dlg.replaceChildren(
+      el('h2', {}, 'Birthdays'),
+      el('div', { class: 'bd-head' }, search, el('button', { type: 'button', onclick: () => birthday(null, now, search.value) }, '+ Add')),
+      rows,
+      el('p', { class: 'muted small' }, 'They are told on valet\'s Android app, as the ', el('a', { href: '/patterns' }, 'Birthday pattern'), ' says.'),
+      el('div', { class: 'actions' }, plainButton('Close', () => dlg.close())));
+    if (!dlg.open) dlg.showModal();
+    search.focus();
+  }
+
+  // One birthday's form: its name, day and month, and the age or the birth
+  // year (either gives the other), with the next one said to confirm.
+  function birthday(b, now, query) {
+    const thisYear = now.getFullYear();
+    // A new one starts from the name searched for.
+    const person = el('input', { name: 'person', value: b ? b.person : query.trim(), required: true, autocomplete: 'off' });
+    const day = el('select', { name: 'day', 'aria-label': 'Day' }, [...Array(31).keys()].map((i) => el('option', { value: i + 1, selected: b ? b.day === i + 1 : i === now.getDate() - 1 }, i + 1)));
+    const month = el('select', { name: 'month', 'aria-label': 'Month' }, [...Array(12).keys()].map((i) => el('option', { value: i + 1, selected: b ? b.month === i + 1 : i === now.getMonth() }, fMonthName.format(new Date(2000, i, 1)))));
+    const age = el('input', { type: 'number', min: 0, max: 130, inputmode: 'numeric', 'aria-label': 'Age now' });
+    const year = el('input', { name: 'year', type: 'number', min: 1900, max: thisYear, inputmode: 'numeric', value: b && b.year ? b.year : '', 'aria-label': 'Birth year' });
+    const preview = el('p', { class: 'bd-preview' });
+    const err = el('p', { class: 'err' });
+    const m = () => Number(month.value), d = () => Number(day.value);
+    // Had this year's yet? Then the age is this year's minus the birth year.
+    const had = () => { const x = bdOn(m(), d(), thisYear); return x && x <= now; };
+    const ageOf = (y) => thisYear - y - (had() ? 0 : 1);
+    const fromYear = () => { age.value = year.value ? String(ageOf(Number(year.value))) : ''; };
+    const fromAge = () => { year.value = age.value === '' ? '' : String(thisYear - Number(age.value) - (had() ? 0 : 1)); };
+    const show = () => {
+      if (new Date(2000, m() - 1, d()).getMonth() !== m() - 1) {
+        preview.textContent = `There is no ${d()} ${fMonthName.format(new Date(2000, m() - 1, 1))}.`;
+        return;
+      }
+      const next = bdNext(m(), d(), now);
+      const turns = year.value ? next.getFullYear() - Number(year.value) : null;
+      const n = inDays(next, now);
+      preview.replaceChildren('Next: ', el('b', {}, fFull.format(next)), n === 0 ? ' (today)' : n === 1 ? ' (tomorrow)' : ` (in ${n} days)`,
+        ...(turns != null ? [', turns ', el('b', {}, turns)] : []));
+    };
+    age.addEventListener('input', () => { fromAge(); show(); });
+    year.addEventListener('input', () => { fromYear(); show(); });
+    // Another day moves the age, the year staying.
+    for (const x of [day, month]) x.addEventListener('change', () => { fromYear(); show(); });
+    fromYear();
+    show();
+    const field = (text, input) => el('label', {}, text, input);
+    const form = el('form', {},
+      el('h2', {}, b ? `${b.person}'s birthday` : 'New birthday'),
+      field('Name', person),
+      el('div', { class: 'two' }, field('Day', day), field('Month', month)),
+      el('div', { class: 'two' }, field('Age now', age), field('Birth year', year)),
+      el('p', { class: 'muted small' }, 'Both may stay empty: then no age is said.'),
+      preview,
+      err,
+      el('div', { class: 'actions' },
+        b ? el('button', { type: 'button', class: 'plain left', onclick: async () => {
+          if (!confirm(`Delete ${b.person}'s birthday?`)) return;
+          try { await post('/calendar/event/delete', { calendar: b.calendar, name: b.name }); await birthdaysChanged(query); }
+          catch (e2) { err.textContent = e2.message; }
+        } }, 'Delete') : null,
+        plainButton('Back', () => birthdays(query)),
+        el('button', { type: 'submit' }, 'Save')));
+    form.addEventListener('submit', async (x) => {
+      x.preventDefault();
+      const data = new FormData(form);
+      if (b) { data.set('calendar', b.calendar); data.set('name', b.name); }
+      try { await post('/calendar/birthdays', data); await birthdaysChanged(query); }
+      catch (e2) { err.textContent = e2.message; }
+    });
+    dlg.replaceChildren(form);
+    if (!dlg.open) dlg.showModal();
+    person.focus();
+  }
+
+  // Saved or deleted: the calendar and the app's alerts follow, the list shows again.
+  async function birthdaysChanged(query) {
+    months.clear();
+    render();
+    prefetch();
+    if (window.ValetApp && window.ValetApp.refreshAlarms) window.ValetApp.refreshAlarms();
+    await birthdays(query);
   }
 
   // Months around today, kept by the service worker for offline reading.

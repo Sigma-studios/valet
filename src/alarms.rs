@@ -21,6 +21,8 @@ pub struct Pattern {
     pub offsets: Vec<i64>,
     /// Its alerts ring like an alarm on valet's Android app.
     pub ring: bool,
+    /// Its alerts are notifications on valet's Android app (unless it rings).
+    pub notify: bool,
     /// `#rrggbb`: its badge on the calendar's events.
     pub color: String,
 }
@@ -256,10 +258,10 @@ mod tests {
 
     fn patterns() -> Vec<Pattern> {
         vec![
-            Pattern { id: 1, name: "Meeting".into(), tag: "meeting".into(), offsets: vec![-12, -2], ring: false, color: String::new() },
-            Pattern { id: 2, name: "Flight".into(), tag: "flight".into(), offsets: vec![-1440, -180], ring: true, color: String::new() },
-            Pattern { id: 3, name: "Morning".into(), tag: "morning".into(), offsets: vec![540], ring: false, color: String::new() },
-            Pattern { id: 4, name: "Silent".into(), tag: "silent".into(), offsets: vec![], ring: false, color: String::new() },
+            Pattern { id: 1, name: "Meeting".into(), tag: "meeting".into(), offsets: vec![-12, -2], ring: false, notify: false, color: String::new() },
+            Pattern { id: 2, name: "Flight".into(), tag: "flight".into(), offsets: vec![-1440, -180], ring: true, notify: false, color: String::new() },
+            Pattern { id: 3, name: "Morning".into(), tag: "morning".into(), offsets: vec![540], ring: false, notify: false, color: String::new() },
+            Pattern { id: 4, name: "Silent".into(), tag: "silent".into(), offsets: vec![], ring: false, notify: false, color: String::new() },
         ]
     }
 

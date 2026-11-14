@@ -14,6 +14,7 @@ start_valet "$DIR/cdata"
 VALET_PID="${PIDS[${#PIDS[@]}-1]}"
 "$PYTHON" "$REPO/e2e/calendar_e2e.py"
 "$PYTHON" "$REPO/e2e/agenda_e2e.py"
+"$PYTHON" "$REPO/e2e/birthdays_e2e.py"
 if [ -x "${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}" ]; then
     out="$DIR/browser-$(date +%s)"
     mkdir -p "$out"

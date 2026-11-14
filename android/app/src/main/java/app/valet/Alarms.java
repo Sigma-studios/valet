@@ -23,10 +23,10 @@ import java.net.URLEncoder;
 import java.util.TimeZone;
 
 /**
- * The alarms to ring: valet says which (/calendar/alarms.json, the alerts of
- * patterns marked to ring, a week ahead) and the phone sets them, so they go
- * off at their minute, offline too. The last list is kept for restarts
- * without a network.
+ * The alarms to ring and the reminders to show: valet says which
+ * (/calendar/alarms.json, the alerts of patterns marked to ring or to
+ * notify, a week ahead) and the phone sets them, so they go off at their
+ * minute, offline too. The last list is kept for restarts without a network.
  */
 final class Alarms {
     private static final String TAG = "valet";
@@ -50,7 +50,7 @@ final class Alarms {
         String server = p.getString("server", null);
         if (server == null) return;
         try {
-            String url = server + "/calendar/alarms.json?tz=" + URLEncoder.encode(TimeZone.getDefault().getID(), "UTF-8");
+            String url = server + "/calendar/alarms.json?notify=1&tz=" + URLEncoder.encode(TimeZone.getDefault().getID(), "UTF-8");
             HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
             String cookie = CookieManager.getInstance().getCookie(server);
             if (cookie != null) h.setRequestProperty("Cookie", cookie);
@@ -102,7 +102,12 @@ final class Alarms {
             Object start = a.opt("start");
             if (start instanceof Number) about.putLong("start", ((Number) start).longValue() * 1000);
             if (start instanceof String) about.putString("day", (String) start);
-            set(c, at, ring(c, n, about, at));
+            if (a.optBoolean("notify")) {
+                about.putBoolean("notify", true);
+                setQuiet(c, at, ring(c, n, about, at));
+            } else {
+                set(c, at, ring(c, n, about, at));
+            }
             n++;
         }
         p.edit().putInt("scheduled", n).apply();
@@ -123,6 +128,16 @@ final class Alarms {
             am.setAlarmClock(new AlarmManager.AlarmClockInfo(at, showing), pi);
         } catch (SecurityException e) {
             // Exact alarms refused (Android 12, permission off): within minutes.
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi);
+        }
+    }
+
+    /** A reminder: at its minute too, but not shown as the phone's next alarm. */
+    static void setQuiet(Context c, long at, PendingIntent pi) {
+        AlarmManager am = c.getSystemService(AlarmManager.class);
+        try {
+            am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi);
+        } catch (SecurityException e) {
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi);
         }
     }

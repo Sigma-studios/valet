@@ -206,6 +206,11 @@ impl Store {
         if !has_ring {
             c.execute_batch("ALTER TABLE patterns ADD COLUMN ring INTEGER NOT NULL DEFAULT 0;")?;
         }
+        // Added later: patterns whose alerts notify on the Android app.
+        let has_notify: bool = c.query_row("SELECT COUNT(*) FROM pragma_table_info('patterns') WHERE name = 'notify'", [], |r| r.get(0))?;
+        if !has_notify {
+            c.execute_batch("ALTER TABLE patterns ADD COLUMN notify INTEGER NOT NULL DEFAULT 0;")?;
+        }
         // Added later: patterns' colours; those made before get the palette's.
         let has_color: bool = c.query_row("SELECT COUNT(*) FROM pragma_table_info('patterns') WHERE name = 'color'", [], |r| r.get(0))?;
         if !has_color {
@@ -555,7 +560,7 @@ impl Store {
 
     pub fn patterns(&self) -> Vec<Pattern> {
         let c = self.db();
-        let mut st = c.prepare("SELECT id, name, tag, offsets, ring, color FROM patterns ORDER BY name").unwrap();
+        let mut st = c.prepare("SELECT id, name, tag, offsets, ring, color, notify FROM patterns ORDER BY name").unwrap();
         st.query_map([], |r| {
             let offsets: String = r.get(3)?;
             Ok(Pattern {
@@ -565,6 +570,7 @@ impl Store {
                 offsets: serde_json::from_str(&offsets).unwrap_or_default(),
                 ring: r.get(4)?,
                 color: r.get(5)?,
+                notify: r.get(6)?,
             })
         })
         .unwrap()
@@ -603,6 +609,12 @@ impl Store {
     /// Whether the pattern's alerts ring like an alarm (on valet's Android app).
     pub fn set_ring(&self, id: i64, ring: bool) -> Result<()> {
         self.db().execute("UPDATE patterns SET ring = ?2 WHERE id = ?1", params![id, ring])?;
+        Ok(())
+    }
+
+    /// Whether the pattern's alerts are notifications on valet's Android app.
+    pub fn set_notify(&self, id: i64, notify: bool) -> Result<()> {
+        self.db().execute("UPDATE patterns SET notify = ?2 WHERE id = ?1", params![id, notify])?;
         Ok(())
     }
 

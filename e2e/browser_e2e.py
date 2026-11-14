@@ -62,7 +62,7 @@ def online():
     check(badge and badge[0].startswith("Alerts: Focus (5 min before), by the #tag") and badge[1] == "rgb(124, 58, 237)", f"Deep work's badge, in Focus's color: {badge}")
     check("Alerts: Focus" in ev_title(b, "Deep work"), "the event's hover names its alerts too")
     check(not b.js("[...document.querySelectorAll('.cal-week .ev')].find(e => e.textContent.includes('Standup (team)')).querySelector('.alert')"), "no badge without a pattern")
-    check(b.js("[...document.querySelectorAll('.cal-patterns > span')].map(s => s.textContent).join(',')") == "Focus,Odd,Wake", "the patterns' colors explained by the calendars")
+    check(b.js("[...document.querySelectorAll('.cal-patterns > span')].map(s => s.textContent).join(',')") == "Birthday,Focus,Odd,Wake", "the patterns' colors explained by the calendars")
     b.shot(f"{shots}/week.png")
     b.js(f"location.hash = 'month/{day}'")
     wait(b, "document.querySelectorAll('.cal-month .cell').length >= 28", "the month view is drawn")
@@ -96,6 +96,34 @@ def online():
     b.go(url, 2)
     wait(b, "document.querySelector('dialog.cal-dlg')?.open && document.querySelector('dialog.cal-dlg h2')?.textContent === 'Made in the browser'", "the link opens its card")
     check(b.js("location.hash") == f"#day/{day}", "the address is the day's again")
+    b.js("document.querySelector('dialog.cal-dlg').close()")
+
+    # Birthdays: the list, then one added with its age, the next one said.
+    b.js("document.querySelector('.cal-bar .bd-open').click()")
+    wait(b, "document.querySelector('dialog.cal-dlg h2')?.textContent === 'Birthdays' && document.querySelectorAll('.bd-row').length > 0", "the birthdays open from the bar")
+    check("Bob" in b.js("document.querySelector('.bd-list').textContent"), "with those saved")
+    b.js("{ const q = document.querySelector('.bd-head input'); q.value = 'zz'; q.dispatchEvent(new Event('input')) }")
+    check(b.js("document.querySelector('.bd-list').textContent") == "No one by that name.", "searched as typed")
+    b.js("{ const q = document.querySelector('.bd-head input'); q.value = 'De'; q.dispatchEvent(new Event('input')) }")
+    b.js("[...document.querySelectorAll('.bd-head button')].find(x => x.textContent === '+ Add').click()")
+    wait(b, "document.querySelector('dialog.cal-dlg h2')?.textContent === 'New birthday'", "the form")
+    check(b.js("document.querySelector('dialog form').person.value") == "De", "the name searched for, to start from")
+    tomorrow = date.today() + timedelta(days=1)
+    b.js(f"""{{ const f = document.querySelector('dialog form'); f.person.value = 'Dee';
+      f.day.value = '{tomorrow.day}'; f.month.value = '{tomorrow.month}'; f.month.dispatchEvent(new Event('change'));
+      const age = f.querySelector('[aria-label="Age now"]'); age.value = '30'; age.dispatchEvent(new Event('input')) }}""")
+    check(b.js("document.querySelector('dialog form').year.value") == str(tomorrow.year - 31 if tomorrow.year == date.today().year else tomorrow.year - 30), "the age gives the birth year (not had this year's yet)")
+    preview = b.js("document.querySelector('.bd-preview').textContent")
+    check("(tomorrow)" in preview and preview.endswith("turns 31"), f"the next one said, with its age: {preview!r}")
+    b.shot(f"{shots}/birthday-form.png")
+    b.js("{ const y = document.querySelector('dialog form').year; y.value = ''; y.dispatchEvent(new Event('input')) }")
+    check(b.js("document.querySelector('[aria-label=\"Age now\"]').value") == "" and "turns" not in b.js("document.querySelector('.bd-preview').textContent"), "no year, no age")
+    b.js(f"{{ const y = document.querySelector('dialog form').year; y.value = '{tomorrow.year - 31}'; y.dispatchEvent(new Event('input')) }}")
+    check(b.js("document.querySelector('[aria-label=\"Age now\"]').value") == "30", "the year gives the age back")
+    b.js("document.querySelector('dialog form').requestSubmit()")
+    wait(b, "document.querySelector('dialog.cal-dlg h2')?.textContent === 'Birthdays' && document.querySelector('.bd-row .bd-name')?.textContent === 'Dee'", "saved: first of the list")
+    check(b.js("document.querySelector('.bd-row .bd-when').textContent") == "Tomorrow · turns 31", "tomorrow, turning 31")
+    b.shot(f"{shots}/birthdays.png")
     b.js("document.querySelector('dialog.cal-dlg').close()")
 
     # Times the server writes: the zone on hover, and the device's when first hovered.

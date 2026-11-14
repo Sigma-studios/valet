@@ -6,7 +6,8 @@ the native apps of every device.
 - **Calendar** (CalDAV): Apple Calendar, DAVx⁵ on Android, Thunderbird,
   GNOME/Evolution, and valet's own calendar page. Every event gets the alerts
   you chose, stored in the event itself, so they ring natively everywhere,
-  even offline; on valet's Android app, they can ring like an alarm.
+  even offline; on valet's Android app, they can ring like an alarm or
+  notify. Birthdays have their own list and form, with the age they turn.
 - **Mail** (IMAP + SMTP): valet logs in to each of your mailboxes (Gmail,
   IONOS, Microsoft 365…), keeps a copy, and serves them all as one account,
   with one tree of folders you shape yourself (see [Folders](#folders)).
@@ -129,6 +130,21 @@ Alerts are typed as `12m, 2m` (before the start), `1d 3h`, `+30m` (after it),
 or, for all-day events (which start at midnight), a clock time: `9:00` is 9 am
 that day, `1d 18:00` is 6 pm the day before.
 
+### Birthdays
+
+The calendar's 🎂 button lists them, the next first ("Tomorrow · turns 37"),
+searched as typed; *+ Add* (or a click on one) gives a name, a day and month,
+and the age now or the birth year: either fills the other, both may stay
+empty (then no age is said), and the next one is said with its age, to
+check. Each is a yearly all-day event in a *Birthdays* calendar (so every app
+shows it), marked `X-VALET-BIRTHDAY` with its year; 29 February falls on the
+28th in other years. The calendar and the agenda say the age it turns.
+
+The first one makes the calendar, with the *Birthday* pattern (`#birthday`)
+for its all-day events: a notification on valet's Android app at 18:00 the
+day before and at 8:00 on the day ("🎂 Ann turns 37", Tomorrow / Today).
+Change its alerts, as many as you like, in Settings → Alert patterns.
+
 ## Web UI
 
 At the server's root, with the same password. The bar holds the everyday
@@ -176,9 +192,10 @@ on a device stops its notifications.
 
 **Android**: `android/` is valet's own app, the same site in a window plus
 what a site can't do: **alarms that ring** (full screen over the lock screen,
-until stopped or snoozed) for the alerts of patterns marked *Ring like an
-alarm*. The phone sets them a week ahead from valet's list, so they ring
-offline too, and looks again every few hours, after a restart, and when
+until stopped or snoozed) for the alerts of patterns set to *Ring like an
+alarm*, and **reminders**, plain notifications, for those set to *A
+notification* (like [birthdays](#birthdays)). The phone sets them a week ahead
+from valet's list, so they go off offline too, and looks again every few hours, after a restart, and when
 events or patterns change. And **notifications of new mail**, as above: its
 window can't receive Web Push, so it asks valet about every quarter of an
 hour, which needs no Google account or Firebase (Android's settings for the

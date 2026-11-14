@@ -49,6 +49,9 @@ pub struct Item {
     pub url: String,
     /// An invitation not answered yet.
     pub pending: bool,
+    /// A birthday's: the age it is, when its year is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age: Option<i64>,
 }
 
 fn moment(w: When, tz: chrono_tz::Tz) -> String {
@@ -88,6 +91,7 @@ pub fn items(app: &App, from: NaiveDate, days: i64, tz: chrono_tz::Tz, base: &st
                 location: Some(i.location.clone()).filter(|l| !l.trim().is_empty()),
                 url: format!("{base}/calendar#day/{}/{}/{}", day.format("%Y-%m-%d"), enc(&i.calendar), enc(&i.name)),
                 pending: i.unanswered,
+                age: i.age,
             };
             (at, item)
         })

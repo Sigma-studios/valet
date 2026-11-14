@@ -103,7 +103,7 @@ pub async fn month(State(app): St, headers: HeaderMap, Path(key): Path<String>) 
         .iter()
         .map(|p| {
             json!({
-                "id": p.id, "name": p.name, "tag": p.tag, "ring": p.ring, "color": p.color,
+                "id": p.id, "name": p.name, "tag": p.tag, "ring": p.ring, "notify": p.notify && !p.ring, "color": p.color,
                 "timed": p.offsets.iter().map(|m| describe_offset(*m)).collect::<Vec<_>>(),
                 "allDay": p.offsets.iter().map(|m| describe_all_day(*m)).collect::<Vec<_>>(),
             })
@@ -292,21 +292,81 @@ pub async fn answer(State(app): St, headers: HeaderMap, form: Result<axum::extra
 pub struct AlarmsQuery {
     #[serde(default)]
     tz: String,
+    /// The app shows notifications too (builds from before only ring, so
+    /// they aren't given those).
+    #[serde(default)]
+    notify: Option<String>,
 }
 
 /// The alarms to ring in the coming week, for valet's Android app: alerts
-/// of the patterns marked to ring. All-day events start at midnight in `tz`.
+/// of the patterns marked to ring, and (`notify=1`) those that notify, said
+/// so. All-day events start at midnight in `tz`.
 pub async fn alarms(State(app): St, headers: HeaderMap, Query(q): Query<AlarmsQuery>) -> Response {
     if !authed(&app, &headers) {
         return unauthorized();
     }
-    let tags: Vec<String> = app.store.patterns().into_iter().filter(|p| p.ring).map(|p| p.tag).collect();
+    let patterns = app.store.patterns();
+    let notifying: Vec<String> = if q.notify.is_some() { patterns.iter().filter(|p| p.notify && !p.ring).map(|p| p.tag.clone()).collect() } else { vec![] };
+    let tags: Vec<String> = patterns.iter().filter(|p| p.ring).map(|p| p.tag.clone()).chain(notifying.iter().cloned()).collect();
     let tz = calendar::zone(&q.tz).unwrap_or_else(calendar::default_zone);
     let now = crate::mailstore::now();
     let to = now + Duration::days(8).num_seconds();
     let mut rings: Vec<calendar::Ring> =
         if tags.is_empty() { vec![] } else { app.store.all_objects().iter().flat_map(|o| calendar::rings(o, &tags, now, to, tz)).collect() };
+    for r in &mut rings {
+        r.notify = notifying.iter().any(|t| t.eq_ignore_ascii_case(&r.tag));
+    }
     rings.sort_by_key(|r| r.at);
     rings.truncate(100);
     axum::Json(json!({ "at": now, "alarms": rings })).into_response()
+}
+
+// Birthdays
+
+/// Every birthday, the next first, and today (for the form's age).
+pub async fn birthdays(State(app): St, headers: HeaderMap) -> Response {
+    if !authed(&app, &headers) {
+        return unauthorized();
+    }
+    let today = crate::birthdays::today();
+    axum::Json(json!({ "today": today.format("%Y-%m-%d").to_string(), "birthdays": crate::birthdays::list(&app.store, today) })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct BirthdayForm {
+    /// Where it is, when editing one.
+    #[serde(default)]
+    calendar: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    person: String,
+    #[serde(default)]
+    month: String,
+    #[serde(default)]
+    day: String,
+    /// Empty when unknown.
+    #[serde(default)]
+    year: String,
+}
+
+pub async fn save_birthday(State(app): St, headers: HeaderMap, form: Result<axum::extract::Form<BirthdayForm>, FormRejection>) -> Response {
+    if !authed(&app, &headers) {
+        return unauthorized();
+    }
+    let Ok(axum::extract::Form(f)) = form else { return refused("not saved: the form is incomplete") };
+    let saved = (|| -> anyhow::Result<(String, String)> {
+        let month: u32 = f.month.trim().parse().map_err(|_| anyhow::anyhow!("pick a month"))?;
+        let day: u32 = f.day.trim().parse().map_err(|_| anyhow::anyhow!("pick a day"))?;
+        let year = match f.year.trim() {
+            "" => None,
+            y => Some(y.parse::<i32>().map_err(|_| anyhow::anyhow!("{y} is not a year"))?),
+        };
+        let existing = (!f.name.is_empty()).then_some((f.calendar.as_str(), f.name.as_str()));
+        crate::birthdays::save(&app.store, existing, &f.person, month, day, year, crate::birthdays::today())
+    })();
+    match saved {
+        Ok((calendar, name)) => axum::Json(json!({ "ok": true, "calendar": calendar, "name": name })).into_response(),
+        Err(e) => refused(format!("{e:#}")),
+    }
 }

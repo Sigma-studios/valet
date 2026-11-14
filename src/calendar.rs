@@ -47,6 +47,9 @@ pub struct Instance {
     pub start: When,
     pub end: When,
     pub repeats: bool,
+    /// A birthday's: the age it is, when its year is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age: Option<i64>,
     /// Called off by its organizer (shown, struck out).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cancelled: bool,
@@ -446,6 +449,7 @@ fn instances_where(o: &Object, from: i64, to: i64, me: &[String], keep: impl Fn(
             start: occ.start,
             end: occ.end,
             repeats: occ.recurrence_id.is_some(),
+            age: age(occ.master.unwrap_or(occ.event), occ.start),
             cancelled: occ.cancelled,
             unanswered: unanswered(occ.event, occ.master, me),
             invite: None,
@@ -525,13 +529,35 @@ pub fn conflicts(ics: &str, objects: &[Object], now: i64) -> Vec<Instance> {
     out
 }
 
-/// An alarm to ring (valet's Android app).
+/// An alarm to ring, or a notification to show (valet's Android app).
 #[derive(Clone, Debug, Serialize)]
 pub struct Ring {
     /// Unix seconds.
     pub at: i64,
     pub title: String,
     pub start: When,
+    /// The pattern it comes from.
+    #[serde(skip)]
+    pub tag: String,
+    /// A notification rather than an alarm.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub notify: bool,
+}
+
+/// What an event marked as a birthday (`X-VALET-BIRTHDAY`, valet's
+/// birthdays) says of the year: `Some(None)` when it isn't known.
+pub fn birthday(ev: &Component) -> Option<Option<i32>> {
+    ev.value("X-VALET-BIRTHDAY").map(|v| v.trim().parse().ok())
+}
+
+/// The age a birthday's occurrence starting `start` is, when its year is known.
+pub fn age(ev: &Component, start: When) -> Option<i64> {
+    let year = birthday(ev)??;
+    let on = match start {
+        When::Day(d) => d.year(),
+        When::At(t) => DateTime::<Utc>::from_timestamp(t, 0)?.year(),
+    };
+    Some(i64::from(on - year)).filter(|a| *a >= 0)
 }
 
 /// The alarms of patterns tagged `tags` that go off within [from, to);
@@ -556,7 +582,11 @@ pub fn rings(o: &Object, tags: &[String], from: i64, to: i64, tz: Tz) -> Vec<Rin
             let Some(offset) = ical::parse_duration(&t.value) else { continue };
             let at = base + offset;
             if at >= from && at < to {
-                out.push(Ring { at, title: e.value("SUMMARY").map(unescape).unwrap_or_default(), start });
+                let mut title = e.value("SUMMARY").or_else(|| occ.master.and_then(|m| m.value("SUMMARY"))).map(unescape).unwrap_or_default();
+                if let Some(n) = age(occ.master.unwrap_or(e), start) {
+                    title = format!("{title} turns {n}");
+                }
+                out.push(Ring { at, title, start, tag: a.value("X-VALET").unwrap_or("").to_string(), notify: false });
             }
         }
     }
